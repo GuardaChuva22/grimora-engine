@@ -3,9 +3,12 @@
 
 use std::f32::consts::TAU;
 
+use std::path::Path;
+
 use grimora_core::{MeshData, Vec3};
 use serde::{Deserialize, Serialize};
 
+use crate::model::load_model;
 use crate::rng::{Rng, value_noise};
 
 /// Which mesh an object uses. Seeded shapes give a different variation per seed.
@@ -64,6 +67,14 @@ pub enum MeshDesc {
         #[serde(default)]
         broken: bool,
     },
+    /// A glTF 2.0 model (`.gltf` or `.glb`), relative to the scene file.
+    /// Keeps the file's own origin and scale. Textures are downscaled to
+    /// `max_texture_size` (default 2048).
+    Model {
+        path: String,
+        #[serde(default)]
+        max_texture_size: u32,
+    },
 }
 
 fn one() -> f32 {
@@ -85,14 +96,30 @@ impl MeshDesc {
             | Self::Plane { .. }
             | Self::Cylinder { .. }
             | Self::Cone { .. }
-            | Self::Sphere { .. } => {}
+            | Self::Sphere { .. }
+            | Self::Model { .. } => {}
         }
         d
     }
 
+    /// Generates the mesh. Model paths are resolved from the current directory;
+    /// scenes use [`MeshDesc::build_in`] to resolve them from the scene file.
     pub fn build(&self) -> MeshData {
+        self.build_in(Path::new(""))
+    }
+
+    /// Like [`MeshDesc::build`], with model paths relative to `dir`. A model that
+    /// fails to load is logged and replaced by a magenta cube, so a scene with a
+    /// broken reference still opens.
+    pub fn build_in(&self, dir: &Path) -> MeshData {
         let white = Vec3::ONE;
         match *self {
+            Self::Model { ref path, max_texture_size } => {
+                load_model(&dir.join(path), max_texture_size).unwrap_or_else(|err| {
+                    log::error!("{err:#}");
+                    cube(Vec3::new(0.0, 0.5, 0.0), Vec3::ONE, Vec3::new(1.0, 0.0, 1.0))
+                })
+            }
             Self::Cube => cube(Vec3::new(0.0, 0.5, 0.0), Vec3::ONE, white),
             Self::Plane { size } => {
                 let h = size * 0.5;

@@ -21,8 +21,9 @@ Outros ângulos: `--camera x,y,z --look-at x,y,z`. A última linha impressa (`[g
 
 ## Mapa do código
 
-- `crates/grimora_core` — tipos compartilhados: `Time`, `Input`, `Transform`, `Camera`, `MeshData`/`Vertex`, `Environment`/`PointLight`.
-- `crates/grimora_render` — `Renderer`. Shaders em `src/shaders/*.wgsl`. Os structs em `uniforms.rs` espelham os structs WGSL campo a campo: altere os dois juntos.
+- `crates/grimora_core` — tipos compartilhados: `Time`, `Input`, `Transform`, `Camera`, `MeshData`/`Vertex`/`Material`/`Submesh`/`TextureData`, `Environment`/`PointLight`.
+- `crates/grimora_render` — `Renderer`. Shaders em `src/shaders/*.wgsl`. Os structs em `uniforms.rs` e `material.rs` espelham os structs WGSL campo a campo: altere os dois juntos. `material.rs` sobe texturas (com mipmaps, cache por `Arc`) e cria o bind group 2 de cada submalha. `Vertex` usa as locations 0-2, 11 e 12; a instância usa 3-10.
+- `crates/grimora_scene/src/model.rs` — importação glTF (`MeshDesc::Model`): achata a cena do arquivo numa `MeshData` com uma submalha por primitiva; cache global por caminho + mtime. Caminhos são relativos ao `.ron` (`Scene::load` → `Scene::build_in`).
 - `crates/grimora_scene` — formato RON (`SceneDesc`), `Scene::build`, terreno (`terrain.rs`), geradores de malha (`shapes.rs`), RNG/ruído determinísticos (`rng.rs`).
 - `crates/grimora_scene/src/collider.rs` — `ColliderDesc` (no arquivo de cena) → `ColliderShape` (forma resolvida, só dados).
 - `crates/grimora_physics` — `Physics` (envolve o `PhysicsWorld` do Rapier: colisores estáticos da cena, raycast, passo fixo de 60 Hz) e `CharacterBody` (cápsula com `KinematicCharacterController`).
@@ -37,6 +38,8 @@ Outros ângulos: `--camera x,y,z --look-at x,y,z`. A última linha impressa (`[g
 - Props gerados têm a origem no centro da base (y = 0). Em cenas com terreno, `position.y` de objetos é relativa ao chão.
 - Faces em sentido anti-horário vistas de fora (back-face culling ativo). `MeshData::push_triangle` gera normais planas — é o visual low poly.
 - Tudo procedural recebe semente: a mesma semente gera sempre o mesmo mundo.
+- Iluminação: o difuso é Lambert sem 1/π (escala original do motor) e o especular GGX é multiplicado por π para combinar. Malhas procedurais usam o `Material` padrão (branco, rugosidade 1, não metálico) e tiram a cor dos vértices; não mude esse padrão sem conferir as capturas.
+- Recursos de terceiros vão em `assets/` com o arquivo de licença ao lado e uma entrada em `CREDITS.md`.
 - Ao adicionar campos a `Environment` ou ao formato de cena, use `#[serde(default)]` para não quebrar cenas existentes e acrescente exemplo/comentário em `sandbox.ron`.
 
 ## Armadilhas do Rapier 0.36

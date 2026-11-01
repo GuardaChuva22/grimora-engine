@@ -28,14 +28,30 @@ struct Globals {
     point_lights: array<PointLight, MAX_POINT_LIGHTS>,
 }
 
+struct MaterialParams {
+    base_color: vec4<f32>,        // linear
+    params: vec4<f32>,            // x metallic, y roughness, z normal scale, w occlusion strength
+    flags: vec4<u32>,             // x has normal map
+}
+
 @group(0) @binding(0) var<uniform> g: Globals;
 @group(1) @binding(0) var shadow_map: texture_depth_2d;
 @group(1) @binding(1) var shadow_sampler: sampler_comparison;
+@group(2) @binding(0) var<uniform> material: MaterialParams;
+@group(2) @binding(1) var base_color_tex: texture_2d<f32>;
+@group(2) @binding(2) var normal_tex: texture_2d<f32>;
+@group(2) @binding(3) var metallic_roughness_tex: texture_2d<f32>;
+@group(2) @binding(4) var occlusion_tex: texture_2d<f32>;
+@group(2) @binding(5) var material_sampler: sampler;
+
+const PI: f32 = 3.14159265;
 
 struct VertexIn {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) color: vec3<f32>,
+    @location(11) uv: vec2<f32>,
+    @location(12) tangent: vec4<f32>,
 }
 
 struct InstanceIn {
@@ -55,6 +71,8 @@ struct VsOut {
     @location(1) normal: vec3<f32>,
     @location(2) albedo: vec3<f32>,
     @location(3) emissive: f32,
+    @location(4) uv: vec2<f32>,
+    @location(5) tangent: vec4<f32>,
 }
 
 fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
@@ -74,6 +92,9 @@ fn vs_main(v: VertexIn, i: InstanceIn) -> VsOut {
     out.normal = normalize(normal_m * v.normal);
     out.albedo = srgb_to_linear(v.color * i.tint.rgb);
     out.emissive = i.tint.a;
+    out.uv = v.uv;
+    // Not normalized here: untextured meshes have a zero tangent.
+    out.tangent = vec4<f32>(normal_m * v.tangent.xyz, v.tangent.w);
     return out;
 }
 
@@ -117,7 +138,52 @@ fn hash13(p: vec3<f32>) -> f32 {
     return fract((p3.x + p3.y) * p3.z);
 }
 
-fn point_lights(world_pos: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
+// ---------------------------------------------------------------- shading
+
+struct Surface {
+    albedo: vec3<f32>,
+    n: vec3<f32>,
+    v: vec3<f32>,
+    metallic: f32,
+    roughness: f32,
+    f0: vec3<f32>,
+}
+
+fn d_ggx(n_dot_h: f32, a: f32) -> f32 {
+    let a2 = a * a;
+    let d = n_dot_h * n_dot_h * (a2 - 1.0) + 1.0;
+    return a2 / (PI * d * d);
+}
+
+// Smith-Schlick visibility, already divided by 4 n.l n.v.
+fn v_smith(n_dot_v: f32, n_dot_l: f32, a: f32) -> f32 {
+    let k = a * 0.5;
+    let gv = n_dot_v / (n_dot_v * (1.0 - k) + k);
+    let gl = n_dot_l / (n_dot_l * (1.0 - k) + k);
+    return gv * gl / max(4.0 * n_dot_v * n_dot_l, 1e-4);
+}
+
+fn fresnel(f0: vec3<f32>, cos_theta: f32) -> vec3<f32> {
+    return f0 + (1.0 - f0) * pow(1.0 - cos_theta, 5.0);
+}
+
+// Light leaving the surface towards the eye for one light of `radiance`.
+// Diffuse keeps the engine's original Lambert scale (no 1/pi), so specular is
+// scaled by pi to match. `wrap` softens the terminator for stylized fill lights.
+fn shade(s: Surface, l: vec3<f32>, radiance: vec3<f32>, wrap: f32) -> vec3<f32> {
+    let n_dot_l_raw = dot(s.n, l);
+    let n_dot_l = max(n_dot_l_raw, 0.0);
+    let diffuse_term = max(n_dot_l_raw * (1.0 - wrap) + wrap, 0.0);
+    let h = normalize(l + s.v);
+    let n_dot_v = max(dot(s.n, s.v), 1e-4);
+    let a = max(s.roughness * s.roughness, 0.002);
+    let f = fresnel(s.f0, max(dot(s.v, h), 0.0));
+    let specular = d_ggx(max(dot(s.n, h), 0.0), a) * v_smith(n_dot_v, n_dot_l, a) * f * PI * n_dot_l;
+    let diffuse = s.albedo * (1.0 - s.metallic) * (1.0 - f) * diffuse_term;
+    return (diffuse + specular) * radiance;
+}
+
+fn point_lights(world_pos: vec3<f32>, s: Surface) -> vec3<f32> {
     var total = vec3<f32>(0.0);
     let t = g.camera_pos.w;
     for (var i = 0u; i < g.counts.x; i++) {
@@ -137,10 +203,20 @@ fn point_lights(world_pos: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
         let wobble = 0.5 + 0.5 * sin(t * 11.0 + seed) * sin(t * 6.7 + seed * 1.7);
         let flicker = 1.0 - pl.params.x * 0.35 * wobble;
 
-        let wrap = max(dot(n, l) * 0.8 + 0.2, 0.0);
-        total += pl.color_intensity.rgb * pl.color_intensity.w * atten * wrap * flicker;
+        total += shade(s, l, pl.color_intensity.rgb * pl.color_intensity.w * atten * flicker, 0.2);
     }
     return total;
+}
+
+fn sky_gradient(dir: vec3<f32>) -> vec3<f32> {
+    if dir.y >= 0.0 {
+        return mix(g.sky_horizon.rgb, g.sky_zenith.rgb, pow(dir.y, 0.5));
+    }
+    return mix(g.sky_horizon.rgb, g.sky_ground.rgb, pow(-dir.y, 0.4));
+}
+
+fn hemisphere(dir: vec3<f32>) -> vec3<f32> {
+    return mix(g.ambient_ground.rgb, g.ambient_sky.rgb, dir.y * 0.5 + 0.5);
 }
 
 fn apply_fog(color: vec3<f32>, world_pos: vec3<f32>) -> vec3<f32> {
@@ -166,16 +242,48 @@ fn apply_fog(color: vec3<f32>, world_pos: vec3<f32>) -> vec3<f32> {
 }
 
 @fragment
-fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let n = normalize(in.normal);
-    let l = g.sun_dir.xyz;
-    let ndl = max(dot(n, l), 0.0);
-    let shadow = shadow_factor(in.world_pos, n);
+fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    // Sample every texture up front: sampling must stay in uniform control flow.
+    let base_sample = textureSample(base_color_tex, material_sampler, in.uv);
+    let normal_sample = textureSample(normal_tex, material_sampler, in.uv).xyz;
+    let mr_sample = textureSample(metallic_roughness_tex, material_sampler, in.uv);
+    let occlusion_sample = textureSample(occlusion_tex, material_sampler, in.uv).r;
 
-    let hemi = mix(g.ambient_ground.rgb, g.ambient_sky.rgb, n.y * 0.5 + 0.5);
-    let light = g.sun_color.rgb * ndl * shadow + hemi + point_lights(in.world_pos, n);
+    var n = normalize(in.normal);
+    if !front {
+        n = -n;
+    }
+    if material.flags.x == 1u {
+        // Gram-Schmidt keeps the interpolated tangent perpendicular to the normal.
+        let t = normalize(in.tangent.xyz - n * dot(n, in.tangent.xyz));
+        let b = cross(n, t) * in.tangent.w;
+        var tn = normal_sample * 2.0 - 1.0;
+        tn = vec3<f32>(tn.xy * material.params.z, tn.z);
+        n = normalize(t * tn.x + b * tn.y + n * tn.z);
+    }
 
-    var color = in.albedo * light + in.albedo * in.emissive;
+    var s: Surface;
+    s.albedo = in.albedo * base_sample.rgb * material.base_color.rgb;
+    s.n = n;
+    s.v = normalize(g.camera_pos.xyz - in.world_pos);
+    s.metallic = material.params.x * mr_sample.b;
+    s.roughness = clamp(material.params.y * mr_sample.g, 0.04, 1.0);
+    s.f0 = mix(vec3<f32>(0.04), s.albedo, s.metallic);
+    let occlusion = mix(1.0, occlusion_sample, material.params.w);
+
+    let shadow = shadow_factor(in.world_pos, in.normal);
+    var color = shade(s, g.sun_dir.xyz, g.sun_color.rgb * shadow, 0.0);
+    color += point_lights(in.world_pos, s);
+
+    // Ambient: hemisphere light for diffuse, a blurred sky for reflections.
+    let n_dot_v = max(dot(s.n, s.v), 1e-4);
+    let r = reflect(-s.v, s.n);
+    let environment = mix(sky_gradient(r), hemisphere(r), s.roughness);
+    let f_ambient = s.f0 + (max(vec3<f32>(1.0 - s.roughness), s.f0) - s.f0) * pow(1.0 - n_dot_v, 5.0);
+    let ambient = hemisphere(s.n) * s.albedo * (1.0 - s.metallic) + environment * f_ambient * (1.0 - s.roughness * 0.5);
+    color += ambient * occlusion;
+
+    color += s.albedo * in.emissive;
     color = apply_fog(color, in.world_pos);
     return vec4<f32>(color, 1.0);
 }
@@ -203,12 +311,7 @@ fn fs_sky(in: SkyOut) -> @location(0) vec4<f32> {
     let far = g.inv_view_proj * vec4<f32>(in.ndc, 1.0, 1.0);
     let dir = normalize(far.xyz / far.w - g.camera_pos.xyz);
 
-    var color: vec3<f32>;
-    if dir.y >= 0.0 {
-        color = mix(g.sky_horizon.rgb, g.sky_zenith.rgb, pow(dir.y, 0.5));
-    } else {
-        color = mix(g.sky_horizon.rgb, g.sky_ground.rgb, pow(-dir.y, 0.4));
-    }
+    var color = sky_gradient(dir);
 
     let cos_sun = dot(dir, g.sun_dir.xyz);
     let disc = smoothstep(g.sun_disc.x, g.sun_disc.x + 0.0004, cos_sun);

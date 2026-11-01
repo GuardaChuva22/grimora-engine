@@ -4,6 +4,7 @@ use image::RgbaImage;
 use wgpu::util::DeviceExt as _;
 
 use crate::bloom::Bloom;
+use crate::material::{GpuMaterial, MaterialCache};
 use crate::uniforms::{self, Globals, InstanceRaw, PostParams};
 use crate::{DEPTH_FORMAT, HDR_FORMAT};
 
@@ -59,6 +60,8 @@ struct GpuMesh {
     vertices: wgpu::Buffer,
     indices: wgpu::Buffer,
     index_count: u32,
+    /// Index range and index into `Renderer::materials`.
+    submeshes: Vec<(std::ops::Range<u32>, usize)>,
 }
 
 struct Targets {
@@ -91,6 +94,7 @@ pub struct Renderer {
     linear_sampler: wgpu::Sampler,
 
     mesh_pipeline: wgpu::RenderPipeline,
+    mesh_pipeline_double_sided: wgpu::RenderPipeline,
     sky_pipeline: wgpu::RenderPipeline,
     shadow_pipeline: wgpu::RenderPipeline,
     tonemap_pipeline: wgpu::RenderPipeline,
@@ -98,6 +102,8 @@ pub struct Renderer {
     targets: Targets,
     bloom: Bloom,
     meshes: Vec<GpuMesh>,
+    materials: Vec<GpuMaterial>,
+    material_cache: MaterialCache,
     instance_buffer: wgpu::Buffer,
     instance_capacity: usize,
     instances: Vec<InstanceRaw>,
@@ -259,8 +265,14 @@ impl Renderer {
             label: Some("post"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/post.wgsl").into()),
         });
+        let material_cache = MaterialCache::new(&device, &queue);
         let scene_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("scene"),
+            bind_group_layouts: &[Some(&globals_layout), Some(&shadow_layout), Some(&material_cache.layout)],
+            immediate_size: 0,
+        });
+        let sky_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("sky"),
             bind_group_layouts: &[Some(&globals_layout), Some(&shadow_layout)],
             immediate_size: 0,
         });
@@ -280,30 +292,34 @@ impl Renderer {
         let hdr_target =
             [Some(wgpu::ColorTargetState { format: HDR_FORMAT, blend: None, write_mask: wgpu::ColorWrites::ALL })];
 
-        let mesh_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("mesh"),
-            layout: Some(&scene_layout),
-            vertex: wgpu::VertexState {
-                module: &scene_shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &mesh_buffers,
-            },
-            primitive: wgpu::PrimitiveState { cull_mode: Some(wgpu::Face::Back), ..Default::default() },
-            depth_stencil: Some(depth_state(true, wgpu::CompareFunction::Less, Default::default())),
-            multisample,
-            fragment: Some(wgpu::FragmentState {
-                module: &scene_shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &hdr_target,
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+        let mesh_pipeline_with = |label, cull_mode| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&scene_layout),
+                vertex: wgpu::VertexState {
+                    module: &scene_shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &mesh_buffers,
+                },
+                primitive: wgpu::PrimitiveState { cull_mode, ..Default::default() },
+                depth_stencil: Some(depth_state(true, wgpu::CompareFunction::Less, Default::default())),
+                multisample,
+                fragment: Some(wgpu::FragmentState {
+                    module: &scene_shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &hdr_target,
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let mesh_pipeline = mesh_pipeline_with("mesh", Some(wgpu::Face::Back));
+        let mesh_pipeline_double_sided = mesh_pipeline_with("mesh double-sided", None);
         let sky_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("sky"),
-            layout: Some(&scene_layout),
+            layout: Some(&sky_layout),
             vertex: wgpu::VertexState {
                 module: &scene_shader,
                 entry_point: Some("vs_sky"),
@@ -388,12 +404,15 @@ impl Renderer {
             post_group,
             linear_sampler,
             mesh_pipeline,
+            mesh_pipeline_double_sided,
             sky_pipeline,
             shadow_pipeline,
             tonemap_pipeline,
             targets,
             bloom,
             meshes: Vec::new(),
+            materials: Vec::new(),
+            material_cache,
             instance_buffer,
             instance_capacity,
             instances: Vec::new(),
@@ -448,13 +467,24 @@ impl Renderer {
             contents: bytemuck::cast_slice(&mesh.indices),
             usage: wgpu::BufferUsages::INDEX,
         });
-        self.meshes.push(GpuMesh { vertices, indices, index_count: mesh.indices.len() as u32 });
+        let submeshes = mesh
+            .draw_ranges()
+            .into_iter()
+            .map(|sub| {
+                let gpu = self.material_cache.create(&self.device, &self.queue, &mesh.material(sub.material));
+                self.materials.push(gpu);
+                (sub.indices, self.materials.len() - 1)
+            })
+            .collect();
+        self.meshes.push(GpuMesh { vertices, indices, index_count: mesh.indices.len() as u32, submeshes });
         MeshHandle(self.meshes.len() as u32 - 1)
     }
 
     /// Frees every uploaded mesh. Existing [`MeshHandle`]s become invalid.
     pub fn clear_meshes(&mut self) {
         self.meshes.clear();
+        self.materials.clear();
+        self.material_cache.clear();
     }
 
     /// Renders and presents a frame. With `capture`, also returns the final image
@@ -502,7 +532,7 @@ impl Renderer {
             });
             pass.set_pipeline(&self.shadow_pipeline);
             pass.set_bind_group(0, &self.globals_group, &[]);
-            self.draw_batches(&mut pass);
+            self.draw_batches(&mut pass, false);
         }
 
         {
@@ -532,8 +562,7 @@ impl Renderer {
             pass.set_bind_group(1, &self.shadow_group, &[]);
             pass.set_pipeline(&self.sky_pipeline);
             pass.draw(0..3, 0..1);
-            pass.set_pipeline(&self.mesh_pipeline);
-            self.draw_batches(&mut pass);
+            self.draw_batches(&mut pass, true);
         }
 
         self.bloom.render(&mut encoder);
@@ -660,13 +689,32 @@ impl Renderer {
         };
     }
 
-    fn draw_batches(&self, pass: &mut wgpu::RenderPass<'_>) {
+    /// Draws every batch. With `materials`, binds each submesh's material and
+    /// picks the culling mode; the shadow pass draws whole meshes instead.
+    fn draw_batches(&self, pass: &mut wgpu::RenderPass<'_>, materials: bool) {
         pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
+        let mut double_sided = None;
         for batch in &self.batches {
             let mesh = &self.meshes[batch.mesh.0 as usize];
             pass.set_vertex_buffer(0, mesh.vertices.slice(..));
             pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..mesh.index_count, 0, batch.instances.clone());
+            if !materials {
+                pass.draw_indexed(0..mesh.index_count, 0, batch.instances.clone());
+                continue;
+            }
+            for (range, material) in &mesh.submeshes {
+                let material = &self.materials[*material];
+                if double_sided != Some(material.double_sided) {
+                    double_sided = Some(material.double_sided);
+                    pass.set_pipeline(if material.double_sided {
+                        &self.mesh_pipeline_double_sided
+                    } else {
+                        &self.mesh_pipeline
+                    });
+                }
+                pass.set_bind_group(2, &material.bind_group, &[]);
+                pass.draw_indexed(range.clone(), 0, batch.instances.clone());
+            }
         }
     }
 }

@@ -4,6 +4,7 @@
 //! bloom mip chain → tonemap/grade onto the window surface.
 
 mod bloom;
+mod material;
 mod renderer;
 mod uniforms;
 

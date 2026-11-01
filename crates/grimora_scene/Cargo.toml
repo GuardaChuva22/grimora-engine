@@ -10,6 +10,9 @@ glam.workspace = true
 serde.workspace = true
 ron.workspace = true
 anyhow.workspace = true
+log.workspace = true
+gltf.workspace = true
+image.workspace = true
 
 [lints]
 workspace = true

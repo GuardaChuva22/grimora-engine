@@ -92,9 +92,11 @@ impl ColliderDesc {
                     ColliderShape::Cylinder { center: Vec3::Y * 1.2, radius: 0.22, half_height: 1.2 }
                 }
                 MeshDesc::Wanderer => return None,
-                MeshDesc::Cone { .. } | MeshDesc::Rock { .. } | MeshDesc::Crystal { .. } | MeshDesc::Pillar { .. } => {
-                    ColliderShape::hull(mesh)
-                }
+                MeshDesc::Cone { .. }
+                | MeshDesc::Rock { .. }
+                | MeshDesc::Crystal { .. }
+                | MeshDesc::Pillar { .. }
+                | MeshDesc::Model { .. } => ColliderShape::hull(mesh),
             }),
         }
     }

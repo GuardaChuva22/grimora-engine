@@ -80,8 +80,9 @@ impl InstanceRaw {
     }
 }
 
-pub const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 3] =
-    wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x3];
+// Field order of `grimora_core::Vertex`: position, normal, color, uv, tangent.
+pub const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 5] =
+    wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x3, 11 => Float32x2, 12 => Float32x4];
 
 pub fn vertex_layout() -> wgpu::VertexBufferLayout<'static> {
     wgpu::VertexBufferLayout {

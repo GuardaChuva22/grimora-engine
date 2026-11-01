@@ -5,18 +5,20 @@
 //! See `assets/scenes/sandbox.ron` for a commented example.
 
 mod collider;
+mod model;
 mod rng;
 mod shapes;
 mod terrain;
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 use grimora_core::{Camera, Environment, MeshData, PointLight, Transform, Vec3};
 use serde::{Deserialize, Serialize};
 
 pub use collider::{ColliderDesc, ColliderShape};
+pub use model::{DEFAULT_MAX_TEXTURE_SIZE, load_model};
 pub use rng::{Rng, fbm, value_noise};
 pub use shapes::{MeshDesc, blob, cube, tube};
 pub use terrain::{Terrain, TerrainDesc};
@@ -202,12 +204,20 @@ impl SceneDesc {
 }
 
 impl Scene {
+    /// Loads and builds a scene file. Model paths are relative to its directory.
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
-        Ok(Self::build(&SceneDesc::load(path)?))
+        let path = path.as_ref();
+        Ok(Self::build_in(&SceneDesc::load(path)?, path.parent().unwrap_or(Path::new(""))))
     }
 
+    /// Builds a scene, resolving model paths from the current directory.
     pub fn build(desc: &SceneDesc) -> Self {
-        let mut builder = Builder::default();
+        Self::build_in(desc, Path::new(""))
+    }
+
+    /// Builds a scene, resolving model paths from `dir`.
+    pub fn build_in(desc: &SceneDesc, dir: &Path) -> Self {
+        let mut builder = Builder { dir: dir.to_path_buf(), ..Default::default() };
         let terrain = desc.terrain.clone().map(Terrain::new);
         if let Some(terrain) = &terrain {
             let mesh = builder.meshes.len();
@@ -328,6 +338,8 @@ struct Builder {
     meshes: Vec<MeshData>,
     objects: Vec<SceneObject>,
     cache: HashMap<String, usize>,
+    /// Directory model paths are relative to.
+    dir: PathBuf,
 }
 
 impl Builder {
@@ -336,7 +348,7 @@ impl Builder {
         if let Some(&index) = self.cache.get(&key) {
             return index;
         }
-        self.meshes.push(desc.build());
+        self.meshes.push(desc.build_in(&self.dir));
         self.cache.insert(key, self.meshes.len() - 1);
         self.meshes.len() - 1
     }
