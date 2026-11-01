@@ -1,4 +1,5 @@
 use grimora_core::{Environment, MeshData, PointLight, Transform, Vec3};
+use grimora_physics::Physics;
 use grimora_scene::{PlayerSpawn, Scene, Terrain};
 
 /// Index of a mesh stored in the [`World`].
@@ -80,6 +81,19 @@ impl World {
 
     pub fn find_mut(&mut self, name: &str) -> Option<&mut Object> {
         self.objects.iter_mut().find(|o| o.name.as_deref() == Some(name))
+    }
+
+    /// Copies the pose of every scene object simulated by `physics` (see
+    /// [`Physics::scene_bodies`]) into its transform, keeping its scale.
+    /// The engine calls this after each physics step.
+    pub fn sync_bodies(&mut self, physics: &Physics) {
+        for scene_body in physics.scene_bodies() {
+            let Some((position, rotation)) = physics.body_pose(scene_body.body) else { continue };
+            if let Some(object) = self.objects.get_mut(scene_body.object) {
+                object.transform.position = position;
+                object.transform.rotation = rotation;
+            }
+        }
     }
 
     /// Ground height at `(x, z)`, or 0 without terrain.

@@ -26,7 +26,8 @@ pub struct Context {
     pub input: Input,
     pub camera: Camera,
     pub world: World,
-    /// Collision world built from the scene's colliders; stepped before `update`.
+    /// Collision world built from the scene's colliders; stepped before `update`,
+    /// after which dynamic bodies' poses are copied into `world`.
     pub physics: Physics,
     config: EngineConfig,
     exit: bool,
@@ -225,6 +226,7 @@ impl<G: Game> App<G> {
         }
 
         self.ctx.physics.step(self.ctx.time.delta());
+        self.ctx.world.sync_bodies(&self.ctx.physics);
         self.game.update(&mut self.ctx);
         self.apply_cursor_grab();
 

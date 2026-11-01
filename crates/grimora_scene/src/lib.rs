@@ -17,7 +17,7 @@ use anyhow::{Context as _, Result};
 use grimora_core::{Camera, Environment, MeshData, PointLight, Transform, Vec3};
 use serde::{Deserialize, Serialize};
 
-pub use collider::{ColliderDesc, ColliderShape};
+pub use collider::{BodyDesc, ColliderDesc, ColliderShape};
 pub use model::{DEFAULT_MAX_TEXTURE_SIZE, load_model};
 pub use rng::{Rng, fbm, value_noise};
 pub use shapes::{MeshDesc, blob, cube, tube};
@@ -93,6 +93,8 @@ pub struct ObjectDesc {
     /// world units, rotated with the object (not scaled).
     pub light: Option<PointLight>,
     pub collider: ColliderDesc,
+    /// `Dynamic(...)` makes the object fall and get pushed around; needs a collider.
+    pub body: BodyDesc,
 }
 
 impl Default for ObjectDesc {
@@ -108,6 +110,7 @@ impl Default for ObjectDesc {
             snap_to_ground: true,
             light: None,
             collider: ColliderDesc::Auto,
+            body: BodyDesc::Static,
         }
     }
 }
@@ -173,6 +176,8 @@ pub struct SceneObject {
     pub emissive: f32,
     /// Collision shape in local space; the transform (scale included) still applies.
     pub collider: Option<ColliderShape>,
+    /// Dynamic objects are moved by the physics simulation.
+    pub body: BodyDesc,
 }
 
 /// A scene ready to render: unique meshes plus the instances that use them.
@@ -230,6 +235,7 @@ impl Scene {
                 color: Vec3::ONE,
                 emissive: 0.0,
                 collider,
+                body: BodyDesc::Static,
             });
         }
         let ground = |x: f32, z: f32| terrain.as_ref().map_or(0.0, |t| t.height_at(x, z));
@@ -250,6 +256,7 @@ impl Scene {
                 color: obj.color,
                 emissive: obj.emissive,
                 collider,
+                body: obj.body,
             });
             if let Some(light) = &obj.light {
                 lights.push(attached_light(light, &transform));
@@ -283,6 +290,7 @@ impl Scene {
                     color: scatter.color * (1.0 + rng.jitter(scatter.color_jitter)),
                     emissive: scatter.emissive,
                     collider,
+                    body: BodyDesc::Static,
                 });
                 if let Some(light) = &scatter.light {
                     lights.push(attached_light(light, &transform));
@@ -393,6 +401,21 @@ mod tests {
         let desc = SceneDesc::parse(SAMPLE).unwrap();
         let again = SceneDesc::parse(&desc.to_ron().unwrap()).unwrap();
         assert_eq!(desc, again);
+    }
+
+    #[test]
+    fn parses_dynamic_bodies() {
+        let desc = SceneDesc::parse(
+            "(objects: [(mesh: Cube), (mesh: Cube, body: Dynamic()), (mesh: Sphere(), body: Dynamic(mass: 40.0))])",
+        )
+        .unwrap();
+        let bodies: Vec<BodyDesc> = Scene::build(&desc).objects.iter().map(|o| o.body).collect();
+        assert_eq!(bodies[0], BodyDesc::Static);
+        assert_eq!(
+            bodies[1],
+            BodyDesc::Dynamic { density: 1000.0, mass: None, friction: 0.6, restitution: 0.0, angular_damping: 0.5 }
+        );
+        assert!(matches!(bodies[2], BodyDesc::Dynamic { mass: Some(40.0), .. }));
     }
 
     #[test]

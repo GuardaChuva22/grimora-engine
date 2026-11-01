@@ -103,7 +103,7 @@ impl Game for Sandbox {
         let Some(player) = self.player.as_mut() else { return };
         match self.mode {
             Mode::Play => {
-                player.update(&ctx.input, &ctx.physics, &mut ctx.camera, dt);
+                player.update(&ctx.input, &mut ctx.physics, &mut ctx.camera, dt);
                 ctx.set_cursor_grab(!automated);
             }
             Mode::Fly => {

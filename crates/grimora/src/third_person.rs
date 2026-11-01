@@ -57,8 +57,9 @@ impl ThirdPersonController {
         Transform { position: self.body.position, rotation: Quat::from_rotation_y(self.facing), scale: Vec3::ONE }
     }
 
-    /// Reads input, moves the body through `physics` and places `camera`.
-    pub fn update(&mut self, input: &Input, physics: &Physics, camera: &mut Camera, dt: f32) {
+    /// Reads input, moves the body through `physics` (pushing dynamic bodies
+    /// in the way) and places `camera`.
+    pub fn update(&mut self, input: &Input, physics: &mut Physics, camera: &mut Camera, dt: f32) {
         let look = input.mouse_delta() * self.sensitivity;
         self.camera_yaw -= look.x;
         self.camera_pitch = (self.camera_pitch - look.y).clamp(-1.2, 0.6);

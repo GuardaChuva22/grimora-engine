@@ -15,8 +15,15 @@ fn setup() -> (Scene, Physics, ThirdPersonController, Camera) {
     (scene, physics, player, Camera::default())
 }
 
-fn run(player: &mut ThirdPersonController, physics: &Physics, camera: &mut Camera, input: &mut Input, seconds: f32) {
+fn run(
+    player: &mut ThirdPersonController,
+    physics: &mut Physics,
+    camera: &mut Camera,
+    input: &mut Input,
+    seconds: f32,
+) {
     for _ in 0..(seconds / DT) as u32 {
+        physics.step(DT);
         player.update(input, physics, camera, DT);
         input.end_frame();
     }
@@ -24,8 +31,8 @@ fn run(player: &mut ThirdPersonController, physics: &Physics, camera: &mut Camer
 
 #[test]
 fn settles_on_the_terrain() {
-    let (scene, physics, mut player, mut camera) = setup();
-    run(&mut player, &physics, &mut camera, &mut Input::default(), 1.0);
+    let (scene, mut physics, mut player, mut camera) = setup();
+    run(&mut player, &mut physics, &mut camera, &mut Input::default(), 1.0);
     let p = player.body.position;
     assert!(player.body.grounded);
     assert!(
@@ -38,10 +45,10 @@ fn settles_on_the_terrain() {
 
 #[test]
 fn walking_forward_stops_at_the_altar() {
-    let (scene, physics, mut player, mut camera) = setup();
+    let (scene, mut physics, mut player, mut camera) = setup();
     let mut input = Input::default();
     input.key_down(KeyCode::KeyW);
-    run(&mut player, &physics, &mut camera, &mut input, 6.0);
+    run(&mut player, &mut physics, &mut camera, &mut input, 6.0);
 
     let p = player.body.position;
     // The altar is 1.5 deep centered on z = 0; the capsule radius is 0.35.
@@ -55,15 +62,16 @@ fn walking_forward_stops_at_the_altar() {
 
 #[test]
 fn jumps_and_lands() {
-    let (_, physics, mut player, mut camera) = setup();
+    let (_, mut physics, mut player, mut camera) = setup();
     let mut input = Input::default();
-    run(&mut player, &physics, &mut camera, &mut input, 0.5);
+    run(&mut player, &mut physics, &mut camera, &mut input, 0.5);
     let ground = player.body.position.y;
 
     input.key_down(KeyCode::Space);
     let mut peak = ground;
     for _ in 0..90 {
-        player.update(&input, &physics, &mut camera, DT);
+        physics.step(DT);
+        player.update(&input, &mut physics, &mut camera, DT);
         input.end_frame();
         peak = peak.max(player.body.position.y);
     }
@@ -73,14 +81,14 @@ fn jumps_and_lands() {
 
 #[test]
 fn camera_is_pulled_in_front_of_walls() {
-    let (_, physics, mut player, mut camera) = setup();
+    let (_, mut physics, mut player, mut camera) = setup();
     // Stand right in front of the altar facing away from it, so the camera's
     // default spot (5.5 units behind) is inside/behind the altar.
     player.body.position = Vec3::new(0.0, player.body.position.y, 1.5);
     player.facing = std::f32::consts::PI;
     player.camera_yaw = std::f32::consts::PI;
     player.camera_pitch = -0.05;
-    run(&mut player, &physics, &mut camera, &mut Input::default(), 1.0);
+    run(&mut player, &mut physics, &mut camera, &mut Input::default(), 1.0);
     let distance = (camera.position - (player.body.position + Vec3::Y * player.camera_height)).length();
     assert!(distance < 4.0, "camera stayed {distance} away, inside the altar");
 }

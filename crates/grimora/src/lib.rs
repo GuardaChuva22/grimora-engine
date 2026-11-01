@@ -57,6 +57,6 @@ pub mod prelude {
         Camera, Environment, EulerRot, Input, KeyCode, Mat4, MeshData, MouseButton, PointLight, Quat, Time, Transform,
         Vec2, Vec3, Vec4,
     };
-    pub use grimora_physics::{CharacterBody, Physics, RayHit};
-    pub use grimora_scene::MeshDesc;
+    pub use grimora_physics::{BodyHandle, CharacterBody, Physics, RayHit};
+    pub use grimora_scene::{BodyDesc, MeshDesc};
 }

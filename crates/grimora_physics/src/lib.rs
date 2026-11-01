@@ -1,19 +1,47 @@
 //! Collision and character movement for Grimora, built on Rapier.
 //!
-//! [`Physics`] holds the collision world (built from a scene's colliders) and
-//! answers queries; [`CharacterBody`] is a capsule that walks, slides along
-//! walls, climbs steps and slopes, and snaps to the ground.
+//! [`Physics`] holds the collision world (built from a scene's colliders),
+//! simulates dynamic bodies and answers queries; [`CharacterBody`] is a capsule
+//! that walks, slides along walls, climbs steps and slopes, snaps to the ground
+//! and pushes dynamic bodies out of its way.
 
 use grimora_core::{Quat, Transform, Vec3};
-use grimora_scene::{ColliderShape, Scene};
-use rapier3d::control::{CharacterAutostep, CharacterLength, KinematicCharacterController};
+use grimora_scene::{BodyDesc, ColliderShape, Scene};
+use rapier3d::control::{CharacterAutostep, CharacterCollision, CharacterLength, KinematicCharacterController};
 use rapier3d::math::{Pose, Rotation, Vector};
 use rapier3d::parry::query::Ray;
 use rapier3d::parry::shape::Capsule;
-use rapier3d::prelude::{ColliderBuilder, PhysicsWorld, QueryFilter};
+use rapier3d::prelude::{ColliderBuilder, PhysicsWorld, QueryFilter, RigidBodyBuilder, RigidBodyHandle};
 
 pub use rapier3d;
 pub use rapier3d::prelude::ColliderHandle;
+
+/// Builds the collider for `shape` with `transform`'s scale baked in, plus its
+/// offset from the object's origin in the object's (unrotated) frame.
+fn collider(shape: &ColliderShape, transform: &Transform) -> Option<(ColliderBuilder, Vec3)> {
+    let (builder, center) = match shape.scaled(transform) {
+        ColliderShape::Cuboid { center, half_extents: h } => (Some(ColliderBuilder::cuboid(h.x, h.y, h.z)), center),
+        ColliderShape::Cylinder { center, radius, half_height } => {
+            (Some(ColliderBuilder::cylinder(half_height, radius)), center)
+        }
+        ColliderShape::Ball { center, radius } => (Some(ColliderBuilder::ball(radius)), center),
+        ColliderShape::ConvexHull { points } => {
+            let points: Vec<Vector> = points.into_iter().map(to_rapier).collect();
+            (ColliderBuilder::convex_hull(&points), Vec3::ZERO)
+        }
+        ColliderShape::TriMesh { vertices, indices } => {
+            let vertices = vertices.into_iter().map(to_rapier).collect();
+            let builder = ColliderBuilder::trimesh(vertices, indices)
+                .inspect_err(|e| log::warn!("skipping triangle mesh collider: {e}"))
+                .ok();
+            (builder, Vec3::ZERO)
+        }
+    };
+    if builder.is_none() {
+        log::warn!("skipping degenerate collider at {}", transform.position);
+    }
+    Some((builder?, center))
+}
 
 /// Rapier uses its own copy of glam, so values cross the boundary as plain floats.
 fn to_rapier(v: Vec3) -> Vector {
@@ -37,10 +65,23 @@ pub struct RayHit {
     pub normal: Vec3,
 }
 
+/// A body moved by the simulation, from [`Physics::add_body`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BodyHandle(RigidBodyHandle);
+
+/// A dynamic body created for a scene object by [`Physics::from_scene`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SceneBody {
+    /// Index into `Scene::objects` (the engine's `World::objects` keeps the same order).
+    pub object: usize,
+    pub body: BodyHandle,
+}
+
 /// The collision world.
 pub struct Physics {
     world: PhysicsWorld,
     accumulator: f32,
+    scene_bodies: Vec<SceneBody>,
 }
 
 impl Default for Physics {
@@ -57,15 +98,25 @@ impl Physics {
     pub fn new() -> Self {
         let mut world = PhysicsWorld::new();
         world.integration_parameters.dt = Self::FIXED_DT;
-        Self { world, accumulator: 0.0 }
+        world.gravity = Vector::new(0.0, -9.81, 0.0);
+        Self { world, accumulator: 0.0, scene_bodies: Vec::new() }
     }
 
-    /// Adds every collider of `scene` as static geometry.
+    /// Adds every collider of `scene`: static geometry, or a dynamic body for
+    /// objects marked `body: Dynamic(...)` (listed in [`Physics::scene_bodies`]).
     pub fn from_scene(scene: &Scene) -> Self {
         let mut physics = Self::new();
-        for object in &scene.objects {
-            if let Some(shape) = &object.collider {
-                physics.add_static(shape, &object.transform);
+        for (index, object) in scene.objects.iter().enumerate() {
+            match &object.collider {
+                Some(shape) => {
+                    if let Some(body) = physics.add_body(shape, &object.transform, &object.body) {
+                        physics.scene_bodies.push(SceneBody { object: index, body });
+                    }
+                }
+                None if object.body.is_dynamic() => {
+                    log::warn!("object {:?} is dynamic but has no collider; it will not move", object.name);
+                }
+                None => {}
             }
         }
         physics.refresh();
@@ -75,33 +126,59 @@ impl Physics {
     /// Adds immovable geometry. Queries see it after the next [`Physics::step`]
     /// or [`Physics::refresh`].
     pub fn add_static(&mut self, shape: &ColliderShape, transform: &Transform) -> Option<ColliderHandle> {
-        let offset = |center: Vec3| transform.position + transform.rotation * center;
-        let (builder, position) = match shape.scaled(transform) {
-            ColliderShape::Cuboid { center, half_extents: h } => {
-                (Some(ColliderBuilder::cuboid(h.x, h.y, h.z)), offset(center))
-            }
-            ColliderShape::Cylinder { center, radius, half_height } => {
-                (Some(ColliderBuilder::cylinder(half_height, radius)), offset(center))
-            }
-            ColliderShape::Ball { center, radius } => (Some(ColliderBuilder::ball(radius)), offset(center)),
-            ColliderShape::ConvexHull { points } => {
-                let points: Vec<Vector> = points.into_iter().map(to_rapier).collect();
-                (ColliderBuilder::convex_hull(&points), transform.position)
-            }
-            ColliderShape::TriMesh { vertices, indices } => {
-                let vertices = vertices.into_iter().map(to_rapier).collect();
-                let builder = ColliderBuilder::trimesh(vertices, indices)
-                    .inspect_err(|e| log::warn!("skipping triangle mesh collider: {e}"))
-                    .ok();
-                (builder, transform.position)
-            }
-        };
-        let Some(builder) = builder else {
-            log::warn!("skipping degenerate collider at {}", transform.position);
-            return None;
-        };
+        let (builder, center) = collider(shape, transform)?;
+        let position = transform.position + transform.rotation * center;
         let pose = Pose::from_parts(to_rapier(position), rotation(transform.rotation));
         Some(self.world.insert_collider(builder.position(pose), None))
+    }
+
+    /// Adds an object's collider moving as `body` says. Static bodies become fixed
+    /// geometry (like [`Physics::add_static`]) and return `None`; dynamic ones return
+    /// a handle for reading their pose back. Triangle meshes can't be dynamic, so
+    /// they fall back to their convex hull.
+    pub fn add_body(&mut self, shape: &ColliderShape, transform: &Transform, body: &BodyDesc) -> Option<BodyHandle> {
+        let BodyDesc::Dynamic { density, mass, friction, restitution, angular_damping } = *body else {
+            self.add_static(shape, transform);
+            return None;
+        };
+        let hull;
+        let shape = match shape {
+            ColliderShape::TriMesh { vertices, .. } => {
+                log::warn!("dynamic body at {} can't use a triangle mesh; using its convex hull", transform.position);
+                hull = ColliderShape::ConvexHull { points: vertices.clone() };
+                &hull
+            }
+            shape => shape,
+        };
+        let (builder, center) = collider(shape, transform)?;
+        // The body sits at the object's origin, so its pose is the render transform.
+        let builder = builder.translation(to_rapier(center)).friction(friction).restitution(restitution);
+        let builder = match mass {
+            Some(mass) => builder.mass(mass),
+            None => builder.density(density),
+        };
+        let pose = Pose::from_parts(to_rapier(transform.position), rotation(transform.rotation));
+        let (handle, _) =
+            self.world.insert(RigidBodyBuilder::dynamic().pose(pose).angular_damping(angular_damping), builder);
+        Some(BodyHandle(handle))
+    }
+
+    /// Position and rotation of a dynamic body's origin (its object's origin).
+    pub fn body_pose(&self, body: BodyHandle) -> Option<(Vec3, Quat)> {
+        let pose = self.world.bodies.get(body.0)?.position();
+        let r = pose.rotation;
+        Some((from_rapier(pose.translation), Quat::from_xyzw(r.x, r.y, r.z, r.w)))
+    }
+
+    /// Dynamic bodies created by [`Physics::from_scene`], with their object indices.
+    pub fn scene_bodies(&self) -> &[SceneBody] {
+        &self.scene_bodies
+    }
+
+    /// Removes a dynamic body and its collider.
+    pub fn remove_body(&mut self, body: BodyHandle) {
+        self.world.remove_body(body.0);
+        self.scene_bodies.retain(|b| b.body != body);
     }
 
     pub fn remove(&mut self, collider: ColliderHandle) {
@@ -142,6 +219,18 @@ impl Physics {
         self.world.colliders.len()
     }
 
+    /// Applies the character's push to the dynamic bodies it ran into.
+    fn push_bodies(&mut self, character: &CharacterBody, shape: &Capsule, collisions: &[CharacterCollision], dt: f32) {
+        let world = &mut self.world;
+        let mut queries = world.broad_phase.as_query_pipeline_mut(
+            world.narrow_phase.query_dispatcher(),
+            &mut world.bodies,
+            &mut world.colliders,
+            QueryFilter::default(),
+        );
+        character.controller.solve_character_collision_impulses(dt, &mut queries, shape, character.mass, collisions);
+    }
+
     /// The underlying Rapier world, for anything this wrapper doesn't cover yet.
     pub fn rapier(&self) -> &PhysicsWorld {
         &self.world
@@ -160,6 +249,8 @@ pub struct CharacterBody {
     pub height: f32,
     /// Whether the last move ended standing on something.
     pub grounded: bool,
+    /// Kilograms; decides how hard the character shoves dynamic bodies. 0 never pushes.
+    pub mass: f32,
     pub controller: KinematicCharacterController,
 }
 
@@ -177,7 +268,7 @@ impl CharacterBody {
             snap_to_ground: Some(CharacterLength::Absolute(0.3)),
             ..Default::default()
         };
-        Self { position, radius, height, grounded: false, controller }
+        Self { position, radius, height, grounded: false, mass: 80.0, controller }
     }
 
     /// World position of the capsule's center.
@@ -185,21 +276,30 @@ impl CharacterBody {
         self.position + Vec3::Y * self.height * 0.5
     }
 
-    /// Tries to move by `translation`, sliding along whatever is in the way.
-    /// Returns the movement actually applied.
-    pub fn move_and_slide(&mut self, physics: &Physics, translation: Vec3, dt: f32) -> Vec3 {
+    /// Tries to move by `translation`, sliding along whatever is in the way and
+    /// pushing the dynamic bodies it runs into. Returns the movement actually applied.
+    pub fn move_and_slide(&mut self, physics: &mut Physics, translation: Vec3, dt: f32) -> Vec3 {
         let shape = Capsule::new_y((self.height * 0.5 - self.radius).max(0.01), self.radius);
+        let mut pushes = Vec::new();
         let movement = self.controller.move_shape(
             dt,
             &physics.world.query_pipeline(),
             &shape,
             &Pose::from_translation(to_rapier(self.center())),
             to_rapier(translation),
-            |_| {},
+            |hit| {
+                // Only colliders attached to a body can move; static ones have no parent.
+                if physics.world.colliders.get(hit.handle).is_some_and(|c| c.parent().is_some()) {
+                    pushes.push(hit);
+                }
+            },
         );
         let applied = from_rapier(movement.translation);
         self.position += applied;
         self.grounded = movement.grounded;
+        if self.mass > 0.0 && !pushes.is_empty() {
+            physics.push_bodies(self, &shape, &pushes, dt);
+        }
         applied
     }
 }
@@ -216,11 +316,29 @@ mod tests {
         physics
     }
 
-    fn simulate(body: &mut CharacterBody, physics: &Physics, velocity: Vec3, seconds: f32) {
+    fn simulate(body: &mut CharacterBody, physics: &mut Physics, velocity: Vec3, seconds: f32) {
         let dt = 1.0 / 60.0;
         for _ in 0..(seconds / dt) as u32 {
+            physics.step(dt);
             body.move_and_slide(physics, velocity * dt, dt);
         }
+    }
+
+    fn run(physics: &mut Physics, seconds: f32) {
+        for _ in 0..(seconds * 60.0) as u32 {
+            physics.step(Physics::FIXED_DT);
+        }
+    }
+
+    const CUBE: ColliderShape =
+        ColliderShape::Cuboid { center: Vec3::new(0.0, 0.5, 0.0), half_extents: Vec3::splat(0.5) };
+    const WOOD: BodyDesc =
+        BodyDesc::Dynamic { density: 500.0, mass: None, friction: 0.6, restitution: 0.0, angular_damping: 0.5 };
+
+    /// A 0.8 m wooden crate with its base at `position`.
+    fn crate_at(physics: &mut Physics, position: Vec3) -> BodyHandle {
+        let transform = Transform { position, rotation: Quat::IDENTITY, scale: Vec3::splat(0.8) };
+        physics.add_body(&CUBE, &transform, &WOOD).unwrap()
     }
 
     #[test]
@@ -238,7 +356,7 @@ mod tests {
         let mut physics = floor();
         physics.refresh();
         let mut body = CharacterBody::new(Vec3::new(0.0, 3.0, 0.0), 0.35, 1.8);
-        simulate(&mut body, &physics, Vec3::new(0.0, -10.0, 0.0), 1.0);
+        simulate(&mut body, &mut physics, Vec3::new(0.0, -10.0, 0.0), 1.0);
         assert!(body.grounded);
         assert!(body.position.y.abs() < 0.05, "feet at {}", body.position.y);
     }
@@ -251,7 +369,7 @@ mod tests {
         physics.refresh();
         let mut body = CharacterBody::new(Vec3::ZERO, 0.35, 1.8);
         // Walk diagonally into the wall: blocked in -Z, still sliding along +X.
-        simulate(&mut body, &physics, Vec3::new(2.0, -1.0, -4.0), 2.0);
+        simulate(&mut body, &mut physics, Vec3::new(2.0, -1.0, -4.0), 2.0);
         assert!(body.position.z > -3.0 + 0.25, "went through the wall: {}", body.position);
         assert!(body.position.x > 3.0, "did not slide: {}", body.position);
     }
@@ -263,8 +381,63 @@ mod tests {
         physics.add_static(&step, &Transform::from_position(Vec3::new(0.0, 0.0, -4.0)));
         physics.refresh();
         let mut body = CharacterBody::new(Vec3::ZERO, 0.35, 1.8);
-        simulate(&mut body, &physics, Vec3::new(0.0, -2.0, -3.0), 1.8);
+        simulate(&mut body, &mut physics, Vec3::new(0.0, -2.0, -3.0), 1.8);
         assert!(body.position.y > 0.2, "did not climb the step: {}", body.position);
+    }
+
+    #[test]
+    fn dynamic_box_falls_and_rests() {
+        let mut physics = floor();
+        let tilted = Transform::from_euler_degrees(Vec3::new(1.0, 3.0, 0.0), Vec3::new(20.0, 30.0, 10.0), Vec3::ONE);
+        let body = physics.add_body(&CUBE, &tilted, &WOOD).unwrap();
+        run(&mut physics, 3.0);
+        let (position, rotation) = physics.body_pose(body).unwrap();
+        // Landed flat on a face: the box's up axis lines up with a world axis again.
+        let up = rotation * Vec3::Y;
+        assert!(up.abs().max_element() > 0.99, "not resting flat: up = {up}");
+        let center_height = (position + rotation * Vec3::Y * 0.5).y;
+        assert!((center_height - 0.5).abs() < 0.03, "center at {center_height}");
+        run(&mut physics, 0.5);
+        assert!(physics.body_pose(body).unwrap().0.distance(position) < 1e-3, "still moving");
+    }
+
+    #[test]
+    fn stack_stays_put() {
+        let mut physics = floor();
+        let bodies: Vec<_> = (0..4).map(|i| crate_at(&mut physics, Vec3::new(0.0, i as f32 * 0.8, 0.0))).collect();
+        run(&mut physics, 5.0);
+        for (i, &body) in bodies.iter().enumerate() {
+            let (position, _) = physics.body_pose(body).unwrap();
+            let start = Vec3::new(0.0, i as f32 * 0.8, 0.0);
+            assert!(position.distance(start) < 0.05, "crate {i} moved from {start} to {position}");
+        }
+    }
+
+    #[test]
+    fn triangle_mesh_bodies_fall_back_to_hull() {
+        let mut physics = floor();
+        let mesh = ColliderShape::TriMesh {
+            vertices: vec![Vec3::ZERO, Vec3::X, Vec3::Z, Vec3::Y],
+            indices: vec![[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]],
+        };
+        let body = physics.add_body(&mesh, &Transform::from_position(Vec3::Y * 2.0), &WOOD).unwrap();
+        run(&mut physics, 2.0);
+        assert!(physics.body_pose(body).unwrap().0.y.abs() < 0.05);
+    }
+
+    #[test]
+    fn character_pushes_crates() {
+        let mut physics = floor();
+        let body = crate_at(&mut physics, Vec3::new(0.0, 0.0, -2.0));
+        physics.refresh();
+        let mut character = CharacterBody::new(Vec3::ZERO, 0.35, 1.8);
+        simulate(&mut character, &mut physics, Vec3::new(0.0, -1.0, -3.0), 2.0);
+        let (position, _) = physics.body_pose(body).unwrap();
+        assert!(position.z < -3.5, "crate only moved to {position}");
+        assert!(position.y.abs() < 0.05, "crate left the floor: {position}");
+        // The character kept walking behind it instead of getting stuck.
+        assert!(character.position.z < -2.5, "character stuck at {}", character.position);
+        assert!(character.position.z > position.z, "character went through the crate");
     }
 
     #[test]
