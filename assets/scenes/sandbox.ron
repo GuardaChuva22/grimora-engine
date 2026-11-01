@@ -1,0 +1,119 @@
+// Grimora sandbox: a stone circle at dusk, deep in a foggy valley.
+//
+// Everything here is plain data. Save the file while the engine runs and it
+// hot-reloads. Colors are sRGB 0..1, angles are degrees, distances are meters.
+// Unlisted fields use their defaults (see crates/grimora_core/src/environment.rs
+// and crates/grimora_scene/src/lib.rs).
+SceneDesc(
+    environment: (
+        sun: (
+            direction: (-0.65, 0.24, -0.55),   // points from the ground towards the sun
+            color: (1.0, 0.62, 0.45),
+            intensity: 2.3,
+        ),
+        ambient: (
+            sky: (0.36, 0.38, 0.56),
+            ground: (0.22, 0.17, 0.16),
+            intensity: 0.6,
+        ),
+        fog: (
+            color: (0.33, 0.31, 0.42),
+            density: 0.017,
+            height_falloff: 0.11,
+            base_height: 0.0,
+            sun_scatter: 1.0,
+        ),
+        sky: (
+            zenith: (0.09, 0.09, 0.2),
+            horizon: (0.64, 0.43, 0.42),
+            ground: (0.15, 0.13, 0.17),
+            sun_size: 1.6,
+            sun_glow: 0.8,
+        ),
+        shadows: (enabled: true, distance: 60.0, strength: 0.85),
+        post: (
+            exposure: 1.25,
+            contrast: 1.08,
+            saturation: 0.92,
+            vignette: 0.38,
+            grain: 0.035,
+            bloom: 0.14,
+        ),
+    ),
+
+    camera: (
+        position: (0.0, 5.5, 21.0),
+        look_at: (0.0, 1.8, 0.0),
+        fov: 60.0,
+    ),
+
+    terrain: (
+        size: 220.0,
+        resolution: 90,
+        height: 7.0,
+        frequency: 2.2,
+        seed: 4,
+        edge_rise: 28.0,
+        flat_radius: 14.0,
+        grass_color: (0.27, 0.33, 0.22),
+        dirt_color: (0.38, 0.31, 0.24),
+        rock_color: (0.4, 0.38, 0.4),
+    ),
+
+    // With a terrain, object `position.y` is measured from the ground.
+    objects: [
+        // ---- the altar and its heart crystal (animated by the sandbox game)
+        (name: "altar", mesh: Cube, scale: (2.4, 0.8, 1.5), color: (0.42, 0.4, 0.4)),
+        (
+            name: "heart",
+            mesh: Crystal(seed: 7),
+            position: (0.0, 0.85, 0.0),
+            scale: (0.8, 0.8, 0.8),
+            color: (0.72, 0.45, 1.0),
+            emissive: 3.0,
+            light: (position: (0.0, 1.0, 0.0), color: (0.66, 0.42, 1.0), intensity: 14.0, radius: 16.0, flicker: 0.15),
+        ),
+
+        // ---- stone circle (radius 9, open towards the camera)
+        (mesh: Pillar(seed: 1),               position: ( 9.0,  0.0,  0.0), rotation: (0.0,  10.0, 0.0)),
+        (mesh: Pillar(seed: 2, broken: true), position: ( 6.36, 0.0,  6.36), rotation: (0.0,  55.0, 0.0)),
+        (mesh: Pillar(seed: 3, broken: true), position: (-6.36, 0.0,  6.36), rotation: (6.0, 140.0, 0.0)),
+        (mesh: Pillar(seed: 4),               position: (-9.0,  0.0,  0.0), rotation: (0.0, 185.0, 0.0)),
+        (mesh: Pillar(seed: 5, broken: true), position: (-6.36, 0.0, -6.36), rotation: (0.0, 230.0, 0.0)),
+        (mesh: Pillar(seed: 6),               position: ( 0.0,  0.0, -9.0), rotation: (0.0, 275.0, 0.0)),
+        (mesh: Pillar(seed: 8, broken: true), position: ( 6.36, 0.0, -6.36), rotation: (0.0, 320.0, -5.0)),
+        // a fallen column
+        (mesh: Cylinder(segments: 8), position: (3.2, 0.3, 11.5), rotation: (0.0, 35.0, 90.0), scale: (0.66, 2.6, 0.66), color: (0.46, 0.44, 0.42)),
+
+        // ---- torches: a wooden post and a glowing flame with a flickering light
+        (mesh: Cylinder(segments: 5), position: ( 4.5, 0.0, 6.0), scale: (0.14, 1.7, 0.14), color: (0.3, 0.22, 0.16)),
+        (mesh: Cone(segments: 5), position: ( 4.5, 1.7, 6.0), scale: (0.3, 0.5, 0.3), color: (1.0, 0.55, 0.2), emissive: 6.0,
+         light: (position: (0.0, 0.4, 0.0), color: (1.0, 0.55, 0.25), intensity: 16.0, radius: 12.0, flicker: 1.0)),
+        (mesh: Cylinder(segments: 5), position: (-4.5, 0.0, 6.0), scale: (0.14, 1.7, 0.14), color: (0.3, 0.22, 0.16)),
+        (mesh: Cone(segments: 5), position: (-4.5, 1.7, 6.0), scale: (0.3, 0.5, 0.3), color: (1.0, 0.55, 0.2), emissive: 6.0,
+         light: (position: (0.0, 0.4, 0.0), color: (1.0, 0.55, 0.25), intensity: 16.0, radius: 12.0, flicker: 1.0)),
+        (mesh: Cylinder(segments: 5), position: ( 4.5, 0.0, -6.0), scale: (0.14, 1.7, 0.14), color: (0.3, 0.22, 0.16)),
+        (mesh: Cone(segments: 5), position: ( 4.5, 1.7, -6.0), scale: (0.3, 0.5, 0.3), color: (1.0, 0.55, 0.2), emissive: 6.0,
+         light: (position: (0.0, 0.4, 0.0), color: (1.0, 0.55, 0.25), intensity: 16.0, radius: 12.0, flicker: 1.0)),
+        (mesh: Cylinder(segments: 5), position: (-4.5, 0.0, -6.0), scale: (0.14, 1.7, 0.14), color: (0.3, 0.22, 0.16)),
+        (mesh: Cone(segments: 5), position: (-4.5, 1.7, -6.0), scale: (0.3, 0.5, 0.3), color: (1.0, 0.55, 0.2), emissive: 6.0,
+         light: (position: (0.0, 0.4, 0.0), color: (1.0, 0.55, 0.25), intensity: 16.0, radius: 12.0, flicker: 1.0)),
+    ],
+
+    // Random placement; the same seed always gives the same layout.
+    scatter: [
+        // dark pine forest ringing the valley
+        (mesh: Pine(), variants: 6, count: 280, radius: 100.0, min_radius: 28.0, scale: (1.0, 2.4),
+         color_jitter: 0.18, tilt: 3.0, seed: 11),
+        // dead trees close to the circle
+        (mesh: DeadTree(), variants: 5, count: 16, radius: 26.0, min_radius: 13.0, scale: (0.9, 1.5),
+         color_jitter: 0.1, tilt: 8.0, seed: 5),
+        // boulders everywhere
+        (mesh: Rock(), variants: 6, count: 70, radius: 85.0, min_radius: 6.0, scale: (0.4, 2.2),
+         color_jitter: 0.12, tilt: 20.0, sink: 0.15, seed: 3),
+        // small glowing crystals hidden among the dead trees
+        (mesh: Crystal(), variants: 3, count: 7, radius: 30.0, min_radius: 14.0, scale: (0.3, 0.55),
+         color: (0.4, 0.78, 1.0), emissive: 2.5, tilt: 15.0, seed: 21,
+         light: (position: (0.0, 0.6, 0.0), color: (0.4, 0.75, 1.0), intensity: 3.0, radius: 6.0, flicker: 0.1)),
+    ],
+)

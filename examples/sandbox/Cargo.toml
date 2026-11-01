@@ -1,0 +1,13 @@
+[package]
+name = "sandbox"
+description = "Low-poly dark fantasy test scene for Grimora."
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+grimora.workspace = true
+anyhow.workspace = true
+
+[lints]
+workspace = true

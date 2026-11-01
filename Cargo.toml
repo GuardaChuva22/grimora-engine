@@ -1,0 +1,43 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "examples/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+
+[workspace.dependencies]
+grimora = { path = "crates/grimora" }
+grimora_core = { path = "crates/grimora_core" }
+grimora_render = { path = "crates/grimora_render" }
+grimora_scene = { path = "crates/grimora_scene" }
+
+wgpu = "30"
+winit = "0.30"
+glam = { version = "0.34", features = ["bytemuck", "serde"] }
+bytemuck = { version = "1", features = ["derive"] }
+pollster = "1"
+serde = { version = "1", features = ["derive"] }
+ron = "0.12"
+log = "0.4"
+env_logger = "0.11"
+anyhow = "1"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+# Dependencies are optimized even in dev builds: a debug wgpu is very slow.
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.dev]
+opt-level = 1
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

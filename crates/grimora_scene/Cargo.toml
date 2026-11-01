@@ -1,0 +1,15 @@
+[package]
+name = "grimora_scene"
+description = "Human/AI-readable RON scenes and procedural low-poly meshes for Grimora."
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+grimora_core.workspace = true
+glam.workspace = true
+serde.workspace = true
+ron.workspace = true
+anyhow.workspace = true
+
+[lints]
+workspace = true

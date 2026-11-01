@@ -1,0 +1,19 @@
+[package]
+name = "grimora"
+description = "Grimora Engine: a light Rust 3D engine for stylized low-poly worlds."
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+grimora_core.workspace = true
+grimora_render.workspace = true
+grimora_scene.workspace = true
+winit.workspace = true
+glam.workspace = true
+pollster.workspace = true
+log.workspace = true
+env_logger.workspace = true
+anyhow.workspace = true
+
+[lints]
+workspace = true

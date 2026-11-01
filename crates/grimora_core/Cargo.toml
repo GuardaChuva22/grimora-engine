@@ -1,0 +1,14 @@
+[package]
+name = "grimora_core"
+description = "Core types for Grimora: time, input, transforms, camera."
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+glam.workspace = true
+winit.workspace = true
+serde.workspace = true
+bytemuck.workspace = true
+
+[lints]
+workspace = true
