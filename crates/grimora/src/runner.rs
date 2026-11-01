@@ -365,11 +365,13 @@ impl<G: Game> App<G> {
         let s = self.ctx.stats;
         let gpu = self.renderer.as_ref().map(|r| r.adapter_info().name.clone()).unwrap_or_default();
         println!(
-            "[grimora] frames={} avg_ms={avg:.2} p95_ms={p95:.2} max_ms={:.2} draw_calls={} objects={} triangles={} gpu=\"{gpu}\"",
+            "[grimora] frames={} avg_ms={avg:.2} p95_ms={p95:.2} max_ms={:.2} draw_calls={} objects={} culled={} shadow_casters={} triangles={} gpu=\"{gpu}\"",
             sorted.len(),
             sorted[sorted.len() - 1],
             s.draw_calls,
             s.instances,
+            s.culled,
+            s.shadow_casters,
             s.triangles
         );
     }

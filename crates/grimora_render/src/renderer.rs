@@ -1,5 +1,5 @@
 use anyhow::{Context as _, Result, anyhow};
-use grimora_core::{Camera, Environment, Mat4, MeshData, PointLight, Transform, Vec3};
+use grimora_core::{BoundingSphere, Camera, Environment, Frustum, Mat4, MeshData, PointLight, Transform, Vec3};
 use image::RgbaImage;
 use wgpu::util::DeviceExt as _;
 
@@ -15,11 +15,14 @@ pub struct RendererSettings {
     /// Requested MSAA sample count (1 or 4). Falls back to 1 when unsupported.
     pub msaa: u32,
     pub shadow_map_size: u32,
+    /// Objects covering less than this fraction of the screen height are not
+    /// drawn (0.002 is about 1.5 pixels at 720p). 0 draws everything in view.
+    pub min_screen_size: f32,
 }
 
 impl Default for RendererSettings {
     fn default() -> Self {
-        Self { vsync: true, msaa: 4, shadow_map_size: 2048 }
+        Self { vsync: true, msaa: 4, shadow_map_size: 2048, min_screen_size: 0.002 }
     }
 }
 
@@ -57,9 +60,16 @@ pub struct Frame<'a> {
 /// Counters from the last rendered frame.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FrameStats {
+    /// Main pass only.
     pub draw_calls: u32,
+    /// Objects drawn in the main pass.
     pub instances: u32,
+    /// Main pass only.
     pub triangles: u64,
+    /// Objects skipped by the main pass: off screen or too small.
+    pub culled: u32,
+    /// Objects drawn into the shadow map.
+    pub shadow_casters: u32,
 }
 
 struct GpuMesh {
@@ -70,6 +80,10 @@ struct GpuMesh {
     submeshes: Vec<(std::ops::Range<u32>, usize)>,
     /// Some submesh uses alpha, so shadows are drawn per submesh.
     has_alpha: bool,
+    /// In model space; shared by the mesh's LODs so they switch consistently.
+    bounds: BoundingSphere,
+    /// `(screen_size, index into Renderer::meshes)`, most detailed first.
+    lods: Vec<(f32, usize)>,
 }
 
 struct Targets {
@@ -79,7 +93,8 @@ struct Targets {
 }
 
 struct Batch {
-    mesh: MeshHandle,
+    /// Index into `Renderer::meshes`.
+    mesh: usize,
     instances: std::ops::Range<u32>,
 }
 
@@ -91,6 +106,7 @@ pub struct Renderer {
     adapter_info: wgpu::AdapterInfo,
     msaa: u32,
     shadow_map_size: u32,
+    min_screen_size: f32,
 
     globals_buffer: wgpu::Buffer,
     globals_layout: wgpu::BindGroupLayout,
@@ -121,7 +137,11 @@ pub struct Renderer {
     instance_buffer: wgpu::Buffer,
     instance_capacity: usize,
     instances: Vec<InstanceRaw>,
+    /// `(mesh, draw)` pairs that survived culling, per pass; kept to reuse their memory.
+    visible: Vec<(usize, usize)>,
+    casters: Vec<(usize, usize)>,
     batches: Vec<Batch>,
+    shadow_batches: Vec<Batch>,
     stats: FrameStats,
 }
 
@@ -457,6 +477,7 @@ impl Renderer {
             adapter_info,
             msaa,
             shadow_map_size,
+            min_screen_size: settings.min_screen_size.max(0.0),
             globals_buffer,
             globals_layout,
             globals_group,
@@ -481,7 +502,10 @@ impl Renderer {
             instance_buffer,
             instance_capacity,
             instances: Vec::new(),
+            visible: Vec::new(),
+            casters: Vec::new(),
             batches: Vec::new(),
+            shadow_batches: Vec::new(),
             stats: FrameStats::default(),
         })
     }
@@ -521,7 +545,20 @@ impl Renderer {
         );
     }
 
+    /// Uploads a mesh and its [`MeshData::lods`]; the handle draws whichever
+    /// level suits the object's size on screen.
     pub fn upload_mesh(&mut self, mesh: &MeshData) -> MeshHandle {
+        let mut bounds = mesh.bounding_sphere();
+        if mesh.skeleton.is_some() {
+            // Animated poses reach past the bind pose; the margin keeps limbs from being culled.
+            bounds.radius *= 1.5;
+        }
+        let lods =
+            mesh.lods.iter().map(|lod| (lod.screen_size, self.upload_level(&lod.mesh, bounds, Vec::new()))).collect();
+        MeshHandle(self.upload_level(mesh, bounds, lods) as u32)
+    }
+
+    fn upload_level(&mut self, mesh: &MeshData, bounds: BoundingSphere, lods: Vec<(f32, usize)>) -> usize {
         let vertices = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("mesh vertices"),
             contents: bytemuck::cast_slice(&mesh.vertices),
@@ -542,8 +579,9 @@ impl Renderer {
             })
             .collect();
         let has_alpha = submeshes.iter().any(|(_, m)| self.materials[*m].alpha);
-        self.meshes.push(GpuMesh { vertices, indices, index_count: mesh.indices.len() as u32, submeshes, has_alpha });
-        MeshHandle(self.meshes.len() as u32 - 1)
+        let index_count = mesh.indices.len() as u32;
+        self.meshes.push(GpuMesh { vertices, indices, index_count, submeshes, has_alpha, bounds, lods });
+        self.meshes.len() - 1
     }
 
     /// Frees every uploaded mesh. Existing [`MeshHandle`]s become invalid.
@@ -571,7 +609,7 @@ impl Renderer {
         };
         let surface_view = surface_texture.texture.create_view(&Default::default());
 
-        let (globals, _) = uniforms::globals(
+        let (globals, light_view_proj) = uniforms::globals(
             frame.camera,
             self.aspect(),
             frame.environment,
@@ -582,7 +620,7 @@ impl Renderer {
         self.queue.write_buffer(&self.globals_buffer, 0, bytemuck::bytes_of(&globals));
         let post = uniforms::post_params(frame.environment, frame.time, self.bloom.mip_count());
         self.queue.write_buffer(&self.post_buffer, 0, bytemuck::bytes_of(&post));
-        self.prepare_instances(frame.draws);
+        self.prepare_instances(frame, frame.environment.shadows.enabled.then_some(light_view_proj));
         self.upload_joints(frame.joint_matrices);
 
         let mut encoder = self.device.create_command_encoder(&Default::default());
@@ -598,7 +636,7 @@ impl Renderer {
                 ..Default::default()
             });
             pass.set_bind_group(0, &self.globals_group, &[]);
-            self.draw_batches(&mut pass, false);
+            self.draw_batches(&mut pass, &self.shadow_batches, false);
         }
 
         {
@@ -628,7 +666,7 @@ impl Renderer {
             pass.set_bind_group(1, &self.shadow_group, &[]);
             pass.set_pipeline(&self.sky_pipeline);
             pass.draw(0..3, 0..1);
-            self.draw_batches(&mut pass, true);
+            self.draw_batches(&mut pass, &self.batches, true);
         }
 
         self.bloom.render(&mut encoder);
@@ -718,23 +756,42 @@ impl Renderer {
         RgbaImage::from_raw(width, height, pixels).context("building capture image")
     }
 
-    /// Sorts draws by mesh so each mesh is one instanced draw call.
-    fn prepare_instances(&mut self, draws: &[DrawItem]) {
-        let mut order: Vec<usize> =
-            (0..draws.len()).filter(|&i| (draws[i].mesh.0 as usize) < self.meshes.len()).collect();
-        order.sort_unstable_by_key(|&i| draws[i].mesh);
+    /// Culls the draws against the camera and, with shadows on, against the
+    /// sun's volume (`light_view_proj`); drops objects too small to see; picks
+    /// each one's LOD; then groups them by mesh so each mesh is one instanced
+    /// draw call per pass.
+    fn prepare_instances(&mut self, frame: &Frame<'_>, light_view_proj: Option<Mat4>) {
+        let camera = frame.camera;
+        let view = Frustum::from_view_projection(camera.view_projection(self.aspect()));
+        let light = light_view_proj.map(Frustum::from_view_projection);
 
-        self.instances.clear();
-        self.batches.clear();
-        for i in order {
-            let draw = &draws[i];
-            let index = self.instances.len() as u32;
-            self.instances.push(InstanceRaw::new(&draw.transform, draw.color, draw.emissive, draw.joints));
-            match self.batches.last_mut() {
-                Some(batch) if batch.mesh == draw.mesh => batch.instances.end = index + 1,
-                _ => self.batches.push(Batch { mesh: draw.mesh, instances: index..index + 1 }),
+        self.visible.clear();
+        self.casters.clear();
+        let mut culled = 0;
+        for (i, draw) in frame.draws.iter().enumerate() {
+            let Some(mesh) = self.meshes.get(draw.mesh.0 as usize) else { continue };
+            let sphere = mesh.bounds.transformed(&draw.transform);
+            let screen_size = sphere.screen_size(camera);
+            if screen_size < self.min_screen_size {
+                culled += 1;
+                continue;
+            }
+            let level = pick_lod(&mesh.lods, screen_size).unwrap_or(draw.mesh.0 as usize);
+            if view.intersects_sphere(sphere) {
+                self.visible.push((level, i));
+            } else {
+                culled += 1;
+            }
+            if light.is_some_and(|light| light.intersects_sphere(sphere)) {
+                self.casters.push((level, i));
             }
         }
+        self.visible.sort_unstable();
+        self.casters.sort_unstable();
+
+        self.instances.clear();
+        group(&self.visible, frame.draws, &mut self.instances, &mut self.batches);
+        group(&self.casters, frame.draws, &mut self.instances, &mut self.shadow_batches);
 
         if self.instances.len() > self.instance_capacity {
             self.instance_capacity = self.instances.len().next_power_of_two();
@@ -744,14 +801,14 @@ impl Renderer {
 
         self.stats = FrameStats {
             draw_calls: self.batches.len() as u32,
-            instances: self.instances.len() as u32,
+            instances: self.visible.len() as u32,
             triangles: self
                 .batches
                 .iter()
-                .map(|b| {
-                    u64::from(self.meshes[b.mesh.0 as usize].index_count / 3) * u64::from(b.instances.len() as u32)
-                })
+                .map(|b| u64::from(self.meshes[b.mesh].index_count / 3) * u64::from(b.instances.len() as u32))
                 .sum(),
+            culled,
+            shadow_casters: self.casters.len() as u32,
         };
     }
 
@@ -770,7 +827,7 @@ impl Renderer {
     /// Draws every batch. With `materials`, binds each submesh's material and
     /// picks culling and alpha-to-coverage; without (the shadow pass), draws
     /// whole meshes, splitting only those with alpha-tested submeshes.
-    fn draw_batches(&self, pass: &mut wgpu::RenderPass<'_>, materials: bool) {
+    fn draw_batches(&self, pass: &mut wgpu::RenderPass<'_>, batches: &[Batch], materials: bool) {
         pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
         let mut current: Option<*const wgpu::RenderPipeline> = None;
         let mut use_pipeline = |pass: &mut wgpu::RenderPass<'_>, pipeline: &wgpu::RenderPipeline| {
@@ -779,8 +836,8 @@ impl Renderer {
                 pass.set_pipeline(pipeline);
             }
         };
-        for batch in &self.batches {
-            let mesh = &self.meshes[batch.mesh.0 as usize];
+        for batch in batches {
+            let mesh = &self.meshes[batch.mesh];
             pass.set_vertex_buffer(0, mesh.vertices.slice(..));
             pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
             if !materials && !mesh.has_alpha {
@@ -802,6 +859,26 @@ impl Renderer {
                 pass.set_bind_group(2, &material.bind_group, &[]);
                 pass.draw_indexed(range.clone(), 0, batch.instances.clone());
             }
+        }
+    }
+}
+
+/// The least detailed level whose `screen_size` threshold the object is under,
+/// or `None` for full detail. `lods` goes from most to least detailed.
+fn pick_lod(lods: &[(f32, usize)], screen_size: f32) -> Option<usize> {
+    lods.iter().rev().find(|(threshold, _)| screen_size < *threshold).map(|&(_, mesh)| mesh)
+}
+
+/// Appends one instance per `(mesh, draw)` pair (sorted by mesh) and one batch per mesh.
+fn group(pairs: &[(usize, usize)], draws: &[DrawItem], instances: &mut Vec<InstanceRaw>, batches: &mut Vec<Batch>) {
+    batches.clear();
+    for &(mesh, i) in pairs {
+        let draw = &draws[i];
+        let index = instances.len() as u32;
+        instances.push(InstanceRaw::new(&draw.transform, draw.color, draw.emissive, draw.joints));
+        match batches.last_mut() {
+            Some(batch) if batch.mesh == mesh => batch.instances.end = index + 1,
+            _ => batches.push(Batch { mesh, instances: index..index + 1 }),
         }
     }
 }
@@ -917,4 +994,18 @@ fn create_instance_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffe
         usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn picks_the_coarsest_level_that_fits() {
+        let lods = [(0.1, 7), (0.02, 8)];
+        assert_eq!(pick_lod(&lods, 0.5), None);
+        assert_eq!(pick_lod(&lods, 0.05), Some(7));
+        assert_eq!(pick_lod(&lods, 0.01), Some(8));
+        assert_eq!(pick_lod(&[], 0.01), None);
+    }
 }

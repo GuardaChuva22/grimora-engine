@@ -55,8 +55,10 @@ cargo run --release -p sandbox -- --frames 600 --no-vsync
 Ao fechar, o motor imprime uma linha de métricas fácil de ler por scripts:
 
 ```
-[grimora] frames=80 avg_ms=5.55 p95_ms=5.88 max_ms=6.30 draw_calls=33 objects=392 triangles=48296 gpu="NVIDIA GeForce RTX 3060"
+[grimora] frames=80 avg_ms=5.56 p95_ms=5.88 max_ms=5.91 draw_calls=47 objects=151 culled=249 shadow_casters=305 triangles=28220 gpu="NVIDIA GeForce RTX 3060"
 ```
+
+`objects` são os objetos desenhados na tela, `culled` os que ficaram de fora (fora da câmera ou pequenos demais) e `shadow_casters` os desenhados no mapa de sombra.
 
 ## Arquitetura
 
@@ -200,6 +202,27 @@ ctx.audio.set_volume(Category::Ambient, 0.5);                           // e set
 - Sem dispositivo de áudio, o motor avisa no log e segue mudo. Capturas (`--screenshot`) carregam e mixam tudo, mas não tocam nada.
 - Os sons do sandbox (vento, fogo, zumbido do cristal e passos) são sintetizados por [tools/gen_sounds.py](tools/gen_sounds.py) (Python puro, sementes fixas): `python -I tools/gen_sounds.py`.
 
+### Mundos grandes: culling e LOD
+
+O renderizador só desenha o que aparece: cada objeto é testado contra o campo de visão da câmera e, para a sombra, contra o volume coberto pelo sol (assim árvores atrás da câmera ainda projetam sombra na tela). Objetos menores que ~1,5 pixel são pulados (`RendererSettings::min_screen_size`).
+
+Malhas podem ter versões mais simples para quando o objeto aparece pequeno na tela:
+
+```rust
+let arvore = pinheiro_detalhado.with_lods([(0.04, pinheiro_simples)]); // abaixo de 4% da altura da tela
+```
+
+Pinheiros, árvores mortas e rochas geradas já vêm com um LOD de mesmo contorno. A cena [bench_forest.ron](assets/scenes/bench_forest.ron) (23 mil objetos, 2 milhões de triângulos) serve de referência, numa RTX 3060 em 1280x720:
+
+| | Antes | Culling | Culling + LOD |
+|---|---|---|---|
+| Visão do jogador | 4,1 ms | 2,9 ms | 2,3 ms |
+| Visão aérea | 3,9 ms | 3,4 ms | 2,5 ms |
+
+```bash
+cargo run --release -p sandbox -- --scene assets/scenes/bench_forest.ron --no-vsync --frames 600 --screenshot screenshots/bench.png
+```
+
 ## Visão
 
 O objetivo inicial é dar suporte a um jogo de mundo aberto com visual low poly dark fantasy estilizado, priorizando iluminação, atmosfera e identidade em vez de realismo.
@@ -226,8 +249,9 @@ Diretrizes:
 - [x] Animação esquelética: skinning na GPU, clipes glTF com crossfade e objetos presos a ossos
 - [x] Áudio com `kira`: efeitos, loops de ambiente e emissores 3D na cena, passos do personagem
 
+- [x] Culling por frustum (câmera e sombra), descarte de objetos minúsculos e LOD por tamanho na tela
+
 **Próximos passos**
-- [ ] Culling por frustum e LOD
 - [ ] Mundo em regiões com carregamento por streaming
 - [ ] Salvamento de jogo
 - [ ] Cascaded shadow maps para sombras nítidas a grandes distâncias

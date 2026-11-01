@@ -5,6 +5,7 @@ use bytemuck::{Pod, Zeroable};
 use glam::{Vec3, Vec4};
 
 use crate::animation::Skeleton;
+use crate::bounds::BoundingSphere;
 
 /// GPU vertex layout shared by every mesh. Colors are sRGB in `0..=1`.
 #[repr(C)]
@@ -162,11 +163,35 @@ pub struct MeshData {
     pub submeshes: Vec<Submesh>,
     /// Present on animated meshes; vertices then carry joints and weights.
     pub skeleton: Option<Arc<Skeleton>>,
+    /// Simpler versions drawn when the object looks small, from most to least
+    /// detailed (see [`MeshLod`]).
+    pub lods: Vec<MeshLod>,
+}
+
+/// A lower-detail stand-in for a mesh.
+#[derive(Debug, Clone, Default)]
+pub struct MeshLod {
+    /// Used once the object's bounding sphere covers less than this fraction of
+    /// the screen height (0.05 = 5%, about 36 pixels at 720p).
+    pub screen_size: f32,
+    pub mesh: MeshData,
 }
 
 impl MeshData {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Sphere around every vertex in the bind pose.
+    pub fn bounding_sphere(&self) -> BoundingSphere {
+        BoundingSphere::from_points(self.vertices.iter().map(|v| Vec3::from(v.position)))
+    }
+
+    /// Adds lower-detail versions, each `(screen_size, mesh)` (see [`MeshLod`]).
+    pub fn with_lods(mut self, lods: impl IntoIterator<Item = (f32, MeshData)>) -> Self {
+        self.lods.extend(lods.into_iter().map(|(screen_size, mesh)| MeshLod { screen_size, mesh }));
+        self.lods.sort_by(|a, b| b.screen_size.total_cmp(&a.screen_size));
+        self
     }
 
     /// Adds a flat-shaded triangle (counter-clockwise when seen from outside).

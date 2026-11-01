@@ -1,0 +1,36 @@
+// Benchmark: a dense 1.2 km forest (~23k objects) for measuring culling and LOD.
+//
+//     cargo run --release -p sandbox -- --scene assets/scenes/bench_forest.ron --no-vsync --frames 600 --screenshot screenshots/bench.png
+SceneDesc(
+    environment: (
+        sun: (direction: (-0.65, 0.3, -0.55), color: (1.0, 0.66, 0.5), intensity: 2.3),
+        ambient: (sky: (0.36, 0.38, 0.56), ground: (0.22, 0.17, 0.16), intensity: 0.6),
+        fog: (color: (0.33, 0.31, 0.42), density: 0.006, height_falloff: 0.05, sun_scatter: 1.0),
+        sky: (zenith: (0.09, 0.09, 0.2), horizon: (0.64, 0.43, 0.42), ground: (0.15, 0.13, 0.17)),
+        shadows: (enabled: true, distance: 60.0, strength: 0.85),
+        post: (exposure: 1.25, contrast: 1.08, saturation: 0.92, vignette: 0.38, grain: 0.035, bloom: 0.14),
+    ),
+    player: (position: (0.0, 0.0, 0.0), yaw: 0.0),
+    camera: (position: (0.0, 12.0, 40.0), look_at: (0.0, 4.0, 0.0), fov: 60.0),
+    terrain: (
+        size: 1400.0,
+        resolution: 200,
+        height: 22.0,
+        frequency: 2.5,
+        seed: 9,
+        edge_rise: 60.0,
+        flat_radius: 12.0,
+        grass_color: (0.27, 0.33, 0.22),
+        dirt_color: (0.38, 0.31, 0.24),
+        rock_color: (0.4, 0.38, 0.4),
+    ),
+    objects: [],
+    scatter: [
+        (mesh: Pine(), variants: 6, count: 15000, radius: 600.0, min_radius: 12.0, scale: (1.0, 2.4),
+         color_jitter: 0.18, tilt: 3.0, seed: 11, collider: None),
+        (mesh: Rock(), variants: 6, count: 6000, radius: 600.0, min_radius: 6.0, scale: (0.4, 2.2),
+         color_jitter: 0.12, tilt: 20.0, sink: 0.15, seed: 3, collider: None),
+        (mesh: DeadTree(), variants: 5, count: 2000, radius: 600.0, min_radius: 10.0, scale: (0.9, 1.5),
+         color_jitter: 0.1, tilt: 8.0, seed: 5, collider: None),
+    ],
+)

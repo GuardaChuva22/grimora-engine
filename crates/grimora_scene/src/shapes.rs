@@ -1,7 +1,7 @@
 //! Procedural low-poly meshes. Every prop has its origin at the center of its
 //! base (y = 0), so placing it on the ground is just setting its position.
 
-use std::f32::consts::TAU;
+use std::f32::consts::{PI, TAU};
 
 use std::path::Path;
 
@@ -14,7 +14,7 @@ use crate::rng::{Rng, value_noise};
 /// Which mesh an object uses. Seeded shapes give a different variation per seed.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum MeshDesc {
-    /// 1×1×1 box.
+    /// 1Ã—1Ã—1 box.
     Cube,
     /// Flat square on the XZ plane.
     Plane {
@@ -148,9 +148,12 @@ impl MeshDesc {
                 blob(&mut m, Vec3::new(0.0, 0.5, 0.0), Vec3::splat(0.5), subdivisions.min(4), |_| 1.0, white, None);
                 m
             }
-            Self::Pine { seed, tiers } => pine(seed, if tiers == 0 { 4 } else { tiers.min(8) }),
-            Self::DeadTree { seed } => dead_tree(seed),
-            Self::Rock { seed } => rock(seed),
+            Self::Pine { seed, tiers } => {
+                let tiers = if tiers == 0 { 4 } else { tiers.min(8) };
+                pine(seed, tiers, 0).with_lods([(0.04, pine(seed, tiers, 1))])
+            }
+            Self::DeadTree { seed } => dead_tree(seed, 0).with_lods([(0.03, dead_tree(seed, 1))]),
+            Self::Rock { seed } => rock(seed, 0).with_lods([(0.03, rock(seed, 1))]),
             Self::Crystal { seed } => crystal(seed),
             Self::Pillar { seed, broken } => pillar(seed, broken),
             Self::Wanderer => wanderer(),
@@ -199,7 +202,7 @@ pub fn tube(
 ) {
     let axis = (end - start).normalize_or(Vec3::Y);
     let u = axis.any_orthonormal_vector();
-    // `u × v = -axis` keeps the winding counter-clockwise from outside.
+    // `u Ã— v = -axis` keeps the winding counter-clockwise from outside.
     let v = u.cross(axis);
     let ring = |center: Vec3, r: f32, i: u32| {
         let a = phase + i as f32 / segments as f32 * TAU;
@@ -216,6 +219,42 @@ pub fn tube(
             m.push_triangle(end, b1, b0, c);
         }
         m.push_triangle(start, a0, a1, c);
+    }
+}
+
+/// [`tube`] for a level of detail: `lod` 0 is the full tube; higher levels halve
+/// the sides per level (at least 4, or 3 for branches), widened so the outline stays as wide on
+/// average, and drop thin tubes (twigs) altogether.
+/// Either way `rng` advances as for the full tube, so whatever is generated
+/// next comes out the same in every level.
+#[allow(clippy::too_many_arguments)]
+fn detail_tube(
+    m: &mut MeshData,
+    start: Vec3,
+    end: Vec3,
+    r0: f32,
+    r1: f32,
+    segments: u32,
+    phase: f32,
+    color: Vec3,
+    rng: &mut Rng,
+    lod: u32,
+) {
+    if lod == 0 {
+        tube(m, start, end, r0, r1, segments, phase, color, Some(rng));
+        return;
+    }
+    if r0 >= 0.03 {
+        // Branches are thin enough that a triangle reads the same.
+        let min_sides = if r0 < 0.1 { 3 } else { 4 };
+        let sides = (segments >> lod).max(min_sides).min(segments);
+        // A polygon's mean width is its perimeter over Ï€: keep that of the full tube.
+        let perimeter = |n: u32| n as f32 * (PI / n as f32).sin();
+        let widen = perimeter(segments) / perimeter(sides);
+        tube(m, start, end, r0 * widen, r1 * widen, sides, phase, color, None);
+    }
+    for _ in 0..segments {
+        shade(color, Some(rng), 0.06);
     }
 }
 
@@ -294,11 +333,11 @@ pub fn blob(
     }
 }
 
-fn pine(seed: u64, tiers: u32) -> MeshData {
+fn pine(seed: u64, tiers: u32, lod: u32) -> MeshData {
     let mut rng = Rng::new(seed);
     let mut m = MeshData::new();
     let bark = Vec3::new(0.27, 0.19, 0.14);
-    tube(&mut m, Vec3::ZERO, Vec3::new(0.0, 0.9, 0.0), 0.13, 0.09, 6, 0.0, bark, Some(&mut rng));
+    detail_tube(&mut m, Vec3::ZERO, Vec3::new(0.0, 0.9, 0.0), 0.13, 0.09, 6, 0.0, bark, &mut rng, lod);
 
     let needle_dark = Vec3::new(0.12, 0.2, 0.15);
     let needle_light = Vec3::new(0.2, 0.3, 0.19);
@@ -311,19 +350,20 @@ fn pine(seed: u64, tiers: u32) -> MeshData {
         let base = Vec3::new(0.0, y0, 0.0) + lean * f * 3.0;
         let tip = base + Vec3::new(rng.jitter(0.05), height, rng.jitter(0.05));
         let color = needle_dark.lerp(needle_light, f);
-        tube(&mut m, base, tip, radius, 0.0, 7, rng.range(0.0, TAU), color, Some(&mut rng));
+        let phase = rng.range(0.0, TAU);
+        detail_tube(&mut m, base, tip, radius, 0.0, 7, phase, color, &mut rng, lod);
     }
     m
 }
 
-fn dead_tree(seed: u64) -> MeshData {
+fn dead_tree(seed: u64, lod: u32) -> MeshData {
     let mut rng = Rng::new(seed);
     let mut m = MeshData::new();
     let wood = Vec3::new(0.24, 0.21, 0.2);
     let top = Vec3::new(rng.jitter(0.3), 2.4, rng.jitter(0.3));
     let bend = Vec3::new(rng.jitter(0.25), 1.2, rng.jitter(0.25));
-    tube(&mut m, Vec3::ZERO, bend, 0.2, 0.13, 5, 0.0, wood, Some(&mut rng));
-    tube(&mut m, bend, top, 0.13, 0.03, 5, 0.3, wood, Some(&mut rng));
+    detail_tube(&mut m, Vec3::ZERO, bend, 0.2, 0.13, 5, 0.0, wood, &mut rng, lod);
+    detail_tube(&mut m, bend, top, 0.13, 0.03, 5, 0.3, wood, &mut rng, lod);
 
     let branches = 3 + (rng.next_u64() % 3) as u32;
     for b in 0..branches {
@@ -334,22 +374,25 @@ fn dead_tree(seed: u64) -> MeshData {
         let dir = Vec3::new(angle.cos(), rise, angle.sin()).normalize();
         let len = rng.range(0.5, 1.1) * (1.2 - t * 0.5);
         let end = start + dir * len;
-        tube(&mut m, start, end, 0.06, 0.012, 4, 0.0, wood, Some(&mut rng));
+        detail_tube(&mut m, start, end, 0.06, 0.012, 4, 0.0, wood, &mut rng, lod);
         if rng.f32() > 0.4 {
             let twig = end + (dir + Vec3::new(rng.jitter(0.8), 0.3, rng.jitter(0.8))).normalize() * len * 0.5;
-            tube(&mut m, end, twig, 0.02, 0.005, 3, 0.0, wood, Some(&mut rng));
+            detail_tube(&mut m, end, twig, 0.02, 0.005, 3, 0.0, wood, &mut rng, lod);
         }
     }
     m
 }
 
-fn rock(seed: u64) -> MeshData {
+fn rock(seed: u64, lod: u32) -> MeshData {
     let mut rng = Rng::new(seed);
     let mut m = MeshData::new();
     let s = seed as u32;
     let squash = Vec3::new(rng.range(0.5, 0.65), rng.range(0.32, 0.45), rng.range(0.45, 0.6));
     let displace = move |d: Vec3| 0.8 + 0.45 * value_noise(d.x * 1.7 + d.y * 0.7 + 3.0, d.z * 1.7 - d.y * 1.1 + 5.0, s);
-    blob(&mut m, Vec3::new(0.0, squash.y * 0.6, 0.0), squash, 1, displace, Vec3::new(0.36, 0.35, 0.37), Some(&mut rng));
+    // The coarse level keeps the 12 corner vertices of the fine one, so the outline barely changes.
+    let subdivisions = if lod == 0 { 1 } else { 0 };
+    let center = Vec3::new(0.0, squash.y * 0.6, 0.0);
+    blob(&mut m, center, squash, subdivisions, displace, Vec3::new(0.36, 0.35, 0.37), Some(&mut rng));
     m
 }
 
@@ -422,6 +465,18 @@ fn pillar(seed: u64, broken: bool) -> MeshData {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prop_lods_are_lighter_with_the_same_outline() {
+        for desc in [MeshDesc::Pine { seed: 3, tiers: 0 }, MeshDesc::DeadTree { seed: 2 }, MeshDesc::Rock { seed: 5 }] {
+            let mesh = desc.build();
+            let [lod] = &mesh.lods[..] else { panic!("{desc:?} should have one LOD") };
+            assert!(lod.mesh.indices.len() * 10 <= mesh.indices.len() * 7, "{desc:?}: LOD isn't much lighter");
+            let (full, coarse) = (mesh.bounding_sphere(), lod.mesh.bounding_sphere());
+            assert!(full.center.distance(coarse.center) < 0.15 * full.radius, "{desc:?}: LOD moved");
+            assert!((full.radius - coarse.radius).abs() < 0.15 * full.radius, "{desc:?}: LOD changed size");
+        }
+    }
 
     #[test]
     fn every_shape_builds() {
