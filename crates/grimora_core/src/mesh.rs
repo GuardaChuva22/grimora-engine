@@ -4,6 +4,8 @@ use std::sync::Arc;
 use bytemuck::{Pod, Zeroable};
 use glam::{Vec3, Vec4};
 
+use crate::animation::Skeleton;
+
 /// GPU vertex layout shared by every mesh. Colors are sRGB in `0..=1`.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
@@ -14,6 +16,10 @@ pub struct Vertex {
     pub uv: [f32; 2],
     /// xyz = tangent direction, w = bitangent sign. Only needed with normal maps.
     pub tangent: [f32; 4],
+    /// Skinned meshes: up to four joints moving this vertex...
+    pub joints: [u8; 4],
+    /// ...and how much each one counts (0..=255, summing to 255). All zero = not skinned.
+    pub weights: [u8; 4],
 }
 
 impl Vertex {
@@ -25,6 +31,8 @@ impl Vertex {
             color: color.to_array(),
             uv: [0.0; 2],
             tangent: [0.0; 4],
+            joints: [0; 4],
+            weights: [0; 4],
         }
     }
 }
@@ -152,6 +160,8 @@ pub struct MeshData {
     pub indices: Vec<u32>,
     pub materials: Vec<Material>,
     pub submeshes: Vec<Submesh>,
+    /// Present on animated meshes; vertices then carry joints and weights.
+    pub skeleton: Option<Arc<Skeleton>>,
 }
 
 impl MeshData {

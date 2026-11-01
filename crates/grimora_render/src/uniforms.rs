@@ -62,11 +62,15 @@ impl InstanceRaw {
         10 => Float32x4,
     ];
 
-    pub fn new(transform: &Transform, color: Vec3, emissive: f32) -> Self {
+    /// `joints` is the instance's first matrix in the joint buffer, for skinned meshes.
+    pub fn new(transform: &Transform, color: Vec3, emissive: f32, joints: Option<u32>) -> Self {
         let n = transform.normal_matrix();
+        // The normal matrix's spare w carries the joint offset (-1 = not skinned),
+        // which saves a vertex attribute. f32 holds integers exactly up to 2^24.
+        let joints = joints.map_or(-1.0, |j| j as f32);
         Self {
             model: transform.matrix().to_cols_array_2d(),
-            normal: [n.x_axis.extend(0.0).into(), n.y_axis.extend(0.0).into(), n.z_axis.extend(0.0).into()],
+            normal: [n.x_axis.extend(joints).into(), n.y_axis.extend(0.0).into(), n.z_axis.extend(0.0).into()],
             tint: color.extend(emissive).into(),
         }
     }
@@ -80,9 +84,10 @@ impl InstanceRaw {
     }
 }
 
-// Field order of `grimora_core::Vertex`: position, normal, color, uv, tangent.
-pub const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 5] =
-    wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x3, 11 => Float32x2, 12 => Float32x4];
+// Field order of `grimora_core::Vertex`: position, normal, color, uv, tangent, joints, weights.
+pub const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 7] = wgpu::vertex_attr_array![
+    0 => Float32x3, 1 => Float32x3, 2 => Float32x3, 11 => Float32x2, 12 => Float32x4, 13 => Uint8x4, 14 => Unorm8x4,
+];
 
 pub fn vertex_layout() -> wgpu::VertexBufferLayout<'static> {
     wgpu::VertexBufferLayout {

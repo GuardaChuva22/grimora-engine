@@ -4,6 +4,10 @@
 //! applied to the vertices and every primitive becomes a submesh with its own
 //! material. Loaded models are cached by file path and modification time, so
 //! hot-reloading a scene doesn't decode the same textures again.
+//!
+//! The first skin becomes the mesh's [`Skeleton`], with every animation that
+//! targets its joints. Meshes parented under a joint (a sword in a hand) are
+//! bound rigidly to that joint so they follow it.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -11,8 +15,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 
 use anyhow::{Context as _, Result, bail};
-use glam::{Mat3, Mat4, Vec2, Vec3, Vec4};
-use grimora_core::{AlphaMode, Material, MeshData, Submesh, TextureData, Vertex};
+use glam::{Mat3, Mat4, Quat, Vec2, Vec3, Vec4};
+use grimora_core::animation::{AnimationClip, Channel, Interpolation, Joint, JointTransform, Keyframes, MAX_JOINTS};
+use grimora_core::{AlphaMode, Material, MeshData, Skeleton, Submesh, TextureData, Vertex};
 
 /// Largest texture side used when a scene doesn't say otherwise.
 pub const DEFAULT_MAX_TEXTURE_SIZE: u32 = 2048;
@@ -62,29 +67,43 @@ fn import(path: &Path, max_texture_size: u32) -> Result<MeshData> {
     let Some(scene) = document.default_scene().or_else(|| document.scenes().next()) else {
         bail!("{} has no scene", path.display());
     };
-    // Depth-first in file order (children are pushed reversed onto the stack).
-    let mut stack: Vec<(gltf::Node, Mat4)> = scene.nodes().map(|n| (n, Mat4::IDENTITY)).collect();
-    stack.reverse();
-    while let Some((node, parent)) = stack.pop() {
-        let world = parent * Mat4::from_cols_array_2d(&node.transform().matrix());
-        if let Some(gltf_mesh) = node.mesh() {
-            for primitive in gltf_mesh.primitives() {
-                if primitive.mode() != gltf::mesh::Mode::Triangles {
-                    log::warn!(
-                        "{}: skipping a {:?} primitive (only triangles are supported)",
-                        path.display(),
-                        primitive.mode()
-                    );
-                    continue;
-                }
-                let material = primitive.material().index().unwrap_or(default_material);
-                append_primitive(&mut mesh, &primitive, &buffers, world, material);
-            }
-        }
-        let first_child = stack.len();
-        stack.extend(node.children().map(|child| (child, world)));
-        stack[first_child..].reverse();
+    let nodes = NodeTree::new(&document, &scene);
+    let rig = document.skins().next().and_then(|skin| Rig::new(&document, &skin, &buffers, &nodes, path));
+    if document.skins().len() > 1 {
+        log::warn!("{}: only the first skin is used", path.display());
     }
+
+    for &node_index in &nodes.order {
+        let node = document.nodes().nth(node_index).expect("node index from the tree");
+        let Some(gltf_mesh) = node.mesh() else { continue };
+        let world = nodes.world[&node_index];
+        let (placement, binding) = match (&rig, node.skin()) {
+            (Some(rig), Some(skin)) if skin.index() == rig.skin => (Mat4::IDENTITY, Binding::Skinned),
+            (_, Some(_)) => {
+                log::warn!("{}: skipping a mesh bound to another skin", path.display());
+                continue;
+            }
+            // Under a joint: move into that joint's bind space and follow it.
+            (Some(rig), None) => match nodes.ancestors(node_index).find_map(|n| rig.joint_of_node.get(&n)) {
+                Some(&joint) => (rig.rest_skinning[joint].inverse() * world, Binding::Rigid(joint as u8)),
+                None => (world, Binding::None),
+            },
+            (None, _) => (world, Binding::None),
+        };
+        for primitive in gltf_mesh.primitives() {
+            if primitive.mode() != gltf::mesh::Mode::Triangles {
+                log::warn!(
+                    "{}: skipping a {:?} primitive (only triangles are supported)",
+                    path.display(),
+                    primitive.mode()
+                );
+                continue;
+            }
+            let material = primitive.material().index().unwrap_or(default_material);
+            append_primitive(&mut mesh, &primitive, &buffers, placement, binding, material);
+        }
+    }
+    mesh.skeleton = rig.map(|rig| Arc::new(rig.skeleton));
 
     if mesh.submeshes.iter().any(|s| s.material == default_material) {
         mesh.materials.push(Material::default());
@@ -92,8 +111,9 @@ fn import(path: &Path, max_texture_size: u32) -> Result<MeshData> {
     if mesh.is_empty() {
         bail!("{} has no triangles", path.display());
     }
+    let (joints, clips) = mesh.skeleton.as_ref().map_or((0, 0), |s| (s.joints.len(), s.clips.len()));
     log::info!(
-        "Imported {} ({} triangles, {} textures) in {:.0} ms ({:.0} ms decoding)",
+        "Imported {} ({} triangles, {} textures, {joints} joints, {clips} animations) in {:.0} ms ({:.0} ms decoding)",
         path.display(),
         mesh.triangle_count(),
         textures.len(),
@@ -103,11 +123,189 @@ fn import(path: &Path, max_texture_size: u32) -> Result<MeshData> {
     Ok(mesh)
 }
 
+/// The scene's nodes with their world matrices and parents, in file order.
+struct NodeTree {
+    /// Depth-first, parents before children.
+    order: Vec<usize>,
+    world: HashMap<usize, Mat4>,
+    parent: HashMap<usize, usize>,
+}
+
+impl NodeTree {
+    fn new(document: &gltf::Document, scene: &gltf::Scene) -> Self {
+        let mut tree = Self { order: Vec::new(), world: HashMap::new(), parent: HashMap::new() };
+        // Depth-first in file order (children are pushed reversed onto the stack).
+        let mut stack: Vec<(gltf::Node, Mat4)> = scene.nodes().map(|n| (n, Mat4::IDENTITY)).collect();
+        stack.reverse();
+        while let Some((node, parent)) = stack.pop() {
+            let world = parent * Mat4::from_cols_array_2d(&node.transform().matrix());
+            tree.order.push(node.index());
+            tree.world.insert(node.index(), world);
+            let first_child = stack.len();
+            for child in node.children() {
+                tree.parent.insert(child.index(), node.index());
+                stack.push((child, world));
+            }
+            stack[first_child..].reverse();
+        }
+        // Joints outside the scene still need a matrix.
+        for node in document.nodes() {
+            tree.world.entry(node.index()).or_insert(Mat4::IDENTITY);
+        }
+        tree
+    }
+
+    /// The node itself, then its parent, grandparent...
+    fn ancestors(&self, node: usize) -> impl Iterator<Item = usize> + '_ {
+        std::iter::successors(Some(node), |n| self.parent.get(n).copied())
+    }
+}
+
+/// The skin's skeleton and how its joints map to nodes.
+struct Rig {
+    skin: usize,
+    skeleton: Skeleton,
+    joint_of_node: HashMap<usize, usize>,
+    /// Skinning matrix of each joint in the rest pose (rest global × inverse bind).
+    rest_skinning: Vec<Mat4>,
+}
+
+impl Rig {
+    fn new(
+        document: &gltf::Document,
+        skin: &gltf::Skin,
+        buffers: &[gltf::buffer::Data],
+        nodes: &NodeTree,
+        path: &Path,
+    ) -> Option<Self> {
+        let joint_nodes: Vec<gltf::Node> = skin.joints().collect();
+        if joint_nodes.is_empty() || joint_nodes.len() > MAX_JOINTS {
+            log::warn!(
+                "{}: skin has {} joints (1 to {MAX_JOINTS} supported); importing it static",
+                path.display(),
+                joint_nodes.len()
+            );
+            return None;
+        }
+        let joint_of_node: HashMap<usize, usize> =
+            joint_nodes.iter().enumerate().map(|(i, n)| (n.index(), i)).collect();
+        let reader = skin.reader(|buffer| buffers.get(buffer.index()).map(|data| &data.0[..]));
+        let inverse_binds: Vec<Mat4> = reader
+            .read_inverse_bind_matrices()
+            .map(|m| m.map(|m| Mat4::from_cols_array_2d(&m)).collect())
+            .unwrap_or_default();
+
+        let mut root = None;
+        let joints: Vec<Joint> = joint_nodes
+            .iter()
+            .enumerate()
+            .map(|(i, node)| {
+                // The nearest ancestor that is also a joint.
+                let parent = nodes.ancestors(node.index()).skip(1).find_map(|n| joint_of_node.get(&n).copied());
+                if parent.is_none() {
+                    let above = nodes.parent.get(&node.index()).map_or(Mat4::IDENTITY, |p| nodes.world[p]);
+                    match root {
+                        None => root = Some(above),
+                        Some(r) if !r.abs_diff_eq(above, 1e-4) => {
+                            log::warn!("{}: root joints sit under different transforms", path.display());
+                        }
+                        Some(_) => {}
+                    }
+                }
+                let (translation, rotation, scale) = node.transform().decomposed();
+                Joint {
+                    name: node.name().map_or_else(|| format!("joint{i}"), str::to_owned),
+                    parent,
+                    rest: JointTransform {
+                        translation: Vec3::from(translation),
+                        rotation: Quat::from_array(rotation).normalize(),
+                        scale: Vec3::from(scale),
+                    },
+                    inverse_bind: inverse_binds.get(i).copied().unwrap_or(Mat4::IDENTITY),
+                }
+            })
+            .collect();
+
+        let clips =
+            document.animations().enumerate().filter_map(|(i, a)| clip(&a, i, &joint_of_node, buffers)).collect();
+        let skeleton = Skeleton::new(joints, root.unwrap_or(Mat4::IDENTITY), clips);
+        let mut globals = Vec::new();
+        skeleton.global_transforms(&skeleton.rest_pose(), &mut globals);
+        let rest_skinning = globals.iter().zip(&skeleton.joints).map(|(g, j)| *g * j.inverse_bind).collect();
+        Some(Self { skin: skin.index(), skeleton, joint_of_node, rest_skinning })
+    }
+}
+
+/// Converts the channels of `animation` that target skeleton joints.
+fn clip(
+    animation: &gltf::Animation,
+    index: usize,
+    joint_of_node: &HashMap<usize, usize>,
+    buffers: &[gltf::buffer::Data],
+) -> Option<AnimationClip> {
+    use gltf::animation::util::ReadOutputs;
+    let name = animation.name().map_or_else(|| format!("animation{index}"), str::to_owned);
+    let mut channels = Vec::new();
+    let mut skipped = 0;
+    for channel in animation.channels() {
+        let Some(&joint) = joint_of_node.get(&channel.target().node().index()) else {
+            skipped += 1;
+            continue;
+        };
+        let reader = channel.reader(|buffer| buffers.get(buffer.index()).map(|data| &data.0[..]));
+        let Some(times) = reader.read_inputs().map(Iterator::collect::<Vec<f32>>) else { continue };
+        let interpolation = channel.sampler().interpolation();
+        // Cubic splines store (in-tangent, value, out-tangent) per key: keep the values.
+        let values = |n: usize| -> Vec<usize> {
+            match interpolation {
+                gltf::animation::Interpolation::CubicSpline => (0..n / 3).map(|k| k * 3 + 1).collect(),
+                _ => (0..n).collect(),
+            }
+        };
+        let keys = match reader.read_outputs() {
+            Some(ReadOutputs::Translations(v)) => {
+                let v: Vec<Vec3> = v.map(Vec3::from).collect();
+                Keyframes::Translation(values(v.len()).into_iter().map(|k| v[k]).collect())
+            }
+            Some(ReadOutputs::Rotations(v)) => {
+                let v: Vec<Quat> = v.into_f32().map(|q| Quat::from_array(q).normalize()).collect();
+                Keyframes::Rotation(values(v.len()).into_iter().map(|k| v[k]).collect())
+            }
+            Some(ReadOutputs::Scales(v)) => {
+                let v: Vec<Vec3> = v.map(Vec3::from).collect();
+                Keyframes::Scale(values(v.len()).into_iter().map(|k| v[k]).collect())
+            }
+            // Morph target weights aren't supported.
+            _ => continue,
+        };
+        let interpolation = match interpolation {
+            gltf::animation::Interpolation::Step => Interpolation::Step,
+            _ => Interpolation::Linear,
+        };
+        channels.push(Channel { joint, interpolation, times, keys });
+    }
+    if skipped > 0 {
+        log::warn!("animation {name:?}: {skipped} channels target nodes outside the skeleton and were skipped");
+    }
+    let duration = channels.iter().filter_map(|c| c.times.last()).fold(0.0f32, |a, &b| a.max(b));
+    (!channels.is_empty()).then_some(AnimationClip { name, duration, channels })
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Binding {
+    None,
+    /// Every vertex follows this joint.
+    Rigid(u8),
+    /// Joints and weights come from the primitive.
+    Skinned,
+}
+
 fn append_primitive(
     mesh: &mut MeshData,
     primitive: &gltf::Primitive,
     buffers: &[gltf::buffer::Data],
     world: Mat4,
+    binding: Binding,
     material: usize,
 ) {
     let reader = primitive.reader(|buffer| buffers.get(buffer.index()).map(|data| &data.0[..]));
@@ -155,6 +353,20 @@ fn append_primitive(
         Some(colors) => colors.into_rgb_f32().map(|c| linear_to_srgb(Vec3::from(c))).collect(),
         None => vec![Vec3::ONE; count],
     };
+    let skin: Vec<([u8; 4], [u8; 4])> = match binding {
+        Binding::None => vec![([0; 4], [0; 4]); count],
+        Binding::Rigid(joint) => vec![([joint, 0, 0, 0], [255, 0, 0, 0]); count],
+        Binding::Skinned => {
+            let joints: Vec<[u16; 4]> = reader.read_joints(0).map_or_else(Vec::new, |j| j.into_u16().collect());
+            let weights: Vec<[f32; 4]> = reader.read_weights(0).map_or_else(Vec::new, |w| w.into_f32().collect());
+            (0..count)
+                .map(|i| match (joints.get(i), weights.get(i)) {
+                    (Some(j), Some(w)) => pack_weights(*j, *w),
+                    _ => ([0; 4], [0; 4]),
+                })
+                .collect()
+        }
+    };
 
     let base = mesh.vertices.len() as u32;
     mesh.vertices.extend((0..count).map(|i| Vertex {
@@ -163,6 +375,8 @@ fn append_primitive(
         color: colors[i].to_array(),
         uv: uvs[i].to_array(),
         tangent: tangents[i].to_array(),
+        joints: skin[i].0,
+        weights: skin[i].1,
     }));
     let start = mesh.indices.len() as u32;
     mesh.indices.extend(indices.iter().map(|i| i + base));
@@ -262,6 +476,27 @@ fn convert_slow(image: &gltf::image::Data) -> Vec<u8> {
         });
     }
     rgba
+}
+
+/// Quantizes four joint weights to bytes that sum to exactly 255. Joints past
+/// [`MAX_JOINTS`] can't be stored and lose their weight.
+fn pack_weights(joints: [u16; 4], weights: [f32; 4]) -> ([u8; 4], [u8; 4]) {
+    let mut w = weights.map(|w| w.max(0.0));
+    for (weight, &joint) in w.iter_mut().zip(&joints) {
+        if usize::from(joint) >= MAX_JOINTS {
+            *weight = 0.0;
+        }
+    }
+    let sum: f32 = w.iter().sum();
+    if sum <= 0.0 {
+        return ([0; 4], [0; 4]);
+    }
+    let mut bytes = w.map(|w| (w / sum * 255.0).round() as u8);
+    // Rounding can leave the total off by one or two: settle it on the heaviest joint.
+    let heaviest = (0..4).max_by(|&a, &b| w[a].total_cmp(&w[b])).unwrap_or(0);
+    let total: i32 = bytes.iter().map(|&b| i32::from(b)).sum();
+    bytes[heaviest] = (i32::from(bytes[heaviest]) + 255 - total).clamp(0, 255) as u8;
+    (joints.map(|j| j.min(255) as u8), bytes)
 }
 
 /// Area-weighted vertex normals, for files that don't provide any.
@@ -435,6 +670,36 @@ mod tests {
         // Cached: a second load is identical.
         assert_eq!(load_model(&path, 4).unwrap().vertices, mesh.vertices);
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn imports_skin_and_animations() {
+        let path = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/models/wanderer/wanderer.gltf"));
+        let mesh = load_model(path, 0).unwrap();
+        let skeleton = mesh.skeleton.clone().expect("the wanderer is rigged");
+        assert_eq!(skeleton.joints.len(), 17);
+        for name in ["idle", "walk", "run", "jump"] {
+            assert!(skeleton.clip(name).is_some(), "missing clip {name}");
+        }
+        for v in &mesh.vertices {
+            assert_eq!(v.weights.iter().map(|&w| w as u32).sum::<u32>(), 255);
+            assert!(v.joints.iter().all(|&j| (j as usize) < skeleton.joints.len()));
+        }
+
+        // The bind pose leaves the mesh where it was modeled.
+        let mut animator = grimora_core::Animator::new(skeleton);
+        for m in animator.skinning_matrices() {
+            assert!(m.abs_diff_eq(Mat4::IDENTITY, 1e-5), "{m}");
+        }
+        // Walking swings the legs; the lantern joint follows the left hand.
+        let rest_foot = animator.joint_transform("foot.L").unwrap();
+        assert!(animator.play("walk", 0.0));
+        animator.update(0.2);
+        let foot = animator.joint_transform("foot.L").unwrap();
+        assert!(foot.w_axis.distance(rest_foot.w_axis) > 0.1);
+        let hand = animator.joint_transform("hand.L").unwrap().w_axis;
+        let lantern = animator.joint_transform("lantern").unwrap().w_axis;
+        assert!((hand.distance(lantern) - 0.07).abs() < 1e-4);
     }
 
     #[test]

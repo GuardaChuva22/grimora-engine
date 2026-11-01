@@ -1,4 +1,4 @@
-use grimora_core::{Environment, MeshData, PointLight, Transform, Vec3};
+use grimora_core::{Animator, Environment, MeshData, PointLight, Transform, Vec3};
 use grimora_physics::Physics;
 use grimora_scene::{PlayerSpawn, Scene, Terrain};
 
@@ -16,6 +16,9 @@ pub struct Object {
     pub color: Vec3,
     pub emissive: f32,
     pub visible: bool,
+    /// Plays the mesh's animations. Created automatically for meshes with a
+    /// skeleton and advanced by the engine every frame after `Game::update`.
+    pub animator: Option<Animator>,
 }
 
 /// Everything the game can see and change: objects, lights, atmosphere.
@@ -37,13 +40,22 @@ impl World {
         let objects = scene
             .objects
             .into_iter()
-            .map(|o| Object {
-                name: o.name,
-                mesh: MeshId(o.mesh),
-                transform: o.transform,
-                color: o.color,
-                emissive: o.emissive,
-                visible: true,
+            .map(|o| {
+                let mut animator = animator_for(scene.meshes.get(o.mesh));
+                if let (Some(animator), Some(clip)) = (&mut animator, &o.animation)
+                    && !animator.play(clip, 0.0)
+                {
+                    log::warn!("object {:?}: the model has no animation {clip:?}", o.name);
+                }
+                Object {
+                    name: o.name,
+                    mesh: MeshId(o.mesh),
+                    transform: o.transform,
+                    color: o.color,
+                    emissive: o.emissive,
+                    visible: true,
+                    animator,
+                }
             })
             .collect();
         Self {
@@ -70,9 +82,18 @@ impl World {
     }
 
     /// Adds an object and returns its index in [`World::objects`].
+    /// Objects with an animated mesh get an [`Animator`] in the bind pose.
     pub fn spawn(&mut self, mesh: MeshId, transform: Transform, color: Vec3) -> usize {
-        self.objects.push(Object { name: None, mesh, transform, color, emissive: 0.0, visible: true });
+        let animator = animator_for(self.meshes.get(mesh.0));
+        self.objects.push(Object { name: None, mesh, transform, color, emissive: 0.0, visible: true, animator });
         self.objects.len() - 1
+    }
+
+    /// Advances every object's animator. The engine calls this after `Game::update`.
+    pub fn update_animations(&mut self, dt: f32) {
+        for animator in self.objects.iter_mut().filter_map(|o| o.animator.as_mut()) {
+            animator.update(dt);
+        }
     }
 
     pub fn find(&self, name: &str) -> Option<&Object> {
@@ -96,8 +117,20 @@ impl World {
         }
     }
 
+    /// World transform of an animated object's joint, for attaching things to it.
+    pub fn joint_transform(&self, object: usize, joint: &str) -> Option<Transform> {
+        let object = self.objects.get(object)?;
+        let joint = object.animator.as_ref()?.joint_transform(joint)?;
+        let (scale, rotation, position) = (object.transform.matrix() * joint).to_scale_rotation_translation();
+        Some(Transform { position, rotation, scale })
+    }
+
     /// Ground height at `(x, z)`, or 0 without terrain.
     pub fn ground_height(&self, x: f32, z: f32) -> f32 {
         self.terrain.as_ref().map_or(0.0, |t| t.height_at(x, z))
     }
+}
+
+fn animator_for(mesh: Option<&MeshData>) -> Option<Animator> {
+    mesh?.skeleton.clone().map(Animator::new)
 }

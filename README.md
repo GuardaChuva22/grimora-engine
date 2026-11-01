@@ -136,8 +136,35 @@ Exporte do Blender como glTF 2.0 (`.gltf` + `.bin` + texturas, ou `.glb`) para `
 - Texturas maiores que `max_texture_size` (padrão 2048) são reduzidas pela metade até caber: `Model(path: "...", max_texture_size: 1024)`.
 - O modelo mantém a origem e a escala do arquivo. O colisor automático é o casco convexo; use `collider: Mesh` para formas côncavas grandes (casas, ruínas) ou `None` para decoração.
 - Modelos ficam em cache enquanto o arquivo não muda, então o hot-reload da cena é instantâneo. Editar só o modelo não recarrega a cena: salve o `.ron` para recarregar.
-- Ainda não suportados: animação, skinning, mistura de transparência ordenada e um segundo conjunto de UVs.
+- Ainda não suportados: mistura de transparência ordenada, morph targets e um segundo conjunto de UVs.
 - O estandarte do sandbox é gerado por [tools/gen_banner.py](tools/gen_banner.py) (Python puro), um exemplo de como criar um glTF por código.
+
+### Animação esquelética
+
+Modelos glTF com esqueleto (skin) e animações tocam direto: o skinning roda na GPU (até 4 ossos por vértice) e cada objeto animado ganha um `Animator`.
+
+![Os clipes idle, walk, run e jump do andarilho](docs/animation.png)
+
+```ron
+(mesh: Model(path: "../models/wanderer/wanderer.gltf"), position: (5.6, 0.0, 8.4), animation: "idle"),
+```
+
+```rust
+// No jogo: escolha o clipe pelo movimento; a troca faz crossfade.
+if let Some(animator) = ctx.world.objects[avatar].animator.as_mut() {
+    animator.play(if correndo { "run" } else { "walk" }, 0.2);
+    animator.speed = velocidade / 4.5; // pés sem deslizar
+}
+// Prenda coisas aos ossos (luz, arma, partículas): transformação no mundo.
+if let Some(mao) = ctx.world.joint_transform(avatar, "hand.L") {
+    ctx.world.lights[luz].position = mao.position;
+}
+```
+
+- `Animator`: `play` (em laço) e `play_once` (segura o último quadro; veja `finished`), crossfade suave, `speed`, `stop` volta à pose de repouso, `joint_transform` dá a pose de um osso no espaço do modelo.
+- Usa a primeira skin do arquivo. Malhas filhas de um osso (uma espada na mão, por exemplo) seguem o osso sem precisar de pesos. Interpolação step, linear e cubic spline (esta aproximada por linear).
+- Exporte do Blender com "Animation" ligado e cada ação como um clipe (NLA ou "Actions"); os nomes dos clipes são os das ações. Animação de nós que não são ossos é ignorada.
+- O andarilho do sandbox vem de [tools/gen_wanderer.py](tools/gen_wanderer.py): 17 ossos (o último segura a lanterna) e os clipes `idle`, `walk`, `run` e `jump`, todos no lugar (o movimento vem do controlador).
 
 ## Visão
 
@@ -162,10 +189,10 @@ Diretrizes:
 - [x] Importação de modelos glTF com materiais PBR (texturas de cor, normal, metal/rugosidade e oclusão, com mipmaps)
 - [x] Transparência recortada (`alphaMode: Mask`) com alpha-to-coverage e sombras recortadas; mapas de emissão
 - [x] Corpos dinâmicos: objetos que caem, rolam e são empurrados pelo personagem
+- [x] Animação esquelética: skinning na GPU, clipes glTF com crossfade e objetos presos a ossos
 
 **Próximos passos**
 - [ ] Culling por frustum e LOD
-- [ ] Animação esquelética
 - [ ] Áudio (avaliar `kira`)
 - [ ] Mundo em regiões com carregamento por streaming
 - [ ] Salvamento de jogo

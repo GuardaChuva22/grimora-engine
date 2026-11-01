@@ -1,5 +1,5 @@
 use anyhow::{Context as _, Result, anyhow};
-use grimora_core::{Camera, Environment, MeshData, PointLight, Transform, Vec3};
+use grimora_core::{Camera, Environment, Mat4, MeshData, PointLight, Transform, Vec3};
 use image::RgbaImage;
 use wgpu::util::DeviceExt as _;
 
@@ -36,6 +36,9 @@ pub struct DrawItem {
     pub color: Vec3,
     /// Self-illumination: 0 = none, 1 = glows at its own albedo, higher = brighter.
     pub emissive: f32,
+    /// Skinned meshes: index of this draw's first matrix in [`Frame::joint_matrices`].
+    /// `None` draws the mesh in its bind pose.
+    pub joints: Option<u32>,
 }
 
 /// Everything the renderer needs for one frame.
@@ -44,6 +47,9 @@ pub struct Frame<'a> {
     pub environment: &'a Environment,
     pub lights: &'a [PointLight],
     pub draws: &'a [DrawItem],
+    /// Skinning matrices of every animated draw, one block per draw
+    /// (see [`grimora_core::Animator::skinning_matrices`]).
+    pub joint_matrices: &'a [Mat4],
     /// Seconds since start; drives flicker and film grain.
     pub time: f32,
 }
@@ -87,7 +93,11 @@ pub struct Renderer {
     shadow_map_size: u32,
 
     globals_buffer: wgpu::Buffer,
+    globals_layout: wgpu::BindGroupLayout,
     globals_group: wgpu::BindGroup,
+    /// Skinning matrices for this frame (storage buffer in the globals group).
+    joint_buffer: wgpu::Buffer,
+    joint_capacity: usize,
     shadow_view: wgpu::TextureView,
     shadow_group: wgpu::BindGroup,
     post_buffer: wgpu::Buffer,
@@ -167,16 +177,28 @@ impl Renderer {
         // ---- bind group layouts
         let globals_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("globals"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
         });
         let shadow_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("shadow"),
@@ -211,11 +233,9 @@ impl Renderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let globals_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("globals"),
-            layout: &globals_layout,
-            entries: &[wgpu::BindGroupEntry { binding: 0, resource: globals_buffer.as_entire_binding() }],
-        });
+        let joint_capacity = 256;
+        let joint_buffer = create_joint_buffer(&device, joint_capacity);
+        let globals_group = create_globals_group(&device, &globals_layout, &globals_buffer, &joint_buffer);
 
         let shadow_map_size = settings.shadow_map_size.clamp(256, 8192);
         let shadow_view = device
@@ -438,7 +458,10 @@ impl Renderer {
             msaa,
             shadow_map_size,
             globals_buffer,
+            globals_layout,
             globals_group,
+            joint_buffer,
+            joint_capacity,
             shadow_view,
             shadow_group,
             post_buffer,
@@ -560,6 +583,7 @@ impl Renderer {
         let post = uniforms::post_params(frame.environment, frame.time, self.bloom.mip_count());
         self.queue.write_buffer(&self.post_buffer, 0, bytemuck::bytes_of(&post));
         self.prepare_instances(frame.draws);
+        self.upload_joints(frame.joint_matrices);
 
         let mut encoder = self.device.create_command_encoder(&Default::default());
 
@@ -705,7 +729,7 @@ impl Renderer {
         for i in order {
             let draw = &draws[i];
             let index = self.instances.len() as u32;
-            self.instances.push(InstanceRaw::new(&draw.transform, draw.color, draw.emissive));
+            self.instances.push(InstanceRaw::new(&draw.transform, draw.color, draw.emissive, draw.joints));
             match self.batches.last_mut() {
                 Some(batch) if batch.mesh == draw.mesh => batch.instances.end = index + 1,
                 _ => self.batches.push(Batch { mesh: draw.mesh, instances: index..index + 1 }),
@@ -729,6 +753,18 @@ impl Renderer {
                 })
                 .sum(),
         };
+    }
+
+    fn upload_joints(&mut self, matrices: &[Mat4]) {
+        if matrices.len() > self.joint_capacity {
+            self.joint_capacity = matrices.len().next_power_of_two();
+            self.joint_buffer = create_joint_buffer(&self.device, self.joint_capacity);
+            self.globals_group =
+                create_globals_group(&self.device, &self.globals_layout, &self.globals_buffer, &self.joint_buffer);
+        }
+        if !matrices.is_empty() {
+            self.queue.write_buffer(&self.joint_buffer, 0, bytemuck::cast_slice(matrices));
+        }
     }
 
     /// Draws every batch. With `materials`, binds each submesh's material and
@@ -845,6 +881,31 @@ fn create_post_group(
             wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(sampler) },
             wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(bloom.output()) },
             wgpu::BindGroupEntry { binding: 3, resource: params.as_entire_binding() },
+        ],
+    })
+}
+
+fn create_joint_buffer(device: &wgpu::Device, capacity: usize) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("joints"),
+        size: (capacity * size_of::<Mat4>()) as u64,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
+fn create_globals_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    globals: &wgpu::Buffer,
+    joints: &wgpu::Buffer,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("globals"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: globals.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 1, resource: joints.as_entire_binding() },
         ],
     })
 }

@@ -1,5 +1,6 @@
 //! Core types shared by every Grimora crate: time, input, transforms and camera.
 
+pub mod animation;
 mod camera;
 pub mod environment;
 mod input;
@@ -7,6 +8,7 @@ mod mesh;
 mod time;
 mod transform;
 
+pub use animation::{AnimationClip, Animator, Skeleton};
 pub use camera::Camera;
 pub use environment::{Environment, PointLight};
 pub use input::{Input, KeyCode, MouseButton};

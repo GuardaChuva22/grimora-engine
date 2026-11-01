@@ -11,8 +11,8 @@ use grimora::prelude::*;
 
 const DEFAULT_SCENE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/scenes/sandbox.ron");
 
-/// Where the lantern hangs relative to the character (left hand, slightly forward).
-const LANTERN_OFFSET: Vec3 = Vec3::new(-0.34, 0.86, -0.22);
+/// The animated wanderer (made by tools/gen_wanderer.py).
+const WANDERER: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/models/wanderer/wanderer.gltf");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
@@ -26,7 +26,6 @@ struct Sandbox {
     player: Option<ThirdPersonController>,
     /// Indices into the world, re-created whenever the scene (re)loads.
     avatar: usize,
-    lantern: usize,
     lantern_light: usize,
     /// The "heart" crystal and its resting position.
     heart: Option<(usize, Vec3)>,
@@ -34,15 +33,7 @@ struct Sandbox {
 
 impl Sandbox {
     fn new() -> Self {
-        Self {
-            mode: Mode::Play,
-            fly: FlyCamera::default(),
-            player: None,
-            avatar: 0,
-            lantern: 0,
-            lantern_light: 0,
-            heart: None,
-        }
+        Self { mode: Mode::Play, fly: FlyCamera::default(), player: None, avatar: 0, lantern_light: 0, heart: None }
     }
 
     fn spawn_player(&mut self, ctx: &Context) {
@@ -78,11 +69,14 @@ impl Game for Sandbox {
             self.spawn_player(ctx);
         }
 
-        let wanderer = ctx.world.add_mesh(MeshDesc::Wanderer.build());
+        // The glTF model is rigged and animated; it gets an `Animator` on spawn.
+        let mesh = grimora::scene::load_model(WANDERER.as_ref(), grimora::scene::DEFAULT_MAX_TEXTURE_SIZE)
+            .unwrap_or_else(|err| {
+                eprintln!("[sandbox] {err:#}; using the static wanderer");
+                MeshDesc::Wanderer.build()
+            });
+        let wanderer = ctx.world.add_mesh(mesh);
         self.avatar = ctx.world.spawn(wanderer, Transform::IDENTITY, Vec3::ONE);
-        let cube = ctx.world.add_mesh(MeshDesc::Cube.build());
-        self.lantern = ctx.world.spawn(cube, Transform::IDENTITY, Vec3::new(1.0, 0.7, 0.35));
-        ctx.world.objects[self.lantern].emissive = 6.0;
         ctx.world.lights.push(PointLight {
             color: Vec3::new(1.0, 0.68, 0.38),
             intensity: 7.0,
@@ -109,6 +103,9 @@ impl Game for Sandbox {
             Mode::Fly => {
                 let looking = self.fly.update(&mut ctx.camera, &ctx.input, dt);
                 ctx.set_cursor_grab(looking);
+                // The character stays under physics (and lands) while the camera flies.
+                let mut unused = ctx.camera;
+                player.update(&Input::default(), &mut ctx.physics, &mut unused, dt);
             }
         }
         // Fell out of the world: back to the start.
@@ -117,20 +114,19 @@ impl Game for Sandbox {
         }
 
         let Some(player) = self.player.as_ref() else { return };
-        let body = player.transform();
-        ctx.world.objects[self.avatar].transform = body;
+        let avatar = &mut ctx.world.objects[self.avatar];
+        avatar.transform = player.transform();
+        if let Some(animator) = avatar.animator.as_mut() {
+            animate(animator, player);
+        }
 
-        // The lantern sways a little with speed and time.
+        // The light hangs from the lantern joint, so it swings with the walk.
+        if let Some(lantern) = ctx.world.joint_transform(self.avatar, "lantern") {
+            ctx.world.lights[self.lantern_light].position =
+                lantern.position + lantern.rotation * Vec3::new(0.0, -0.1, 0.0);
+        }
+
         let t = ctx.time.elapsed();
-        let speed = player.velocity().length();
-        let sway = Quat::from_rotation_x((t * 5.0).sin() * 0.05 * (1.0 + speed * 0.3));
-        let lantern = Transform {
-            position: body.position + body.rotation * LANTERN_OFFSET,
-            rotation: body.rotation * sway,
-            scale: Vec3::new(0.14, 0.2, 0.14),
-        };
-        ctx.world.objects[self.lantern].transform = lantern;
-        ctx.world.lights[self.lantern_light].position = lantern.position + Vec3::Y * 0.1;
 
         if let Some((index, rest)) = self.heart {
             let heart = &mut ctx.world.objects[index];
@@ -138,6 +134,25 @@ impl Game for Sandbox {
             heart.transform.rotation = Quat::from_rotation_y(t * 0.4);
         }
     }
+}
+
+/// Picks the wanderer's clip from how the character moves.
+fn animate(animator: &mut Animator, player: &ThirdPersonController) {
+    let velocity = player.velocity();
+    let speed = Vec2::new(velocity.x, velocity.z).length();
+    let (clip, rate) = if !player.body.grounded {
+        ("jump", 1.0)
+    } else if speed < 0.4 {
+        ("idle", 1.0)
+    } else if speed < (player.walk_speed + player.run_speed) * 0.5 {
+        // Clips are authored at the controller's walk and run speeds; scale the
+        // playback so the feet don't slide while speeding up or slowing down.
+        ("walk", (speed / player.walk_speed).max(0.5))
+    } else {
+        ("run", speed / player.run_speed)
+    };
+    animator.play(clip, 0.2);
+    animator.speed = rate;
 }
 
 fn main() -> anyhow::Result<()> {

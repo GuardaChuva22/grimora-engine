@@ -36,6 +36,8 @@ struct MaterialParams {
 }
 
 @group(0) @binding(0) var<uniform> g: Globals;
+// Skinning matrices of every animated instance this frame (see InstanceIn.normal_0.w).
+@group(0) @binding(1) var<storage, read> joint_matrices: array<mat4x4<f32>>;
 @group(1) @binding(0) var shadow_map: texture_depth_2d;
 @group(1) @binding(1) var shadow_sampler: sampler_comparison;
 @group(2) @binding(0) var<uniform> material: MaterialParams;
@@ -54,6 +56,8 @@ struct VertexIn {
     @location(2) color: vec3<f32>,
     @location(11) uv: vec2<f32>,
     @location(12) tangent: vec4<f32>,
+    @location(13) joints: vec4<u32>,
+    @location(14) weights: vec4<f32>,
 }
 
 struct InstanceIn {
@@ -61,7 +65,7 @@ struct InstanceIn {
     @location(4) model_1: vec4<f32>,
     @location(5) model_2: vec4<f32>,
     @location(6) model_3: vec4<f32>,
-    @location(7) normal_0: vec4<f32>,
+    @location(7) normal_0: vec4<f32>, // w = first joint matrix, or -1 when not skinned
     @location(8) normal_1: vec4<f32>,
     @location(9) normal_2: vec4<f32>,
     @location(10) tint: vec4<f32>,  // rgb sRGB tint, a = emissive strength
@@ -83,11 +87,31 @@ fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
     return select(hi, lo, c <= vec3<f32>(0.04045));
 }
 
+// Model-space skinning matrix of a vertex: its joints' matrices blended by
+// weight. Identity for instances without joints and for unweighted vertices.
+fn skin_matrix(v: VertexIn, i: InstanceIn) -> mat4x4<f32> {
+    let total = dot(v.weights, vec4<f32>(1.0));
+    if i.normal_0.w < 0.0 || total <= 0.0 {
+        return mat4x4<f32>(vec4<f32>(1.0, 0.0, 0.0, 0.0), vec4<f32>(0.0, 1.0, 0.0, 0.0),
+                           vec4<f32>(0.0, 0.0, 1.0, 0.0), vec4<f32>(0.0, 0.0, 0.0, 1.0));
+    }
+    let first = u32(i.normal_0.w);
+    let w = v.weights / total;
+    return joint_matrices[first + v.joints.x] * w.x + joint_matrices[first + v.joints.y] * w.y
+        + joint_matrices[first + v.joints.z] * w.z + joint_matrices[first + v.joints.w] * w.w;
+}
+
+fn instance_model(i: InstanceIn) -> mat4x4<f32> {
+    return mat4x4<f32>(i.model_0, i.model_1, i.model_2, i.model_3);
+}
+
 @vertex
 fn vs_main(v: VertexIn, i: InstanceIn) -> VsOut {
-    let model = mat4x4<f32>(i.model_0, i.model_1, i.model_2, i.model_3);
-    let normal_m = mat3x3<f32>(i.normal_0.xyz, i.normal_1.xyz, i.normal_2.xyz);
-    let world = model * vec4<f32>(v.position, 1.0);
+    let skin = skin_matrix(v, i);
+    // Joints rotate (and at most uniformly scale), so their 3x3 also takes normals.
+    let skin_n = mat3x3<f32>(skin[0].xyz, skin[1].xyz, skin[2].xyz);
+    let normal_m = mat3x3<f32>(i.normal_0.xyz, i.normal_1.xyz, i.normal_2.xyz) * skin_n;
+    let world = instance_model(i) * skin * vec4<f32>(v.position, 1.0);
     var out: VsOut;
     out.clip = g.view_proj * world;
     out.world_pos = world.xyz;
@@ -102,8 +126,7 @@ fn vs_main(v: VertexIn, i: InstanceIn) -> VsOut {
 
 @vertex
 fn vs_shadow(v: VertexIn, i: InstanceIn) -> @builtin(position) vec4<f32> {
-    let model = mat4x4<f32>(i.model_0, i.model_1, i.model_2, i.model_3);
-    return g.light_view_proj * model * vec4<f32>(v.position, 1.0);
+    return g.light_view_proj * instance_model(i) * skin_matrix(v, i) * vec4<f32>(v.position, 1.0);
 }
 
 struct ShadowMaskedOut {
@@ -113,9 +136,8 @@ struct ShadowMaskedOut {
 
 @vertex
 fn vs_shadow_masked(v: VertexIn, i: InstanceIn) -> ShadowMaskedOut {
-    let model = mat4x4<f32>(i.model_0, i.model_1, i.model_2, i.model_3);
     var out: ShadowMaskedOut;
-    out.clip = g.light_view_proj * model * vec4<f32>(v.position, 1.0);
+    out.clip = g.light_view_proj * instance_model(i) * skin_matrix(v, i) * vec4<f32>(v.position, 1.0);
     out.uv = v.uv;
     return out;
 }

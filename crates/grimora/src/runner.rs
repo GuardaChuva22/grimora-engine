@@ -228,6 +228,7 @@ impl<G: Game> App<G> {
         self.ctx.physics.step(self.ctx.time.delta());
         self.ctx.world.sync_bodies(&self.ctx.physics);
         self.game.update(&mut self.ctx);
+        self.ctx.world.update_animations(self.ctx.time.delta());
         self.apply_cursor_grab();
 
         let frame_number = self.ctx.time.frame();
@@ -244,17 +245,18 @@ impl<G: Game> App<G> {
         for mesh in &world.meshes()[self.handles.len()..] {
             self.handles.push(renderer.upload_mesh(mesh));
         }
+        let mut joint_matrices = Vec::new();
         let draws: Vec<DrawItem> = world
             .objects
             .iter()
             .filter(|o| o.visible)
             .filter_map(|o| {
-                Some(DrawItem {
-                    mesh: *self.handles.get(o.mesh.0)?,
-                    transform: o.transform,
-                    color: o.color,
-                    emissive: o.emissive,
-                })
+                let mesh = *self.handles.get(o.mesh.0)?;
+                let joints = o.animator.as_ref().map(|a| {
+                    joint_matrices.extend_from_slice(a.skinning_matrices());
+                    (joint_matrices.len() - a.skinning_matrices().len()) as u32
+                });
+                Some(DrawItem { mesh, transform: o.transform, color: o.color, emissive: o.emissive, joints })
             })
             .collect();
         let frame = Frame {
@@ -262,6 +264,7 @@ impl<G: Game> App<G> {
             environment: &world.environment,
             lights: &world.lights,
             draws: &draws,
+            joint_matrices: &joint_matrices,
             time: self.ctx.time.elapsed(),
         };
         let capture = self.ctx.screenshot.take();
@@ -404,7 +407,13 @@ impl<G: Game> ApplicationHandler for App<G> {
     }
 
     fn device_event(&mut self, _event_loop: &ActiveEventLoop, _id: DeviceId, event: DeviceEvent) {
-        if let DeviceEvent::MouseMotion { delta } = event {
+        // Raw motion arrives even when the window is in the background; ignore it
+        // then, and in screenshot runs so they don't depend on the real mouse.
+        let focused = self.window.as_ref().is_some_and(|w| w.has_focus());
+        if let DeviceEvent::MouseMotion { delta } = event
+            && focused
+            && self.config.screenshot.is_none()
+        {
             self.ctx.input.add_mouse_delta(Vec2::new(delta.0 as f32, delta.1 as f32));
         }
     }

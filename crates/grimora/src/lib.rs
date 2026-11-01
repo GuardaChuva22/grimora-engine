@@ -54,8 +54,8 @@ pub trait Game: 'static {
 pub mod prelude {
     pub use crate::{Context, EngineConfig, FlyCamera, Game, MeshId, Object, ThirdPersonController, World};
     pub use grimora_core::{
-        Camera, Environment, EulerRot, Input, KeyCode, Mat4, MeshData, MouseButton, PointLight, Quat, Time, Transform,
-        Vec2, Vec3, Vec4,
+        Animator, Camera, Environment, EulerRot, Input, KeyCode, Mat4, MeshData, MouseButton, PointLight, Quat, Time,
+        Transform, Vec2, Vec3, Vec4,
     };
     pub use grimora_physics::{BodyHandle, CharacterBody, Physics, RayHit};
     pub use grimora_scene::{BodyDesc, MeshDesc};

@@ -95,6 +95,8 @@ pub struct ObjectDesc {
     pub collider: ColliderDesc,
     /// `Dynamic(...)` makes the object fall and get pushed around; needs a collider.
     pub body: BodyDesc,
+    /// Animated models: the clip looped from the start (e.g. `"idle"`).
+    pub animation: Option<String>,
 }
 
 impl Default for ObjectDesc {
@@ -111,6 +113,7 @@ impl Default for ObjectDesc {
             light: None,
             collider: ColliderDesc::Auto,
             body: BodyDesc::Static,
+            animation: None,
         }
     }
 }
@@ -178,6 +181,8 @@ pub struct SceneObject {
     pub collider: Option<ColliderShape>,
     /// Dynamic objects are moved by the physics simulation.
     pub body: BodyDesc,
+    /// Clip to loop when the mesh has a skeleton.
+    pub animation: Option<String>,
 }
 
 /// A scene ready to render: unique meshes plus the instances that use them.
@@ -236,6 +241,7 @@ impl Scene {
                 emissive: 0.0,
                 collider,
                 body: BodyDesc::Static,
+                animation: None,
             });
         }
         let ground = |x: f32, z: f32| terrain.as_ref().map_or(0.0, |t| t.height_at(x, z));
@@ -257,6 +263,7 @@ impl Scene {
                 emissive: obj.emissive,
                 collider,
                 body: obj.body,
+                animation: obj.animation.clone(),
             });
             if let Some(light) = &obj.light {
                 lights.push(attached_light(light, &transform));
@@ -291,6 +298,7 @@ impl Scene {
                     emissive: scatter.emissive,
                     collider,
                     body: BodyDesc::Static,
+                    animation: None,
                 });
                 if let Some(light) = &scatter.light {
                     lights.push(attached_light(light, &transform));
