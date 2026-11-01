@@ -7,7 +7,8 @@
 //!
 //! Passing `--camera` starts in fly mode, so screenshots can frame any view.
 //! F6 saves the game to the "quick" slot and F9 loads it; `--load <slot>`
-//! loads a slot at startup. F3 shows frame time and world counters.
+//! loads a slot at startup. F3 shows frame time and world counters. E uses the
+//! object in reach (the altar's crystal goes dark and wakes up again).
 
 mod hud;
 
@@ -34,7 +35,20 @@ const QUICK_SLOT: &str = "quick";
 struct SandboxSave {
     player: CharacterState,
     mode: Mode,
+    #[serde(default)]
+    heart_asleep: bool,
 }
+
+/// The "heart" crystal on the altar, as the scene file left it.
+struct Heart {
+    entity: Entity,
+    rest: Vec3,
+    emissive: f32,
+    light: f32,
+}
+
+/// How much of its glow the heart keeps while asleep.
+const ASLEEP_GLOW: f32 = 0.06;
 
 struct Sandbox {
     mode: Mode,
@@ -44,8 +58,10 @@ struct Sandbox {
     avatar: Entity,
     /// Carries the lantern's light; follows the `lantern` joint.
     lantern: Entity,
-    /// The "heart" crystal and its resting position.
-    heart: Option<(Entity, Vec3)>,
+    heart: Option<Heart>,
+    heart_asleep: bool,
+    /// Current brightness of the heart, easing towards awake (1) or asleep.
+    heart_glow: f32,
     steps: Footsteps,
     hud: Hud,
 }
@@ -59,6 +75,8 @@ impl Sandbox {
             avatar: Entity::DANGLING,
             lantern: Entity::DANGLING,
             heart: None,
+            heart_asleep: false,
+            heart_glow: 1.0,
             steps: Footsteps::default(),
             hud: Hud::default(),
         }
@@ -78,7 +96,8 @@ impl Sandbox {
 
     fn save(&mut self, ctx: &Context, slot: &str) {
         let Some(player) = &self.player else { return };
-        match ctx.save_game(slot, &SandboxSave { player: player.state(), mode: self.mode }) {
+        let save = SandboxSave { player: player.state(), mode: self.mode, heart_asleep: self.heart_asleep };
+        match ctx.save_game(slot, &save) {
             Ok(path) => {
                 println!("[sandbox] saved to {}", path.display());
                 self.hud.notify(ctx, "Jogo salvo", true);
@@ -97,6 +116,7 @@ impl Sandbox {
                     player.restore(&save.player);
                 }
                 self.mode = save.mode;
+                self.heart_asleep = save.heart_asleep;
                 println!("[sandbox] loaded {slot:?}");
                 self.hud.notify(ctx, "Jogo carregado", true);
             }
@@ -105,6 +125,54 @@ impl Sandbox {
                 self.hud.notify(ctx, "Nenhum jogo salvo para carregar", false);
             }
         }
+    }
+
+    /// Shows a title when the player walks into a named area.
+    fn check_triggers(&mut self, ctx: &mut Context, center: Vec3) {
+        for event in ctx.world.update_triggers(center) {
+            println!("[sandbox] {event:?}");
+            let TriggerEvent::Enter(name) = event else { continue };
+            match name.as_str() {
+                "circle" => self.hud.notify(ctx, "O círculo de pedras", true),
+                "shrine" => self.hud.notify(ctx, "Um santuário esquecido", true),
+                _ => {}
+            }
+        }
+    }
+
+    /// Shows the prompt of the object in reach and uses it when E is pressed.
+    fn interact(&mut self, ctx: &mut Context, center: Vec3) {
+        let Some(target) = ctx.world.interaction_target(center, ctx.camera.forward(), &ctx.physics) else { return };
+        self.hud.draw_prompt(ctx, &target.prompt);
+        if !ctx.input.just_pressed(KeyCode::KeyE) {
+            return;
+        }
+        match target.name.as_deref() {
+            Some("heart") => {
+                self.heart_asleep = !self.heart_asleep;
+                let text = if self.heart_asleep { "O cristal adormece" } else { "O cristal desperta" };
+                self.hud.notify(ctx, text, true);
+            }
+            Some("shrine_crystal") => self.hud.notify(ctx, "A pedra está fria ao toque", true),
+            _ => {}
+        }
+    }
+
+    /// The heart floats and turns, and fades to its glow; its light is a
+    /// component of the same entity, so it floats along.
+    fn animate_heart(&mut self, ctx: &mut Context) {
+        let Some(heart) = &self.heart else { return };
+        let t = ctx.time.elapsed();
+        let target = if self.heart_asleep { ASLEEP_GLOW } else { 1.0 };
+        self.heart_glow += (target - self.heart_glow) * (1.0 - (-3.0 * ctx.time.delta()).exp());
+        let glow = self.heart_glow;
+        let query = ctx.world.ecs.query_one_mut::<(&mut Transform, &mut Renderable, &mut Light)>(heart.entity);
+        let Ok((transform, renderable, Light(light))) = query else { return };
+        // It sinks and slows as it goes dark.
+        transform.position = heart.rest + Vec3::Y * (0.25 * glow + 0.15 * glow * (t * 1.3).sin());
+        transform.rotation = Quat::from_rotation_y(t * 0.4);
+        renderable.emissive = heart.emissive * glow;
+        light.intensity = heart.light * glow;
     }
 }
 
@@ -119,7 +187,14 @@ impl Game for Sandbox {
     }
 
     fn scene_loaded(&mut self, ctx: &mut Context) {
-        self.heart = ctx.world.find("heart").and_then(|e| Some((e, ctx.world.transform(e)?.position)));
+        self.heart = ctx.world.find("heart").and_then(|entity| {
+            Some(Heart {
+                entity,
+                rest: ctx.world.transform(entity)?.position,
+                emissive: ctx.world.get::<Renderable>(entity)?.emissive,
+                light: ctx.world.get::<Light>(entity)?.0.intensity,
+            })
+        });
 
         // Hot reloads keep the player where they are; only the first load spawns.
         if self.player.is_none() {
@@ -195,14 +270,11 @@ impl Game for Sandbox {
             *lantern = joint;
         }
 
-        let t = ctx.time.elapsed();
-
-        // Its light is a component of the same entity, so it floats along.
-        if let Some((heart, rest)) = self.heart
-            && let Some(transform) = ctx.world.get_mut::<Transform>(heart)
-        {
-            transform.position = rest + Vec3::Y * (0.25 + 0.15 * (t * 1.3).sin());
-            transform.rotation = Quat::from_rotation_y(t * 0.4);
+        let center = player.body.center();
+        self.animate_heart(ctx);
+        self.check_triggers(ctx, center);
+        if self.mode == Mode::Play {
+            self.interact(ctx, center);
         }
     }
 }

@@ -11,6 +11,7 @@ mod shapes;
 mod sound;
 mod streaming;
 mod terrain;
+mod trigger;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -26,6 +27,7 @@ pub use shapes::{MeshDesc, blob, cube, tube};
 pub use sound::{SceneSound, SoundDesc};
 pub use streaming::{CellCoord, RegionDesc, SceneCell, SceneRegion, SceneStreaming, StreamingDesc};
 pub use terrain::{Terrain, TerrainDesc};
+pub use trigger::{Interactable, SceneTrigger, Trigger, TriggerDesc, TriggerShape};
 
 /// The on-disk scene format.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -47,6 +49,8 @@ pub struct SceneDesc {
     /// Scene fragments in their own files, loaded in the background when the
     /// camera gets close.
     pub regions: Vec<RegionDesc>,
+    /// Areas that tell the game when the player goes in or out.
+    pub triggers: Vec<TriggerDesc>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -112,6 +116,8 @@ pub struct ObjectDesc {
     /// Optional looping sound attached to the object; its position is an offset
     /// rotated with the object, like `light`.
     pub sound: Option<SoundDesc>,
+    /// Lets the player use the object with a key (the game decides what happens).
+    pub interact: Option<Interactable>,
 }
 
 impl Default for ObjectDesc {
@@ -130,6 +136,7 @@ impl Default for ObjectDesc {
             body: BodyDesc::Static,
             animation: None,
             sound: None,
+            interact: None,
         }
     }
 }
@@ -202,6 +209,7 @@ pub struct SceneObject {
     /// Light that moves with the object; its position is an offset rotated
     /// with the object (but not scaled).
     pub light: Option<PointLight>,
+    pub interact: Option<Interactable>,
 }
 
 /// A scene ready to render: unique meshes plus the instances that use them.
@@ -220,6 +228,7 @@ pub struct Scene {
     /// With streaming on, scattered objects live here (by cell) instead of in
     /// `objects`, along with the region files to load.
     pub streaming: Option<SceneStreaming>,
+    pub triggers: Vec<SceneTrigger>,
 }
 
 /// Terrain render chunks are this many grid cells on a side.
@@ -271,6 +280,7 @@ impl Scene {
                     body: BodyDesc::Static,
                     animation: None,
                     light: None,
+                    interact: None,
                 });
             }
         }
@@ -306,7 +316,7 @@ impl Scene {
             yaw: p.yaw.to_radians(),
         });
 
-        let Builder { meshes, objects, lights, sounds, .. } = builder;
+        let Builder { meshes, objects, lights, sounds, triggers, .. } = builder;
         Self {
             environment: desc.environment.clone(),
             camera,
@@ -317,11 +327,12 @@ impl Scene {
             player,
             sounds,
             streaming,
+            triggers,
         }
     }
 
     /// Loads a region file (see [`RegionDesc`]): only its objects, scatter,
-    /// lights and sounds, placed on the main scene's `terrain`.
+    /// lights, sounds and triggers, placed on the main scene's `terrain`.
     pub fn load_region(path: &Path, terrain: Option<&Terrain>) -> Result<Self> {
         let desc = SceneDesc::load(path)?;
         if desc.terrain.is_some() || !desc.regions.is_empty() {
@@ -339,6 +350,7 @@ impl Scene {
             player: None,
             sounds: builder.sounds,
             streaming: None,
+            triggers: builder.triggers,
         })
     }
 
@@ -362,6 +374,7 @@ struct Builder<'a> {
     objects: Vec<SceneObject>,
     lights: Vec<PointLight>,
     sounds: Vec<SceneSound>,
+    triggers: Vec<SceneTrigger>,
     cache: HashMap<String, usize>,
     /// Directory model paths are relative to.
     dir: PathBuf,
@@ -375,6 +388,7 @@ impl<'a> Builder<'a> {
             objects: Vec::new(),
             lights: Vec::new(),
             sounds: Vec::new(),
+            triggers: Vec::new(),
             cache: HashMap::new(),
             dir: dir.to_path_buf(),
             terrain,
@@ -395,7 +409,7 @@ impl<'a> Builder<'a> {
         self.meshes.len() - 1
     }
 
-    /// Adds `desc`'s objects, scatter, lights and sounds. With `streaming`,
+    /// Adds `desc`'s objects, scatter, lights, sounds and triggers. With `streaming`,
     /// scattered copies go into its cells instead.
     fn add_contents(&mut self, desc: &SceneDesc, mut streaming: Option<&mut SceneStreaming>) {
         let dir = self.dir.clone();
@@ -403,6 +417,14 @@ impl<'a> Builder<'a> {
         for sound in &desc.sounds {
             let sound = sound.resolve(&dir, |x, z| self.ground(x, z));
             self.sounds.push(sound);
+        }
+        for trigger in &desc.triggers {
+            if trigger.name.is_empty() {
+                log::warn!("the trigger at {} has no name, so the game can't recognize it; ignored", trigger.position);
+                continue;
+            }
+            let trigger = trigger.resolve(|x, z| self.ground(x, z));
+            self.triggers.push(trigger);
         }
         for obj in &desc.objects {
             let mut position = obj.position;
@@ -422,6 +444,7 @@ impl<'a> Builder<'a> {
                 body: obj.body,
                 animation: obj.animation.clone(),
                 light: obj.light.clone(),
+                interact: obj.interact.clone(),
             });
             if let Some(sound) = &obj.sound {
                 self.sounds.push(sound.attached(&dir, &transform));
@@ -458,6 +481,7 @@ impl<'a> Builder<'a> {
                     body: BodyDesc::Static,
                     animation: None,
                     light: scatter.light.clone(),
+                    interact: None,
                 };
                 match streaming.as_deref_mut() {
                     Some(streaming) => {
@@ -551,6 +575,35 @@ mod tests {
         let cube = scene.objects.iter().find(|o| o.transform.position.x == 4.0).unwrap();
         let expected = cube.transform.position + Vec3::new(0.0, 0.5, -1.0);
         assert!(fire.position.unwrap().distance(expected) < 1e-4, "{:?} vs {expected}", fire.position);
+    }
+
+    #[test]
+    fn parses_triggers_and_interactables() {
+        let desc = SceneDesc::parse(
+            r#"(
+                terrain: (size: 64.0, resolution: 16),
+                triggers: [
+                    (name: "gate", shape: Box(half_extents: (2.0, 3.0, 1.0)), position: (4.0, 1.0, 0.0), rotation: (0.0, 90.0, 0.0)),
+                    (name: "sky", shape: Ball(radius: 5.0), position: (0.0, 40.0, 0.0), snap_to_ground: false, once: true),
+                    (shape: Cylinder(radius: 1.0, height: 2.0)),
+                ],
+                objects: [(mesh: Cube, interact: (prompt: "abrir")), (mesh: Cube, interact: (prompt: "ler", radius: 4.0)), (mesh: Cube)],
+            )"#,
+        )
+        .unwrap();
+        assert_eq!(SceneDesc::parse(&desc.to_ron().unwrap()).unwrap(), desc);
+
+        let scene = Scene::build(&desc);
+        let [gate, sky] = &scene.triggers[..] else { panic!("the nameless one is dropped: {:?}", scene.triggers) };
+        assert!((gate.transform.position.y - 1.0 - scene.ground_height(4.0, 0.0)).abs() < 1e-4);
+        assert!(!gate.trigger.once);
+        assert_eq!(sky.transform.position.y, 40.0);
+        assert!(sky.trigger.once);
+
+        let interact: Vec<_> = scene.objects.iter().filter_map(|o| o.interact.as_ref()).collect();
+        assert_eq!(interact.len(), 2);
+        assert_eq!(*interact[0], Interactable::new("abrir"));
+        assert_eq!((interact[1].prompt.as_str(), interact[1].radius), ("ler", 4.0));
     }
 
     #[test]

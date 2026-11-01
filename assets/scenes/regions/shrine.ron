@@ -1,8 +1,8 @@
 // A region of sandbox.ron: a forgotten shrine among the pines, streamed in when
 // the camera comes within the scene's `load_distance` of it.
 //
-// Regions are ordinary scene files, but only `objects`, `scatter`, `lights` and
-// `sounds` are used. Positions are in world space and, as in the main scene,
+// Regions are ordinary scene files, but only `objects`, `scatter`, `lights`,
+// `sounds` and `triggers` are used. Positions are in world space and, as in the main scene,
 // `y` is measured from its terrain. Paths are relative to this file.
 SceneDesc(
     objects: [
@@ -21,9 +21,14 @@ SceneDesc(
             collider: None,
             light: (position: (0.0, 0.9, 0.0), color: (0.4, 0.9, 0.85), intensity: 9.0, radius: 11.0, flicker: 0.2),
             sound: (path: "../../sounds/hum.wav", position: (0.0, 0.8, 0.0), volume: 0.3, min_distance: 2.0, max_distance: 12.0),
+            interact: (prompt: "examinar o cristal"),
         ),
         // a fallen piece of column
         (mesh: Cylinder(segments: 8), position: (-49.5, 0.3, -58.0), rotation: (0.0, 70.0, 90.0), scale: (0.55, 1.6, 0.55), color: (0.44, 0.42, 0.42)),
+    ],
+    // Found only once, even if the region unloads and comes back.
+    triggers: [
+        (name: "shrine", shape: Ball(radius: 11.0), position: (-55.0, 0.0, -60.0), once: true),
     ],
     scatter: [
         // rubble

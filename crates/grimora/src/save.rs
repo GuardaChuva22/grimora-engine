@@ -1,7 +1,7 @@
 //! Saved games: named slots on disk ([`SaveStore`]), each a RON [`SaveFile`]
 //! holding the game's own state next to what the engine puts back by itself
-//! ([`WorldState`]: the camera and the scene objects that moved, were hidden
-//! or were despawned).
+//! ([`WorldState`]: the camera, the scene objects that moved, were hidden or
+//! were despawned, and the state of the triggers).
 //!
 //! Most games only need [`crate::Context::save_game`] and
 //! [`crate::Context::load_game`].
@@ -13,10 +13,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context as _, Result, bail};
 use grimora_core::{Camera, Transform, Vec3};
 use grimora_physics::Physics;
+use grimora_scene::Interactable;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::World;
+use crate::interaction::TriggerState;
 use crate::world::{Body, Renderable};
 
 /// Version of the [`SaveFile`] layout. Files written by a newer engine are refused.
@@ -50,10 +52,12 @@ impl<T> SaveFile<T> {
 pub struct WorldState {
     pub camera: CameraState,
     /// Scene objects that differ from the scene file: moved, hidden, still
-    /// tumbling or despawned. Entities the game spawned and streamed scatter
+    /// tumbling, used up or despawned. Entities the game spawned and streamed scatter
     /// are not saved.
     #[serde(default)]
     pub objects: Vec<ObjectState>,
+    #[serde(default)]
+    pub triggers: TriggerState,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
@@ -80,6 +84,9 @@ pub struct ObjectState {
     /// Despawned since the scene loaded (picked up, destroyed...).
     #[serde(default, skip_serializing_if = "is_false")]
     pub removed: bool,
+    /// The game took away its `interact` (a chest already opened...).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub used: bool,
 }
 
 fn visible_default() -> bool {
@@ -95,8 +102,8 @@ fn is_false(value: &bool) -> bool {
 }
 
 impl WorldState {
-    /// Records the camera and every scene object that differs from the scene
-    /// file: moved, hidden, still tumbling or despawned.
+    /// Records the camera, the triggers and every scene object that differs
+    /// from the scene file: moved, hidden, still tumbling, used up or despawned.
     pub fn capture(world: &World, physics: &Physics, camera: &Camera) -> Self {
         let live = world.scene_entities();
         let mut objects = Vec::new();
@@ -109,16 +116,19 @@ impl WorldState {
                     visible: true,
                     velocity: None,
                     removed: true,
+                    used: false,
                 });
                 continue;
             };
-            let mut query = world.ecs.query_one::<(&Transform, Option<&Renderable>, Option<&Body>)>(entity);
-            let Ok((transform, renderable, body)) = query.get() else { continue };
+            let mut query =
+                world.ecs.query_one::<(&Transform, Option<&Renderable>, Option<&Body>, Option<&Interactable>)>(entity);
+            let Ok((transform, renderable, body, interact)) = query.get() else { continue };
             let visible = renderable.is_none_or(|r| r.visible);
             let velocity = body
                 .and_then(|Body(body)| physics.body_velocity(*body))
                 .filter(|(linear, angular)| linear.length_squared() + angular.length_squared() > 1e-8);
-            if *transform != desc.transform || !visible || velocity.is_some() {
+            let used = desc.interact.is_some() && interact.is_none();
+            if *transform != desc.transform || !visible || velocity.is_some() || used {
                 objects.push(ObjectState {
                     index,
                     name: desc.name.clone(),
@@ -126,16 +136,18 @@ impl WorldState {
                     visible,
                     velocity,
                     removed: false,
+                    used,
                 });
             }
         }
         let camera = CameraState { position: camera.position, yaw: camera.yaw, pitch: camera.pitch };
-        Self { camera, objects }
+        Self { camera, objects, triggers: world.trigger_state.clone() }
     }
 
     /// Puts the scene objects back as the scene file placed them (respawning
     /// despawned ones), applies the saved changes on top (dynamic bodies
-    /// included), moves the camera, and streams the world in afresh around it.
+    /// included), moves the camera, puts the triggers back as they were, and
+    /// streams the world in afresh around the camera.
     /// Entities the game spawned are left to the game; scene entities that
     /// were never despawned keep their ids. Returns how many saved objects no
     /// longer match the scene.
@@ -163,11 +175,15 @@ impl WorldState {
                 let (linear, angular) = saved.velocity.unwrap_or_default();
                 physics.set_body_state(*body, saved.transform.position, saved.transform.rotation, linear, angular);
             }
+            if saved.used {
+                let _ = world.ecs.remove_one::<Interactable>(entity);
+            }
         }
 
         camera.position = self.camera.position;
         camera.yaw = self.camera.yaw;
         camera.pitch = self.camera.pitch;
+        world.trigger_state = self.triggers.clone();
         world.reload_streaming(camera.position, physics);
         unmatched
     }

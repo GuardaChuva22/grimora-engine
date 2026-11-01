@@ -31,8 +31,8 @@ impl Default for StreamingDesc {
 
 /// A scene fragment in its own file, loaded in the background when the camera
 /// comes within `load_distance` of the circle (`center`, `radius`). Only its
-/// `objects`, `scatter`, `lights` and `sounds` are used; positions are in world
-/// space and, as usual, measured from the main scene's terrain.
+/// `objects`, `scatter`, `lights`, `sounds` and `triggers` are used; positions
+/// are in world space and, as usual, measured from the main scene's terrain.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RegionDesc {

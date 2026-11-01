@@ -1,5 +1,5 @@
-//! The sandbox's HUD: the controls, save/load notices and an F3 panel with
-//! frame time and world counters.
+//! The sandbox's HUD: the controls, notices, the prompt of the object in reach
+//! and an F3 panel with frame time and world counters.
 
 use grimora::prelude::*;
 
@@ -64,6 +64,22 @@ impl Hud {
         }
     }
 
+    /// The key and what it does, for the object the player could use right now.
+    pub fn draw_prompt(&self, ctx: &mut Context, prompt: &str) {
+        let ui = &mut ctx.ui;
+        let key = TextStyle::new(24.0).color(GOLD).anchor(Anchor::Left);
+        let label = TextStyle::new(24.0).color(TEXT).anchor(Anchor::Left);
+        let (key_size, label_size) = (ui.measure("E", &key), ui.measure(prompt, &label));
+        const GAP: f32 = 12.0;
+        let size = Vec2::new(key_size.x + GAP + label_size.x, key_size.y.max(label_size.y));
+        let at = ui.at(Anchor::Bottom, Vec2::new(0.0, -72.0));
+        let box_ = Rect::anchored(at, size, Anchor::Center);
+        ui.panel(box_.expand(10.0), PANEL, BORDER);
+        let left = box_.point(Anchor::Left);
+        ui.text(left, "E", &key);
+        ui.text(left + Vec2::X * (key_size.x + GAP), prompt, &label);
+    }
+
     fn draw_notice(&mut self, ctx: &mut Context) {
         let Some(notice) = &self.notice else { return };
         let age = ctx.time.elapsed() - notice.shown_at;
@@ -94,6 +110,8 @@ impl Hud {
         if let Some(s) = ctx.world.streaming_stats() {
             rows.push(("células", format!("{}/{}", s.loaded_cells, s.cells)));
         }
+        let areas: Vec<&str> = ctx.world.trigger_state.inside.iter().map(String::as_str).collect();
+        rows.push(("área", if areas.is_empty() { "-".to_owned() } else { areas.join(", ") }));
 
         const WIDTH: f32 = 260.0;
         const ROW: f32 = 20.0;

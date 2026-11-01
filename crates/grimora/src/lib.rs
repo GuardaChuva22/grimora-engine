@@ -23,6 +23,7 @@
 
 mod config;
 mod fly_camera;
+mod interaction;
 mod runner;
 pub mod save;
 mod streaming;
@@ -31,6 +32,7 @@ mod world;
 
 pub use config::{EngineConfig, USAGE};
 pub use fly_camera::FlyCamera;
+pub use interaction::{Interaction, TriggerEvent, TriggerState};
 pub use runner::{Context, run};
 pub use save::SaveStore;
 pub use streaming::StreamingStats;
@@ -60,8 +62,8 @@ pub trait Game: 'static {
 
 pub mod prelude {
     pub use crate::{
-        Body, CharacterState, Collider, Context, EngineConfig, Entity, FlyCamera, Game, Light, MeshId, Name,
-        Renderable, SaveStore, ThirdPersonController, World,
+        Body, CharacterState, Collider, Context, EngineConfig, Entity, FlyCamera, Game, Interaction, Light, MeshId,
+        Name, Renderable, SaveStore, ThirdPersonController, TriggerEvent, World,
     };
     pub use grimora_audio::{Audio, Category, Emitter, SoundId};
     pub use grimora_core::{
@@ -70,5 +72,5 @@ pub mod prelude {
     };
     pub use grimora_physics::{BodyHandle, CharacterBody, Physics, RayHit};
     pub use grimora_render::{Anchor, Rect, TextStyle, Ui};
-    pub use grimora_scene::{BodyDesc, MeshDesc};
+    pub use grimora_scene::{BodyDesc, Interactable, MeshDesc, Trigger, TriggerShape};
 }

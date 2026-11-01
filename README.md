@@ -21,6 +21,7 @@ Você controla um andarilho encapuzado com uma lanterna:
 | Shift | corre | acelera |
 | Espaço | pula | sobe (E/Q também) |
 | Roda | aproxima/afasta a câmera | ajusta a velocidade |
+| E | usa o objeto ao alcance | sobe |
 
 **F5** recarrega a cena, **F6** salva o jogo, **F9** carrega o último save, **F12** salva uma captura em `screenshots/`, **Esc** sai.
 
@@ -72,7 +73,7 @@ crates/
   grimora_scene/   formato de cena RON, importação glTF, terreno procedural, geradores low poly, espalhamento, colisores
   grimora_physics/ física com Rapier: mundo estático da cena, corpos dinâmicos, raycasts, corpo de personagem (cápsula)
   grimora_audio/   som com kira: efeitos, loops de ambiente e emissores 3D que seguem a câmera
-  grimora/         janela (winit), laço principal, trait Game, World (entidades hecs), FlyCamera, ThirdPersonController, CLI, hot-reload
+  grimora/         janela (winit), laço principal, trait Game, World (entidades hecs), gatilhos e interação, FlyCamera, ThirdPersonController, CLI, hot-reload
 examples/
   sandbox/         cena de teste do motor
 assets/scenes/     cenas .ron
@@ -138,6 +139,8 @@ Cada objeto do mundo é uma entidade do [`hecs`](https://docs.rs/hecs) em `ctx.w
 | `Name` | o `name:` da cena (`World::find`) |
 | `Light` | luz pontual que acompanha a entidade |
 | `Animator` | esqueleto animado |
+| `Trigger` | área que avisa quando o jogador entra ou sai |
+| `Interactable` | objeto que o jogador usa com uma tecla |
 | `Body` / `Collider` | corpo dinâmico ou colisor estático na física |
 | `SceneIndex` | posição no `objects` da cena (usado pelo save) |
 
@@ -164,7 +167,7 @@ if ctx.world.get::<Vida>(goblin).is_some_and(|v| v.0 == 0) {
 
 ### Formato de cena
 
-Tudo é dado: ambiente (sol, luz ambiente, névoa, céu, sombras, pós-processamento), câmera, ponto de início do jogador, terreno, objetos, espalhamento aleatório com semente e luzes pontuais. Todo objeto colide automaticamente com uma forma adequada (tronco para árvores, casco convexo para rochas e pilares, malha exata para o terreno); use `collider: None` para decoração ou escolha `Box(...)`, `Cylinder(...)`, `Ball(...)`, `Hull` ou `Mesh`. Com `body: Dynamic(...)` o objeto entra na simulação: cai, rola e é empurrado pelo personagem; campos opcionais `density` (kg/m³, padrão 1000) ou `mass` (kg), `friction` (0.6), `restitution` (0) e `angular_damping` (0.5). Malhas exatas viram casco convexo em corpos dinâmicos. Cores em sRGB 0..1, ângulos em graus, distâncias em metros. Malhas disponíveis: `Cube`, `Plane`, `Cylinder`, `Cone`, `Sphere`, `Pine`, `DeadTree`, `Rock`, `Crystal`, `Pillar`, `Wanderer` e `Model(path: "...")`. Veja o exemplo comentado em [sandbox.ron](assets/scenes/sandbox.ron).
+Tudo é dado: ambiente (sol, luz ambiente, névoa, céu, sombras, pós-processamento), câmera, ponto de início do jogador, terreno, objetos, espalhamento aleatório com semente, luzes pontuais e gatilhos. Todo objeto colide automaticamente com uma forma adequada (tronco para árvores, casco convexo para rochas e pilares, malha exata para o terreno); use `collider: None` para decoração ou escolha `Box(...)`, `Cylinder(...)`, `Ball(...)`, `Hull` ou `Mesh`. Com `body: Dynamic(...)` o objeto entra na simulação: cai, rola e é empurrado pelo personagem; campos opcionais `density` (kg/m³, padrão 1000) ou `mass` (kg), `friction` (0.6), `restitution` (0) e `angular_damping` (0.5). Malhas exatas viram casco convexo em corpos dinâmicos. Cores em sRGB 0..1, ângulos em graus, distâncias em metros. Malhas disponíveis: `Cube`, `Plane`, `Cylinder`, `Cone`, `Sphere`, `Pine`, `DeadTree`, `Rock`, `Crystal`, `Pillar`, `Wanderer` e `Model(path: "...")`. Veja o exemplo comentado em [sandbox.ron](assets/scenes/sandbox.ron).
 
 ### Modelos glTF
 
@@ -256,6 +259,66 @@ ui.text(Vec2::new(20.0, 20.0), dialogo, &estilo);
   - Painel de métricas no F3 (quadro, desenhos, entidades, células).
   - Código em [hud.rs](examples/sandbox/src/hud.rs).
 
+### Gatilhos e objetos usáveis
+
+O motor diz o que está acontecendo; quem decide o que cada coisa faz é o jogo. Os dois são dados da cena (também nos arquivos de região):
+
+```ron
+triggers: [
+    (name: "circle", shape: Cylinder(radius: 9.5, height: 6.0)),
+    (name: "omen", shape: Ball(radius: 4.0), position: (10.0, 0.0, 3.0), once: true),
+],
+objects: [
+    (name: "chest", mesh: Cube, position: (2.0, 0.0, 1.0), interact: (prompt: "abrir", radius: 2.5)),
+],
+```
+
+```rust
+let centro = jogador.body.center();
+
+// Gatilhos: chame uma vez por quadro, com a posição do jogador.
+for evento in ctx.world.update_triggers(centro) {
+    match evento {
+        TriggerEvent::Enter(nome) if nome == "circle" => { /* mostra o título, toca um som... */ }
+        TriggerEvent::Exit(nome) => { /* ... */ }
+        _ => {}
+    }
+}
+
+// Objeto que o jogador pode usar agora, se houver.
+if let Some(alvo) = ctx.world.interaction_target(centro, ctx.camera.forward(), &ctx.physics) {
+    // Mostre `alvo.prompt` no HUD com `ctx.ui`.
+    if ctx.input.just_pressed(KeyCode::KeyE) && alvo.name.as_deref() == Some("chest") {
+        // Abriu: sem o componente, deixa de ser alvo (e o save lembra disso).
+        ctx.world.ecs.remove_one::<Interactable>(alvo.entity).ok();
+    }
+}
+```
+
+![O aviso da área no topo e o prompt do cristal embaixo](docs/interaction.png)
+
+**Gatilhos**
+
+- **Formas:** `Ball(radius)` e `Box(half_extents)` centradas na posição, `Cylinder(radius, height)` em pé sobre ela. `rotation` gira as caixas. Em cenas com terreno, `y` é medido a partir do chão (`snap_to_ground: false` desliga).
+- **Eventos:** `Enter` e `Exit` chegam uma vez a cada mudança, com as saídas primeiro. Gatilhos com o mesmo nome contam como uma área só, o que serve para formas compostas.
+- **`once: true`:** dispara só na primeira vez e não tem `Exit`. Continua gasto mesmo se a região descarregar ou um save for carregado. Tire o nome de `world.trigger_state.fired` para rearmar.
+- **Em uma entidade:** `ecs.insert_one(goblin, Trigger::new("aura", TriggerShape::Ball { radius: 3.0 }))`. A área segue o `Transform` da entidade, sem a escala.
+- **Quem ativa:** o motor testa o ponto que o jogo passa, um por vez. Gatilhos não têm colisão nem aparecem em `World::find`.
+
+**Objetos usáveis**
+
+- **Quem é o alvo:** o objeto precisa estar a até `radius` metros (padrão 2,5) da sua origem, visível e sem nada sólido no caminho. Vence o mais próximo, e o que está na direção de `forward` conta como mais perto: um objeto bem atrás vale o dobro da distância de um bem à frente.
+- **Desligar:** remova o componente `Interactable`, ou esconda o objeto com `visible = false`.
+- **No código:** `ecs.insert_one(entidade, Interactable::new("falar"))` torna usável uma entidade criada pelo jogo.
+
+**Save e recarga**
+
+- O save guarda em quais áreas o jogador está, os `once` gastos e quais objetos de `objects` perderam o `Interactable`. Um prompt trocado pelo jogo fica no estado do jogo.
+- Como os outros objetos de streaming, os de uma região voltam como a cena descreve quando a região recarrega, e o `Interactable` removido volta junto.
+- A recarga da cena (hot-reload ou F5) recria tudo: gatilhos disparam de novo.
+
+No sandbox, entrar no círculo de pedras mostra o nome do lugar, o santuário só avisa uma vez e **E** apaga e acende o cristal do altar. O F3 mostra a área atual.
+
 ### Áudio
 
 Sons em loop fazem parte da cena. Sem `position`, o som é ambiente (igual em todo lugar); com `position`, ele vira um emissor 3D: volume cheio até `min_distance`, cai pela distância (-6 dB a cada vez que ela dobra) e some em `max_distance`, com o pan acompanhando a câmera. Com terreno, `y` é medido a partir do chão. Objetos também carregam um som, como carregam uma luz; aí `position` é um deslocamento a partir do objeto:
@@ -335,7 +398,7 @@ regions: [
 ```
 
 - **Células:** os objetos do `scatter` são distribuídos numa grade de `cell_size` metros. As células a menos de `load_distance` da câmera entram no mundo (até 8 por quadro, as mais próximas primeiro) e saem um pouco mais longe do que entraram, para não piscarem na borda. Objetos de `objects` ficam sempre carregados.
-- **Regiões:** pedaços da cena em arquivos `.ron` próprios ([regions/shrine.ron](assets/scenes/regions/shrine.ron) no sandbox), com `objects`, `scatter`, luzes e sons. Quando a câmera chega a `load_distance` do círculo (`center`, `radius`), o arquivo é lido e montado numa thread separada e entra no mundo sem travar o quadro; ao se afastar, sai com colisores, luzes e sons. As malhas de uma região voltam a ser usadas se ela carregar de novo. Um arquivo com erro aparece uma vez no log e é ignorado até a cena recarregar.
+- **Regiões:** pedaços da cena em arquivos `.ron` próprios ([regions/shrine.ron](assets/scenes/regions/shrine.ron) no sandbox), com `objects`, `scatter`, luzes, sons e gatilhos. Quando a câmera chega a `load_distance` do círculo (`center`, `radius`), o arquivo é lido e montado numa thread separada e entra no mundo sem travar o quadro; ao se afastar, sai com colisores, luzes e sons. As malhas de uma região voltam a ser usadas se ela carregar de novo. Um arquivo com erro aparece uma vez no log e é ignorado até a cena recarregar.
 - **Terreno:** é cortado em blocos de 32×32 quadrados, cada um com seu colisor, para o culling descartar o que está fora da tela.
 - **Luzes:** o renderizador usa as 32 luzes pontuais mais próximas da câmera, então um mundo grande pode ter quantas quiser.
 - Deixe `load_distance` além do ponto em que a névoa apaga tudo (cerca de `4 / fog.density`), senão a borda do mundo carregado aparece em vistas aéreas.
@@ -358,7 +421,7 @@ player.restore(&save.jogador);
 self.ouro = save.ouro;
 ```
 
-- **O que o motor guarda sozinho:** a câmera e cada objeto da cena (`objects` do `.ron`) que foi movido, escondido (`visible = false` no `Renderable`), removido (`World::despawn`) ou ainda está rolando, com a velocidade dos corpos dinâmicos. Objetos que não mudaram ficam de fora, então o save é pequeno.
+- **O que o motor guarda sozinho:** a câmera, o estado dos gatilhos e cada objeto da cena (`objects` do `.ron`) que foi movido, escondido (`visible = false` no `Renderable`), removido (`World::despawn`), perdeu o `Interactable` ou ainda está rolando, com a velocidade dos corpos dinâmicos. Objetos que não mudaram ficam de fora, então o save é pequeno.
 - **Ao carregar:** os objetos da cena voltam para onde o arquivo da cena os colocou (os removidos são recriados; os outros mantêm o mesmo `Entity`), as mudanças salvas são aplicadas por cima (caixas empurradas voltam com física e tudo), a câmera volta e o conteúdo de streaming é recarregado em volta dela.
 - **Fica com o jogo:** entidades criadas pelo jogo (`World::spawn`), componentes do próprio jogo e o personagem (`ThirdPersonController::state()`/`restore()` dão um `CharacterState` pronto para salvar).
 - **Segurança:**
@@ -399,6 +462,7 @@ Diretrizes:
 - [x] Mundo em células e regiões com carregamento por streaming (regiões montadas em segundo plano)
 - [x] Salvamento de jogo: slots em RON com gravação atômica, estado do jogo + objetos e corpos da cena
 - [x] HUD: texto com fonte bitmap embutida (com acentos), contorno, painéis e barras
+- [x] Gatilhos de área e objetos usáveis, na cena, com estado que sobrevive ao streaming e ao save
 
 **Próximos passos**
 - [x] Avaliação de ECS: `hecs` recomendado, `bevy_ecs` descartado ([docs/ecs.md](docs/ecs.md))

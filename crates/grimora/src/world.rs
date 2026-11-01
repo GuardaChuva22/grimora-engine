@@ -5,6 +5,7 @@ use grimora_physics::{BodyHandle, ColliderHandle, Physics};
 use grimora_scene::{PlayerSpawn, Scene, SceneObject, SceneSound, Terrain};
 pub use hecs::Entity;
 
+use crate::interaction::TriggerState;
 use crate::streaming::{Streamer, StreamingStats};
 
 /// Index of a mesh stored in the [`World`].
@@ -83,6 +84,9 @@ pub struct World {
     pub player_spawn: Option<PlayerSpawn>,
     /// Always-present sounds; streamed ones are added by [`World::active_sounds`].
     pub sounds: Vec<SceneSound>,
+    /// Which triggers the player is in and which `once` ones already fired, by
+    /// name, so it survives streaming; see [`World::update_triggers`].
+    pub trigger_state: TriggerState,
     meshes: Vec<MeshData>,
     streamer: Option<Streamer>,
     /// The scene file's objects, to put them back when a saved game loads.
@@ -110,6 +114,9 @@ impl World {
             let mut entity = object_builder(object, MeshId(object.mesh), &scene.meshes, physics);
             ecs.spawn(entity.add(SceneIndex(index)).build());
         }
+        for trigger in scene.triggers {
+            ecs.spawn((trigger.transform, trigger.trigger));
+        }
         physics.refresh();
         let streamer = scene.streaming.map(|s| Streamer::new(s, scene.terrain.as_ref()));
         Self {
@@ -119,6 +126,7 @@ impl World {
             terrain: scene.terrain,
             player_spawn: scene.player,
             sounds: scene.sounds,
+            trigger_state: TriggerState::default(),
             meshes: scene.meshes,
             streamer,
             scene_objects: scene.objects,
@@ -197,7 +205,7 @@ impl World {
     }
 
     /// Puts every scene object back as the scene file placed it: still visible,
-    /// at rest, and respawned if it was despawned. Returns their entities.
+    /// at rest, usable, and respawned if it was despawned. Returns their entities.
     pub(crate) fn reset_scene_objects(&mut self, physics: &mut Physics) -> HashMap<usize, Entity> {
         let mut live = self.scene_entities();
         let mut respawned = false;
@@ -216,6 +224,9 @@ impl World {
             }
             if let Some(Body(body)) = body {
                 physics.set_body_state(*body, desc.transform.position, desc.transform.rotation, Vec3::ZERO, Vec3::ZERO);
+            }
+            if let Some(interact) = &desc.interact {
+                let _ = self.ecs.insert_one(entity, interact.clone());
             }
         }
         if respawned {
@@ -308,6 +319,9 @@ pub(crate) fn object_builder(
     }
     if let Some(light) = &o.light {
         entity.add(Light(light.clone()));
+    }
+    if let Some(interact) = &o.interact {
+        entity.add(interact.clone());
     }
     if let Some(mut animator) = animator_for(meshes.get(mesh.0)) {
         if let Some(clip) = &o.animation

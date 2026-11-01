@@ -176,6 +176,11 @@ impl Physics {
         Some((from_rapier(body.linvel()), from_rapier(body.angvel())))
     }
 
+    /// The collider of a dynamic body, to recognize it in a [`RayHit`].
+    pub fn body_collider(&self, body: BodyHandle) -> Option<ColliderHandle> {
+        self.world.bodies.get(body.0)?.colliders().first().copied()
+    }
+
     /// Moves a dynamic body (teleports it, as when loading a saved game) and
     /// sets its velocities. Its object follows on the next `World::sync_bodies`.
     pub fn set_body_state(&mut self, body: BodyHandle, position: Vec3, rotation: Quat, linear: Vec3, angular: Vec3) {

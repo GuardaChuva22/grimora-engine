@@ -295,6 +295,7 @@ fn finish(
     }
     let ids = &region.meshes;
     let mut chunk = Chunk::new(&scene.objects, |i| ids[i], meshes, ecs, physics);
+    chunk.entities.extend(scene.triggers.into_iter().map(|t| ecs.spawn((t.transform, t.trigger))));
     chunk.lights = scene.lights;
     chunk.sounds = scene.sounds;
     log::info!("Loaded region {} ({} objects)", region.desc.path.display(), chunk.entities.len());

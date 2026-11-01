@@ -82,6 +82,9 @@ SceneDesc(
             // A light on an object belongs to its entity: it moves with it
             // (offset rotated with the object, not scaled).
             light: (position: (0.0, 1.0, 0.0), color: (0.66, 0.42, 1.0), intensity: 14.0, radius: 16.0, flicker: 0.15),
+            // The player can use it from `radius` meters of its origin, if nothing solid is
+            // in between (default 2.5). The game shows `prompt` and decides what happens.
+            interact: (prompt: "tocar o cristal", radius: 3.0),
         ),
 
         // ---- glTF models (paths are relative to this file). The banner comes from
@@ -169,6 +172,14 @@ SceneDesc(
         (mesh: Crystal(), variants: 3, count: 7, radius: 30.0, min_radius: 14.0, scale: (0.3, 0.55),
          color: (0.4, 0.78, 1.0), emissive: 2.5, tilt: 15.0, seed: 21,
          light: (position: (0.0, 0.6, 0.0), color: (0.4, 0.75, 1.0), intensity: 3.0, radius: 6.0, flicker: 0.1)),
+    ],
+
+    // Invisible areas that tell the game when the player goes in or out, by `name`.
+    // Shapes: Ball(radius), Box(half_extents) and Cylinder(radius, height), which stands
+    // on `position`. `y` is measured from the ground (`snap_to_ground: false` to turn that
+    // off) and `rotation` turns boxes. `once: true` fires only the first time, for good.
+    triggers: [
+        (name: "circle", shape: Cylinder(radius: 9.5, height: 6.0)),
     ],
 
     // Looping sounds (WAV or OGG, paths relative to this file; made by tools/gen_sounds.py).
