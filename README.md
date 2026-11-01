@@ -123,10 +123,8 @@ Tudo é dado: ambiente (sol, luz ambiente, névoa, céu, sombras, pós-processam
 Exporte do Blender como glTF 2.0 (`.gltf` + `.bin` + texturas, ou `.glb`) para `assets/models/` e use na cena:
 
 ```ron
-(mesh: Model(path: "../models/medieval_sword/scene.gltf"), position: (-1.5, 0.48, 3.0), rotation: (0.0, 70.0, 80.0), scale: (0.65, 0.65, 0.65)),
+(mesh: Model(path: "../models/bau/bau.gltf"), position: (2.0, 0.0, 4.0), rotation: (0.0, 30.0, 0.0)),
 ```
-
-![Espada glTF com texturas PBR](docs/sword.png)
 
 - O caminho é relativo ao arquivo de cena. Se o arquivo faltar ou estiver quebrado, o erro vai para o log e aparece um cubo magenta no lugar.
 - A cena inteira do arquivo vira uma malha: transformações dos nós são aplicadas e cada primitiva vira uma submalha com seu material.
@@ -168,10 +166,6 @@ Diretrizes:
 - [ ] Salvamento de jogo
 - [ ] Cascaded shadow maps para sombras nítidas a grandes distâncias
 - [ ] ECS (avaliar `hecs` ou `bevy_ecs` quando a quantidade de sistemas justificar)
-
-## Créditos
-
-Recursos de terceiros incluídos no repositório estão listados em [CREDITS.md](CREDITS.md).
 
 ## Em aberto
 

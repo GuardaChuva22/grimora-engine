@@ -39,7 +39,7 @@ Outros ângulos: `--camera x,y,z --look-at x,y,z`. A última linha impressa (`[g
 - Faces em sentido anti-horário vistas de fora (back-face culling ativo). `MeshData::push_triangle` gera normais planas — é o visual low poly.
 - Tudo procedural recebe semente: a mesma semente gera sempre o mesmo mundo.
 - Iluminação: o difuso é Lambert sem 1/π (escala original do motor) e o especular GGX é multiplicado por π para combinar. Malhas procedurais usam o `Material` padrão (branco, rugosidade 1, não metálico) e tiram a cor dos vértices; não mude esse padrão sem conferir as capturas.
-- Recursos de terceiros vão em `assets/` com o arquivo de licença ao lado e uma entrada em `CREDITS.md`.
+- Recursos de terceiros vão em `assets/` com o arquivo de licença ao lado e uma entrada em `CREDITS.md` (crie o arquivo se não existir, com link na seção de créditos do README).
 - Ao adicionar campos a `Environment` ou ao formato de cena, use `#[serde(default)]` para não quebrar cenas existentes e acrescente exemplo/comentário em `sandbox.ron`.
 
 ## Armadilhas do Rapier 0.36

@@ -62,7 +62,9 @@ fn import(path: &Path, max_texture_size: u32) -> Result<MeshData> {
     let Some(scene) = document.default_scene().or_else(|| document.scenes().next()) else {
         bail!("{} has no scene", path.display());
     };
+    // Depth-first in file order (children are pushed reversed onto the stack).
     let mut stack: Vec<(gltf::Node, Mat4)> = scene.nodes().map(|n| (n, Mat4::IDENTITY)).collect();
+    stack.reverse();
     while let Some((node, parent)) = stack.pop() {
         let world = parent * Mat4::from_cols_array_2d(&node.transform().matrix());
         if let Some(gltf_mesh) = node.mesh() {
@@ -79,7 +81,9 @@ fn import(path: &Path, max_texture_size: u32) -> Result<MeshData> {
                 append_primitive(&mut mesh, &primitive, &buffers, world, material);
             }
         }
+        let first_child = stack.len();
         stack.extend(node.children().map(|child| (child, world)));
+        stack[first_child..].reverse();
     }
 
     if mesh.submeshes.iter().any(|s| s.material == default_material) {
@@ -304,30 +308,112 @@ fn linear_to_srgb(c: Vec3) -> Vec3 {
 mod tests {
     use super::*;
 
-    const SWORD: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/models/medieval_sword/scene.gltf");
+    /// Writes a small glTF to a temp folder: one textured triangle used by two
+    /// nodes under a translated parent, one scaled by 2 and one mirrored.
+    fn write_fixture() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("grimora_gltf_fixture_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut bin = Vec::new();
+        let floats: [&[f32]; 3] = [
+            &[0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0], // positions
+            &[0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0], // normals
+            &[0.0, 0.0, 1.0, 0.0, 0.0, 1.0],                // uvs
+        ];
+        for f in floats.iter().flat_map(|a| a.iter()) {
+            bin.extend_from_slice(&f.to_le_bytes());
+        }
+        std::fs::write(dir.join("tri.bin"), &bin).unwrap();
+        image::RgbaImage::from_pixel(8, 4, image::Rgba([200, 100, 50, 255])).save(dir.join("tex.png")).unwrap();
+
+        let gltf = r#"{
+            "asset": { "version": "2.0" },
+            "scene": 0,
+            "scenes": [ { "nodes": [0] } ],
+            "nodes": [
+                { "translation": [0, 1, 0], "children": [1, 2] },
+                { "mesh": 0, "scale": [2, 2, 2] },
+                { "mesh": 0, "scale": [-1, 1, 1] }
+            ],
+            "meshes": [ { "primitives": [ {
+                "attributes": { "POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 2 },
+                "material": 0
+            } ] } ],
+            "materials": [ {
+                "doubleSided": true,
+                "pbrMetallicRoughness": {
+                    "baseColorFactor": [0.5, 0.5, 0.5, 1],
+                    "metallicFactor": 0.25,
+                    "roughnessFactor": 0.6,
+                    "baseColorTexture": { "index": 0 },
+                    "metallicRoughnessTexture": { "index": 0 }
+                },
+                "normalTexture": { "index": 0, "scale": 0.5 },
+                "occlusionTexture": { "index": 0, "strength": 0.7 }
+            } ],
+            "textures": [ { "source": 0 } ],
+            "images": [ { "uri": "tex.png" } ],
+            "buffers": [ { "uri": "tri.bin", "byteLength": 96 } ],
+            "bufferViews": [
+                { "buffer": 0, "byteOffset": 0, "byteLength": 36 },
+                { "buffer": 0, "byteOffset": 36, "byteLength": 36 },
+                { "buffer": 0, "byteOffset": 72, "byteLength": 24 }
+            ],
+            "accessors": [
+                { "bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3",
+                  "min": [0, 0, 0], "max": [1, 1, 0] },
+                { "bufferView": 1, "componentType": 5126, "count": 3, "type": "VEC3" },
+                { "bufferView": 2, "componentType": 5126, "count": 3, "type": "VEC2" }
+            ]
+        }"#;
+        let path = dir.join("tri.gltf");
+        std::fs::write(&path, gltf).unwrap();
+        path
+    }
 
     #[test]
-    fn loads_the_sword() {
-        let mesh = load_model(Path::new(SWORD), 256).unwrap();
-        assert_eq!(mesh.vertices.len(), 826);
-        assert_eq!(mesh.triangle_count(), 2586 / 3);
-        assert_eq!(mesh.submeshes.len(), 1);
+    fn loads_a_gltf() {
+        let path = write_fixture();
+        let mesh = load_model(&path, 4).unwrap();
+        assert_eq!(mesh.vertices.len(), 6);
+        assert_eq!(mesh.triangle_count(), 2);
+        assert_eq!(mesh.submeshes.len(), 2);
+        assert_eq!(mesh.materials.len(), 1);
+
+        // Node transforms are baked: parent +1 Y, children scaled by 2 and mirrored.
+        let (lo, hi) = mesh.bounds().unwrap();
+        assert!(lo.abs_diff_eq(Vec3::new(-1.0, 1.0, 0.0), 1e-5), "{lo}");
+        assert!(hi.abs_diff_eq(Vec3::new(2.0, 3.0, 0.0), 1e-5), "{hi}");
+
+        // The mirrored copy has its winding flipped, so both triangles face their normals.
+        for tri in mesh.indices.as_chunks::<3>().0 {
+            let [a, b, c] = tri.map(|i| Vec3::from(mesh.vertices[i as usize].position));
+            let normal = Vec3::from(mesh.vertices[tri[0] as usize].normal);
+            assert!((b - a).cross(c - a).dot(normal) > 0.0);
+        }
+
+        // No TANGENT attribute: tangents are generated from the UVs. Nodes keep file
+        // order, so the scaled copy comes first; the mirrored one is left-handed.
+        let tangent = |i: usize| Vec4::from(mesh.vertices[i].tangent);
+        assert!(tangent(0).abs_diff_eq(Vec4::new(1.0, 0.0, 0.0, 1.0), 1e-5), "{}", tangent(0));
+        assert!(tangent(3).abs_diff_eq(Vec4::new(-1.0, 0.0, 0.0, -1.0), 1e-5), "{}", tangent(3));
+
         let material = mesh.material(0);
         assert!(material.double_sided);
-        let base = material.base_color_texture.expect("base color texture");
-        assert!(base.width <= 256 && base.height <= 256);
-        assert_eq!(base.rgba.len(), (base.width * base.height * 4) as usize);
-        assert!(material.normal_texture.is_some());
-        // Metallic-roughness and occlusion share one image, hence one texture.
-        assert!(Arc::ptr_eq(
-            material.metallic_roughness_texture.as_ref().unwrap(),
-            material.occlusion_texture.as_ref().unwrap()
-        ));
-        // The node transforms cancel out: the blade lies along X, two units long.
-        let (lo, hi) = mesh.bounds().unwrap();
-        assert!((hi.x - lo.x - 2.0).abs() < 1e-3, "{lo} {hi}");
+        assert_eq!((material.metallic, material.roughness), (0.25, 0.6));
+        assert_eq!((material.normal_scale, material.occlusion_strength), (0.5, 0.7));
+        assert!(material.base_color.abs_diff_eq(Vec4::new(0.5, 0.5, 0.5, 1.0), 1e-6));
+        // Halved until it fits 4 px; every slot reuses the single image.
+        let base = material.base_color_texture.clone().unwrap();
+        assert_eq!((base.width, base.height), (4, 2));
+        assert_eq!(&base.rgba[..4], &[200, 100, 50, 255]);
+        for other in [&material.normal_texture, &material.metallic_roughness_texture, &material.occlusion_texture] {
+            assert!(Arc::ptr_eq(&base, other.as_ref().unwrap()));
+        }
+
         // Cached: a second load is identical.
-        assert_eq!(load_model(Path::new(SWORD), 256).unwrap().vertices, mesh.vertices);
+        assert_eq!(load_model(&path, 4).unwrap().vertices, mesh.vertices);
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 
     #[test]

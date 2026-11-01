@@ -79,15 +79,6 @@ SceneDesc(
             emissive: 3.0,
             light: (position: (0.0, 1.0, 0.0), color: (0.66, 0.42, 1.0), intensity: 14.0, radius: 16.0, flicker: 0.15),
         ),
-        // ---- a glTF model: "medieval sword" by LowSeb, CC-BY-4.0 (see CREDITS.md).
-        // The file lies along X with the tip at -X, so rolling it 80° plants it tip-down.
-        (
-            name: "sword",
-            mesh: Model(path: "../models/medieval_sword/scene.gltf"),
-            position: (-1.5, 0.48, 3.0),
-            rotation: (0.0, 70.0, 80.0),
-            scale: (0.65, 0.65, 0.65),
-        ),
 
         // ---- stone circle (radius 9, open towards the camera)
         (mesh: Pillar(seed: 1),               position: ( 9.0,  0.0,  0.0), rotation: (0.0,  10.0, 0.0)),
