@@ -31,7 +31,8 @@ struct Globals {
 struct MaterialParams {
     base_color: vec4<f32>,        // linear
     params: vec4<f32>,            // x metallic, y roughness, z normal scale, w occlusion strength
-    flags: vec4<u32>,             // x has normal map
+    emissive: vec4<f32>,          // rgb emitted light (linear), w alpha cutoff
+    flags: vec4<u32>,             // x has normal map, y alpha mode (0 opaque, 1 mask, 2 blend), z alpha to coverage
 }
 
 @group(0) @binding(0) var<uniform> g: Globals;
@@ -43,6 +44,7 @@ struct MaterialParams {
 @group(2) @binding(3) var metallic_roughness_tex: texture_2d<f32>;
 @group(2) @binding(4) var occlusion_tex: texture_2d<f32>;
 @group(2) @binding(5) var material_sampler: sampler;
+@group(2) @binding(6) var emissive_tex: texture_2d<f32>;
 
 const PI: f32 = 3.14159265;
 
@@ -102,6 +104,70 @@ fn vs_main(v: VertexIn, i: InstanceIn) -> VsOut {
 fn vs_shadow(v: VertexIn, i: InstanceIn) -> @builtin(position) vec4<f32> {
     let model = mat4x4<f32>(i.model_0, i.model_1, i.model_2, i.model_3);
     return g.light_view_proj * model * vec4<f32>(v.position, 1.0);
+}
+
+struct ShadowMaskedOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+}
+
+@vertex
+fn vs_shadow_masked(v: VertexIn, i: InstanceIn) -> ShadowMaskedOut {
+    let model = mat4x4<f32>(i.model_0, i.model_1, i.model_2, i.model_3);
+    var out: ShadowMaskedOut;
+    out.clip = g.light_view_proj * model * vec4<f32>(v.position, 1.0);
+    out.uv = v.uv;
+    return out;
+}
+
+// Alpha-tested shadow casters. Blended surfaces cast shadow where mostly opaque.
+@fragment
+fn fs_shadow_masked(in: ShadowMaskedOut) {
+    let alpha = textureSample(base_color_tex, material_sampler, in.uv).a * material.base_color.a;
+    let cutoff = select(0.5, material.emissive.w, material.flags.y == 1u);
+    if alpha < cutoff {
+        discard;
+    }
+}
+
+// Per-pixel threshold in 0..1 that looks like fine grain (Jimenez 2014).
+fn interleaved_gradient_noise(pixel: vec2<f32>) -> f32 {
+    return fract(52.9829189 * fract(dot(pixel, vec2<f32>(0.06711056, 0.00583715))));
+}
+
+// Final coverage for the material's alpha mode, discarding cut-out texels.
+// With alpha-to-coverage, mask edges get a one-pixel ramp (`width` is the
+// screen-space derivative of alpha) and blending maps alpha to MSAA samples.
+fn coverage(alpha: f32, width: f32, pixel: vec2<f32>) -> f32 {
+    let mode = material.flags.y;
+    let a2c = material.flags.z == 1u;
+    if mode == 0u {
+        return 1.0;
+    }
+    if mode == 1u {
+        let cutoff = material.emissive.w;
+        if !a2c {
+            if alpha < cutoff {
+                discard;
+            }
+            return 1.0;
+        }
+        let ramp = clamp((alpha - cutoff) / max(width, 1e-4) + 0.5, 0.0, 1.0);
+        if ramp <= 0.0 {
+            discard;
+        }
+        return ramp;
+    }
+    if a2c {
+        if alpha < 0.004 {
+            discard;
+        }
+        return alpha;
+    }
+    if alpha <= interleaved_gradient_noise(pixel) {
+        discard;
+    }
+    return 1.0;
 }
 
 fn shadow_factor(world_pos: vec3<f32>, n: vec3<f32>) -> f32 {
@@ -248,6 +314,10 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
     let normal_sample = textureSample(normal_tex, material_sampler, in.uv).xyz;
     let mr_sample = textureSample(metallic_roughness_tex, material_sampler, in.uv);
     let occlusion_sample = textureSample(occlusion_tex, material_sampler, in.uv).r;
+    let emissive_sample = textureSample(emissive_tex, material_sampler, in.uv).rgb;
+    // Derivatives also need uniform control flow, so take them before any discard.
+    let raw_alpha = base_sample.a * material.base_color.a;
+    let alpha = coverage(raw_alpha, fwidth(raw_alpha), in.clip.xy);
 
     var n = normalize(in.normal);
     if !front {
@@ -283,9 +353,9 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
     let ambient = hemisphere(s.n) * s.albedo * (1.0 - s.metallic) + environment * f_ambient * (1.0 - s.roughness * 0.5);
     color += ambient * occlusion;
 
-    color += s.albedo * in.emissive;
+    color += s.albedo * in.emissive + material.emissive.rgb * emissive_sample;
     color = apply_fog(color, in.world_pos);
-    return vec4<f32>(color, 1.0);
+    return vec4<f32>(color, alpha);
 }
 
 // ---------------------------------------------------------------- sky

@@ -12,7 +12,7 @@ use std::time::SystemTime;
 
 use anyhow::{Context as _, Result, bail};
 use glam::{Mat3, Mat4, Vec2, Vec3, Vec4};
-use grimora_core::{Material, MeshData, Submesh, TextureData, Vertex};
+use grimora_core::{AlphaMode, Material, MeshData, Submesh, TextureData, Vertex};
 
 /// Largest texture side used when a scene doesn't say otherwise.
 pub const DEFAULT_MAX_TEXTURE_SIZE: u32 = 2048;
@@ -188,10 +188,17 @@ fn material(m: &gltf::Material, textures: &[Arc<TextureData>]) -> Material {
         normal_scale: normal.as_ref().map_or(1.0, |n| n.scale()),
         occlusion_strength: occlusion.as_ref().map_or(1.0, |o| o.strength()),
         double_sided: m.double_sided(),
+        alpha_mode: match m.alpha_mode() {
+            gltf::material::AlphaMode::Opaque => AlphaMode::Opaque,
+            gltf::material::AlphaMode::Mask => AlphaMode::Mask { cutoff: m.alpha_cutoff().unwrap_or(0.5) },
+            gltf::material::AlphaMode::Blend => AlphaMode::Blend,
+        },
+        emissive: Vec3::from(m.emissive_factor()) * m.emissive_strength().unwrap_or(1.0),
         base_color_texture: pbr.base_color_texture().and_then(|t| texture(t.texture(), t.tex_coord())),
         normal_texture: normal.as_ref().and_then(|t| texture(t.texture(), t.tex_coord())),
         metallic_roughness_texture: pbr.metallic_roughness_texture().and_then(|t| texture(t.texture(), t.tex_coord())),
         occlusion_texture: occlusion.as_ref().and_then(|t| texture(t.texture(), t.tex_coord())),
+        emissive_texture: m.emissive_texture().and_then(|t| texture(t.texture(), t.tex_coord())),
     }
 }
 
@@ -308,8 +315,9 @@ fn linear_to_srgb(c: Vec3) -> Vec3 {
 mod tests {
     use super::*;
 
-    /// Writes a small glTF to a temp folder: one textured triangle used by two
-    /// nodes under a translated parent, one scaled by 2 and one mirrored.
+    /// Writes a small glTF to a temp folder: one textured, alpha-masked, emissive
+    /// triangle used by two nodes under a translated parent, one scaled by 2 and
+    /// one mirrored.
     fn write_fixture() -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("grimora_gltf_fixture_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -328,6 +336,7 @@ mod tests {
 
         let gltf = r#"{
             "asset": { "version": "2.0" },
+            "extensionsUsed": ["KHR_materials_emissive_strength"],
             "scene": 0,
             "scenes": [ { "nodes": [0] } ],
             "nodes": [
@@ -341,6 +350,11 @@ mod tests {
             } ] } ],
             "materials": [ {
                 "doubleSided": true,
+                "alphaMode": "MASK",
+                "alphaCutoff": 0.3,
+                "emissiveFactor": [1, 0.5, 0.25],
+                "emissiveTexture": { "index": 0 },
+                "extensions": { "KHR_materials_emissive_strength": { "emissiveStrength": 2 } },
                 "pbrMetallicRoughness": {
                     "baseColorFactor": [0.5, 0.5, 0.5, 1],
                     "metallicFactor": 0.25,
@@ -403,11 +417,18 @@ mod tests {
         assert_eq!((material.metallic, material.roughness), (0.25, 0.6));
         assert_eq!((material.normal_scale, material.occlusion_strength), (0.5, 0.7));
         assert!(material.base_color.abs_diff_eq(Vec4::new(0.5, 0.5, 0.5, 1.0), 1e-6));
+        assert_eq!(material.alpha_mode, AlphaMode::Mask { cutoff: 0.3 });
+        assert!(material.emissive.abs_diff_eq(Vec3::new(2.0, 1.0, 0.5), 1e-6), "{}", material.emissive);
         // Halved until it fits 4 px; every slot reuses the single image.
         let base = material.base_color_texture.clone().unwrap();
         assert_eq!((base.width, base.height), (4, 2));
         assert_eq!(&base.rgba[..4], &[200, 100, 50, 255]);
-        for other in [&material.normal_texture, &material.metallic_roughness_texture, &material.occlusion_texture] {
+        for other in [
+            &material.normal_texture,
+            &material.metallic_roughness_texture,
+            &material.occlusion_texture,
+            &material.emissive_texture,
+        ] {
             assert!(Arc::ptr_eq(&base, other.as_ref().unwrap()));
         }
 

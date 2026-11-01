@@ -67,6 +67,20 @@ impl std::fmt::Debug for TextureData {
     }
 }
 
+/// How a material uses its alpha (base color alpha × texture alpha).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum AlphaMode {
+    /// Alpha is ignored.
+    #[default]
+    Opaque,
+    /// Cut out where alpha is below `cutoff`: foliage, torn cloth, fences.
+    /// Edges are smoothed with alpha-to-coverage under MSAA.
+    Mask { cutoff: f32 },
+    /// See-through surfaces, approximated with alpha-to-coverage (or dithering
+    /// without MSAA). Needs no sorting but only has a few levels of opacity.
+    Blend,
+}
+
 /// Surface appearance, modeled on glTF's metallic-roughness materials.
 ///
 /// The defaults describe a plain matte surface, which is what procedural
@@ -84,6 +98,10 @@ pub struct Material {
     pub occlusion_strength: f32,
     /// Render both faces of each triangle (thin geometry like leaves or cloth).
     pub double_sided: bool,
+    pub alpha_mode: AlphaMode,
+    /// Linear light emitted by the surface, multiplied by `emissive_texture`.
+    /// Unaffected by lighting; values above 1 feed the bloom.
+    pub emissive: Vec3,
     /// sRGB color.
     pub base_color_texture: Option<Arc<TextureData>>,
     /// Tangent-space normal map.
@@ -92,6 +110,8 @@ pub struct Material {
     pub metallic_roughness_texture: Option<Arc<TextureData>>,
     /// Red channel = ambient occlusion.
     pub occlusion_texture: Option<Arc<TextureData>>,
+    /// sRGB emission color.
+    pub emissive_texture: Option<Arc<TextureData>>,
 }
 
 impl Default for Material {
@@ -104,10 +124,13 @@ impl Default for Material {
             normal_scale: 1.0,
             occlusion_strength: 1.0,
             double_sided: false,
+            alpha_mode: AlphaMode::Opaque,
+            emissive: Vec3::ZERO,
             base_color_texture: None,
             normal_texture: None,
             metallic_roughness_texture: None,
             occlusion_texture: None,
+            emissive_texture: None,
         }
     }
 }

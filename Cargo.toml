@@ -26,7 +26,7 @@ env_logger = "0.11"
 anyhow = "1"
 rapier3d = "0.36"
 image = { version = "0.25", default-features = false, features = ["png"] }
-gltf = { version = "1.4", default-features = false, features = ["import", "utils", "names"] }
+gltf = { version = "1.4", default-features = false, features = ["import", "utils", "names", "KHR_materials_emissive_strength"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

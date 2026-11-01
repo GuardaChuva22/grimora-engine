@@ -80,6 +80,14 @@ SceneDesc(
             light: (position: (0.0, 1.0, 0.0), color: (0.66, 0.42, 1.0), intensity: 14.0, radius: 16.0, flicker: 0.15),
         ),
 
+        // ---- glTF models (paths are relative to this file). The banner comes from
+        // tools/gen_banner.py: torn cloth (alpha mask) with a glowing rune (emissive map).
+        // Only the post collides; the cloth is walk-through.
+        (mesh: Model(path: "../models/banner/banner.gltf"), position: (-2.6, 0.0, 9.0), rotation: (0.0, 15.0, 0.0),
+         collider: Cylinder(radius: 0.08, height: 3.2)),
+        (mesh: Model(path: "../models/banner/banner.gltf"), position: (2.6, 0.0, 9.0), rotation: (0.0, -15.0, 0.0),
+         collider: Cylinder(radius: 0.08, height: 3.2)),
+
         // ---- stone circle (radius 9, open towards the camera)
         (mesh: Pillar(seed: 1),               position: ( 9.0,  0.0,  0.0), rotation: (0.0,  10.0, 0.0)),
         (mesh: Pillar(seed: 2, broken: true), position: ( 6.36, 0.0,  6.36), rotation: (0.0,  55.0, 0.0)),

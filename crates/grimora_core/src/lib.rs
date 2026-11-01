@@ -10,7 +10,7 @@ mod transform;
 pub use camera::Camera;
 pub use environment::{Environment, PointLight};
 pub use input::{Input, KeyCode, MouseButton};
-pub use mesh::{Material, MeshData, Submesh, TextureData, Vertex};
+pub use mesh::{AlphaMode, Material, MeshData, Submesh, TextureData, Vertex};
 pub use time::Time;
 pub use transform::Transform;
 

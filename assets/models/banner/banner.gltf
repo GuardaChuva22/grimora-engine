@@ -1,0 +1,241 @@
+{
+ "asset": {
+  "version": "2.0",
+  "generator": "Grimora tools/gen_banner.py"
+ },
+ "extensionsUsed": [
+  "KHR_materials_emissive_strength"
+ ],
+ "scene": 0,
+ "scenes": [
+  {
+   "nodes": [
+    0
+   ]
+  }
+ ],
+ "nodes": [
+  {
+   "name": "banner",
+   "mesh": 0
+  }
+ ],
+ "meshes": [
+  {
+   "name": "banner",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0,
+      "NORMAL": 1,
+      "TEXCOORD_0": 2
+     },
+     "indices": 3,
+     "material": 0
+    },
+    {
+     "attributes": {
+      "POSITION": 4,
+      "NORMAL": 5,
+      "TEXCOORD_0": 6
+     },
+     "indices": 7,
+     "material": 1
+    }
+   ]
+  }
+ ],
+ "materials": [
+  {
+   "name": "wood",
+   "pbrMetallicRoughness": {
+    "baseColorFactor": [
+     0.09,
+     0.05,
+     0.03,
+     1
+    ],
+    "metallicFactor": 0,
+    "roughnessFactor": 0.9
+   }
+  },
+  {
+   "name": "cloth",
+   "doubleSided": true,
+   "alphaMode": "MASK",
+   "alphaCutoff": 0.5,
+   "pbrMetallicRoughness": {
+    "baseColorTexture": {
+     "index": 0
+    },
+    "metallicFactor": 0,
+    "roughnessFactor": 0.85
+   },
+   "emissiveTexture": {
+    "index": 1
+   },
+   "emissiveFactor": [
+    1.0,
+    0.45,
+    0.12
+   ],
+   "extensions": {
+    "KHR_materials_emissive_strength": {
+     "emissiveStrength": 6.0
+    }
+   }
+  }
+ ],
+ "textures": [
+  {
+   "source": 0,
+   "sampler": 0
+  },
+  {
+   "source": 1,
+   "sampler": 0
+  }
+ ],
+ "samplers": [
+  {
+   "magFilter": 9729,
+   "minFilter": 9987,
+   "wrapS": 33071,
+   "wrapT": 33071
+  }
+ ],
+ "images": [
+  {
+   "uri": "banner_color.png"
+  },
+  {
+   "uri": "banner_rune.png"
+  }
+ ],
+ "buffers": [
+  {
+   "uri": "banner.bin",
+   "byteLength": 8112
+  }
+ ],
+ "bufferViews": [
+  {
+   "buffer": 0,
+   "byteOffset": 0,
+   "byteLength": 576,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 576,
+   "byteLength": 576,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 1152,
+   "byteLength": 384,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 1536,
+   "byteLength": 144,
+   "target": 34963
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 1680,
+   "byteLength": 1836,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 3516,
+   "byteLength": 1836,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 5352,
+   "byteLength": 1224,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 6576,
+   "byteLength": 1536,
+   "target": 34963
+  }
+ ],
+ "accessors": [
+  {
+   "bufferView": 0,
+   "componentType": 5126,
+   "count": 48,
+   "type": "VEC3",
+   "min": [
+    -0.68,
+    0.0,
+    -0.05
+   ],
+   "max": [
+    0.68,
+    3.2,
+    0.12
+   ]
+  },
+  {
+   "bufferView": 1,
+   "componentType": 5126,
+   "count": 48,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 2,
+   "componentType": 5126,
+   "count": 48,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 3,
+   "componentType": 5123,
+   "count": 72,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 4,
+   "componentType": 5126,
+   "count": 153,
+   "type": "VEC3",
+   "min": [
+    -0.55,
+    0.8799999999999999,
+    0.07595369291335179
+   ],
+   "max": [
+    0.55,
+    2.88,
+    0.1745690919208298
+   ]
+  },
+  {
+   "bufferView": 5,
+   "componentType": 5126,
+   "count": 153,
+   "type": "VEC3"
+  },
+  {
+   "bufferView": 6,
+   "componentType": 5126,
+   "count": 153,
+   "type": "VEC2"
+  },
+  {
+   "bufferView": 7,
+   "componentType": 5123,
+   "count": 768,
+   "type": "SCALAR"
+  }
+ ]
+}

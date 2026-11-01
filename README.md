@@ -123,16 +123,21 @@ Tudo é dado: ambiente (sol, luz ambiente, névoa, céu, sombras, pós-processam
 Exporte do Blender como glTF 2.0 (`.gltf` + `.bin` + texturas, ou `.glb`) para `assets/models/` e use na cena:
 
 ```ron
-(mesh: Model(path: "../models/bau/bau.gltf"), position: (2.0, 0.0, 4.0), rotation: (0.0, 30.0, 0.0)),
+(mesh: Model(path: "../models/banner/banner.gltf"), position: (-2.6, 0.0, 9.0), rotation: (0.0, 15.0, 0.0)),
 ```
+
+![Estandarte glTF: pano recortado por alfa e runa emissiva](docs/banner.png)
 
 - O caminho é relativo ao arquivo de cena. Se o arquivo faltar ou estiver quebrado, o erro vai para o log e aparece um cubo magenta no lugar.
 - A cena inteira do arquivo vira uma malha: transformações dos nós são aplicadas e cada primitiva vira uma submalha com seu material.
-- Materiais metallic-roughness: cor base, normal map, metal/rugosidade, oclusão e `doubleSided`. Cores de vértice também são lidas. Faltando normais ou tangentes, o motor gera.
+- Materiais metallic-roughness: cor base, normal map, metal/rugosidade, oclusão, emissão (`emissiveFactor`, `emissiveTexture` e `KHR_materials_emissive_strength`) e `doubleSided`. Cores de vértice também são lidas. Faltando normais ou tangentes, o motor gera.
+- Emissão acima de 1 alimenta o bloom: no Blender, aumente a força (Strength) do Emission para a runa ou brasa brilhar.
+- Transparência (`alphaMode`): `MASK` recorta o que estiver abaixo do `alphaCutoff` (folhagem, pano rasgado, grades), com bordas suavizadas pelo MSAA (alpha-to-coverage) e recorte também na sombra. `BLEND` é aproximado por alpha-to-coverage: não precisa ordenar objetos, mas tem poucos níveis de transparência e um leve pontilhado; para vidro e água de verdade ainda falta mistura ordenada.
 - Texturas maiores que `max_texture_size` (padrão 2048) são reduzidas pela metade até caber: `Model(path: "...", max_texture_size: 1024)`.
 - O modelo mantém a origem e a escala do arquivo. O colisor automático é o casco convexo; use `collider: Mesh` para formas côncavas grandes (casas, ruínas) ou `None` para decoração.
 - Modelos ficam em cache enquanto o arquivo não muda, então o hot-reload da cena é instantâneo. Editar só o modelo não recarrega a cena: salve o `.ron` para recarregar.
-- Ainda não suportados: animação, skinning, transparência (`alphaMode`), emissão por textura e um segundo conjunto de UVs.
+- Ainda não suportados: animação, skinning, mistura de transparência ordenada e um segundo conjunto de UVs.
+- O estandarte do sandbox é gerado por [tools/gen_banner.py](tools/gen_banner.py) (Python puro), um exemplo de como criar um glTF por código.
 
 ## Visão
 
@@ -155,9 +160,9 @@ Diretrizes:
 - [x] Colisão com Rapier: terreno, props e colisores declarados na cena
 - [x] Personagem em terceira pessoa: andar, correr, pular, degraus e rampas; câmera orbital que não atravessa paredes
 - [x] Importação de modelos glTF com materiais PBR (texturas de cor, normal, metal/rugosidade e oclusão, com mipmaps)
+- [x] Transparência recortada (`alphaMode: Mask`) com alpha-to-coverage e sombras recortadas; mapas de emissão
 
 **Próximos passos**
-- [ ] Transparência recortada (`alphaMode: Mask`) para folhagem e tecidos
 - [ ] Corpos dinâmicos (objetos que caem, rolam e podem ser empurrados)
 - [ ] Culling por frustum e LOD
 - [ ] Animação esquelética

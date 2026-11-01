@@ -62,6 +62,8 @@ struct GpuMesh {
     index_count: u32,
     /// Index range and index into `Renderer::materials`.
     submeshes: Vec<(std::ops::Range<u32>, usize)>,
+    /// Some submesh uses alpha, so shadows are drawn per submesh.
+    has_alpha: bool,
 }
 
 struct Targets {
@@ -93,10 +95,12 @@ pub struct Renderer {
     post_group: wgpu::BindGroup,
     linear_sampler: wgpu::Sampler,
 
-    mesh_pipeline: wgpu::RenderPipeline,
-    mesh_pipeline_double_sided: wgpu::RenderPipeline,
+    /// Indexed by [`mesh_pipeline_index`]: culling x alpha-to-coverage.
+    mesh_pipelines: [wgpu::RenderPipeline; 4],
     sky_pipeline: wgpu::RenderPipeline,
     shadow_pipeline: wgpu::RenderPipeline,
+    /// Shadow caster that cuts out alpha-tested texels.
+    shadow_masked_pipeline: wgpu::RenderPipeline,
     tonemap_pipeline: wgpu::RenderPipeline,
 
     targets: Targets,
@@ -265,7 +269,7 @@ impl Renderer {
             label: Some("post"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/post.wgsl").into()),
         });
-        let material_cache = MaterialCache::new(&device, &queue);
+        let material_cache = MaterialCache::new(&device, &queue, msaa > 1);
         let scene_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("scene"),
             bind_group_layouts: &[Some(&globals_layout), Some(&shadow_layout), Some(&material_cache.layout)],
@@ -281,6 +285,12 @@ impl Renderer {
             bind_group_layouts: &[Some(&globals_layout)],
             immediate_size: 0,
         });
+        // Group 1 (the shadow map itself) is left out: it is the render target here.
+        let shadow_masked_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("shadow masked"),
+            bind_group_layouts: &[Some(&globals_layout), None, Some(&material_cache.layout)],
+            immediate_size: 0,
+        });
         let post_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("post"),
             bind_group_layouts: &[Some(&post_layout)],
@@ -292,7 +302,7 @@ impl Renderer {
         let hdr_target =
             [Some(wgpu::ColorTargetState { format: HDR_FORMAT, blend: None, write_mask: wgpu::ColorWrites::ALL })];
 
-        let mesh_pipeline_with = |label, cull_mode| {
+        let mesh_pipeline_with = |label, cull_mode, alpha_to_coverage: bool| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
                 layout: Some(&scene_layout),
@@ -304,7 +314,10 @@ impl Renderer {
                 },
                 primitive: wgpu::PrimitiveState { cull_mode, ..Default::default() },
                 depth_stencil: Some(depth_state(true, wgpu::CompareFunction::Less, Default::default())),
-                multisample,
+                multisample: wgpu::MultisampleState {
+                    alpha_to_coverage_enabled: alpha_to_coverage && msaa > 1,
+                    ..multisample
+                },
                 fragment: Some(wgpu::FragmentState {
                     module: &scene_shader,
                     entry_point: Some("fs_main"),
@@ -315,8 +328,12 @@ impl Renderer {
                 cache: None,
             })
         };
-        let mesh_pipeline = mesh_pipeline_with("mesh", Some(wgpu::Face::Back));
-        let mesh_pipeline_double_sided = mesh_pipeline_with("mesh double-sided", None);
+        let mesh_pipelines = [
+            mesh_pipeline_with("mesh", Some(wgpu::Face::Back), false),
+            mesh_pipeline_with("mesh double-sided", None, false),
+            mesh_pipeline_with("mesh alpha", Some(wgpu::Face::Back), true),
+            mesh_pipeline_with("mesh alpha double-sided", None, true),
+        ];
         let sky_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("sky"),
             layout: Some(&sky_layout),
@@ -355,6 +372,31 @@ impl Renderer {
             )),
             multisample: wgpu::MultisampleState::default(),
             fragment: None,
+            multiview_mask: None,
+            cache: None,
+        });
+        let shadow_masked_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("shadow masked"),
+            layout: Some(&shadow_masked_layout),
+            vertex: wgpu::VertexState {
+                module: &scene_shader,
+                entry_point: Some("vs_shadow_masked"),
+                compilation_options: Default::default(),
+                buffers: &mesh_buffers,
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(depth_state(
+                true,
+                wgpu::CompareFunction::LessEqual,
+                wgpu::DepthBiasState { constant: 2, slope_scale: 2.0, clamp: 0.0 },
+            )),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &scene_shader,
+                entry_point: Some("fs_shadow_masked"),
+                compilation_options: Default::default(),
+                targets: &[],
+            }),
             multiview_mask: None,
             cache: None,
         });
@@ -403,10 +445,10 @@ impl Renderer {
             post_layout,
             post_group,
             linear_sampler,
-            mesh_pipeline,
-            mesh_pipeline_double_sided,
+            mesh_pipelines,
             sky_pipeline,
             shadow_pipeline,
+            shadow_masked_pipeline,
             tonemap_pipeline,
             targets,
             bloom,
@@ -467,7 +509,7 @@ impl Renderer {
             contents: bytemuck::cast_slice(&mesh.indices),
             usage: wgpu::BufferUsages::INDEX,
         });
-        let submeshes = mesh
+        let submeshes: Vec<_> = mesh
             .draw_ranges()
             .into_iter()
             .map(|sub| {
@@ -476,7 +518,8 @@ impl Renderer {
                 (sub.indices, self.materials.len() - 1)
             })
             .collect();
-        self.meshes.push(GpuMesh { vertices, indices, index_count: mesh.indices.len() as u32, submeshes });
+        let has_alpha = submeshes.iter().any(|(_, m)| self.materials[*m].alpha);
+        self.meshes.push(GpuMesh { vertices, indices, index_count: mesh.indices.len() as u32, submeshes, has_alpha });
         MeshHandle(self.meshes.len() as u32 - 1)
     }
 
@@ -530,7 +573,6 @@ impl Renderer {
                 }),
                 ..Default::default()
             });
-            pass.set_pipeline(&self.shadow_pipeline);
             pass.set_bind_group(0, &self.globals_group, &[]);
             self.draw_batches(&mut pass, false);
         }
@@ -690,33 +732,46 @@ impl Renderer {
     }
 
     /// Draws every batch. With `materials`, binds each submesh's material and
-    /// picks the culling mode; the shadow pass draws whole meshes instead.
+    /// picks culling and alpha-to-coverage; without (the shadow pass), draws
+    /// whole meshes, splitting only those with alpha-tested submeshes.
     fn draw_batches(&self, pass: &mut wgpu::RenderPass<'_>, materials: bool) {
         pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
-        let mut double_sided = None;
+        let mut current: Option<*const wgpu::RenderPipeline> = None;
+        let mut use_pipeline = |pass: &mut wgpu::RenderPass<'_>, pipeline: &wgpu::RenderPipeline| {
+            if current != Some(pipeline) {
+                current = Some(pipeline);
+                pass.set_pipeline(pipeline);
+            }
+        };
         for batch in &self.batches {
             let mesh = &self.meshes[batch.mesh.0 as usize];
             pass.set_vertex_buffer(0, mesh.vertices.slice(..));
             pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
-            if !materials {
+            if !materials && !mesh.has_alpha {
+                use_pipeline(pass, &self.shadow_pipeline);
                 pass.draw_indexed(0..mesh.index_count, 0, batch.instances.clone());
                 continue;
             }
             for (range, material) in &mesh.submeshes {
                 let material = &self.materials[*material];
-                if double_sided != Some(material.double_sided) {
-                    double_sided = Some(material.double_sided);
-                    pass.set_pipeline(if material.double_sided {
-                        &self.mesh_pipeline_double_sided
-                    } else {
-                        &self.mesh_pipeline
-                    });
+                if materials {
+                    use_pipeline(pass, &self.mesh_pipelines[mesh_pipeline_index(material)]);
+                } else if material.alpha {
+                    use_pipeline(pass, &self.shadow_masked_pipeline);
+                } else {
+                    use_pipeline(pass, &self.shadow_pipeline);
+                    pass.draw_indexed(range.clone(), 0, batch.instances.clone());
+                    continue;
                 }
                 pass.set_bind_group(2, &material.bind_group, &[]);
                 pass.draw_indexed(range.clone(), 0, batch.instances.clone());
             }
         }
     }
+}
+
+fn mesh_pipeline_index(material: &GpuMaterial) -> usize {
+    usize::from(material.double_sided) | (usize::from(material.alpha) << 1)
 }
 
 pub(crate) fn texture_entry(binding: u32, sample_type: wgpu::TextureSampleType) -> wgpu::BindGroupLayoutEntry {

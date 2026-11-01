@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
-use grimora_core::{Material, TextureData};
+use grimora_core::{AlphaMode, Material, TextureData};
 use wgpu::util::DeviceExt as _;
 
 use crate::renderer::{sampler_entry, texture_entry};
@@ -16,13 +16,17 @@ struct MaterialParams {
     base_color: [f32; 4],
     /// metallic, roughness, normal scale, occlusion strength
     params: [f32; 4],
-    /// x = has normal map
+    /// rgb = emitted light, w = alpha cutoff
+    emissive: [f32; 4],
+    /// x = has normal map, y = alpha mode (0 opaque, 1 mask, 2 blend), z = alpha to coverage
     flags: [u32; 4],
 }
 
 pub struct GpuMaterial {
     pub bind_group: wgpu::BindGroup,
     pub double_sided: bool,
+    /// Uses alpha (mask or blend): drawn with alpha-to-coverage and cut out of shadows.
+    pub alpha: bool,
 }
 
 /// Uploads materials, sharing textures that several materials reference.
@@ -32,13 +36,15 @@ pub struct MaterialCache {
     white_srgb: wgpu::TextureView,
     white_linear: wgpu::TextureView,
     flat_normal: wgpu::TextureView,
+    alpha_to_coverage: bool,
     /// Keyed by the texture's address and color space. The `Arc` is kept so the
     /// address can't be reused by another texture while cached.
     textures: HashMap<(usize, bool), (Arc<TextureData>, wgpu::TextureView)>,
 }
 
 impl MaterialCache {
-    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
+    /// `alpha_to_coverage` tells the shader whether alpha pipelines have it (MSAA only).
+    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, alpha_to_coverage: bool) -> Self {
         let float = wgpu::TextureSampleType::Float { filterable: true };
         let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("material"),
@@ -58,6 +64,7 @@ impl MaterialCache {
                 texture_entry(3, float),
                 texture_entry(4, float),
                 sampler_entry(5, wgpu::SamplerBindingType::Filtering),
+                texture_entry(6, float),
             ],
         });
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -79,11 +86,17 @@ impl MaterialCache {
             white_srgb: pixel("white srgb", [255; 4], true),
             white_linear: pixel("white linear", [255; 4], false),
             flat_normal: pixel("flat normal", [128, 128, 255, 255], false),
+            alpha_to_coverage,
             textures: HashMap::new(),
         }
     }
 
     pub fn create(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, material: &Material) -> GpuMaterial {
+        let (alpha_mode, cutoff) = match material.alpha_mode {
+            AlphaMode::Opaque => (0, 0.0),
+            AlphaMode::Mask { cutoff } => (1, cutoff.clamp(0.0, 1.0)),
+            AlphaMode::Blend => (2, 0.0),
+        };
         let params = MaterialParams {
             base_color: material.base_color.to_array(),
             params: [
@@ -92,7 +105,8 @@ impl MaterialCache {
                 material.normal_scale,
                 if material.occlusion_texture.is_some() { material.occlusion_strength } else { 0.0 },
             ],
-            flags: [u32::from(material.normal_texture.is_some()), 0, 0, 0],
+            emissive: material.emissive.max(glam::Vec3::ZERO).extend(cutoff).to_array(),
+            flags: [u32::from(material.normal_texture.is_some()), alpha_mode, u32::from(self.alpha_to_coverage), 0],
         };
         let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("material params"),
@@ -104,11 +118,13 @@ impl MaterialCache {
         let normal = self.view(device, queue, &material.normal_texture, false);
         let mr = self.view(device, queue, &material.metallic_roughness_texture, false);
         let occlusion = self.view(device, queue, &material.occlusion_texture, false);
+        let emissive = self.view(device, queue, &material.emissive_texture, true);
         let views = [
             base.unwrap_or_else(|| self.white_srgb.clone()),
             normal.unwrap_or_else(|| self.flat_normal.clone()),
             mr.unwrap_or_else(|| self.white_linear.clone()),
             occlusion.unwrap_or_else(|| self.white_linear.clone()),
+            emissive.unwrap_or_else(|| self.white_srgb.clone()),
         ];
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: material.name.as_deref(),
@@ -120,9 +136,10 @@ impl MaterialCache {
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&views[2]) },
                 wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&views[3]) },
                 wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&views[4]) },
             ],
         });
-        GpuMaterial { bind_group, double_sided: material.double_sided }
+        GpuMaterial { bind_group, double_sided: material.double_sided, alpha: alpha_mode != 0 }
     }
 
     fn view(
