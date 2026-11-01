@@ -1,0 +1,18 @@
+// Cold motes over the forgotten shrine's crystal.
+[
+    (
+        rate: 9.0,
+        lifetime: (2.0, 3.6),
+        area: (0.35, 0.1, 0.35),
+        spread: 15.0,
+        speed: (0.15, 0.4),
+        turbulence: 0.5,
+        sizes: [0.0, 0.06, 0.0],
+        size_jitter: 0.4,
+        colors: [(0.55, 1.0, 0.92, 1.0), (0.3, 0.8, 0.8, 1.0)],
+        emissive: 6.0,
+        additive: 1.0,
+        spin: 70.0,
+        shape: Diamond,
+    ),
+]

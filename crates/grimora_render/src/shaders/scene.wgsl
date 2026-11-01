@@ -310,17 +310,22 @@ fn point_lights(world_pos: vec3<f32>, s: Surface) -> vec3<f32> {
             continue;
         }
         let l = to_light / max(d, 1e-4);
-        let window = clamp(1.0 - pow(d / radius, 4.0), 0.0, 1.0);
-        let atten = window * window / (d * d + 1.0);
-
-        // Two out-of-phase sines per light read as an irregular fire flicker.
-        let seed = hash13(pl.position_radius.xyz) * 100.0;
-        let wobble = 0.5 + 0.5 * sin(t * 11.0 + seed) * sin(t * 6.7 + seed * 1.7);
-        let flicker = 1.0 - pl.params.x * 0.35 * wobble;
-
-        total += shade(s, l, pl.color_intensity.rgb * pl.color_intensity.w * atten * flicker, 0.2);
+        total += shade(s, l, point_light_radiance(pl, d, t), 0.2);
     }
     return total;
+}
+
+// Light from `pl` at distance `d` (inside its radius) at time `t`.
+fn point_light_radiance(pl: PointLight, d: f32, t: f32) -> vec3<f32> {
+    let window = clamp(1.0 - pow(d / pl.position_radius.w, 4.0), 0.0, 1.0);
+    let atten = window * window / (d * d + 1.0);
+
+    // Two out-of-phase sines per light read as an irregular fire flicker.
+    let seed = hash13(pl.position_radius.xyz) * 100.0;
+    let wobble = 0.5 + 0.5 * sin(t * 11.0 + seed) * sin(t * 6.7 + seed * 1.7);
+    let flicker = 1.0 - pl.params.x * 0.35 * wobble;
+
+    return pl.color_intensity.rgb * pl.color_intensity.w * atten * flicker;
 }
 
 fn sky_gradient(dir: vec3<f32>) -> vec3<f32> {
@@ -334,7 +339,8 @@ fn hemisphere(dir: vec3<f32>) -> vec3<f32> {
     return mix(g.ambient_ground.rgb, g.ambient_sky.rgb, dir.y * 0.5 + 0.5);
 }
 
-fn apply_fog(color: vec3<f32>, world_pos: vec3<f32>) -> vec3<f32> {
+// Fog color between the camera and `world_pos` (rgb) and how much of it there is (a).
+fn fog_at(world_pos: vec3<f32>) -> vec4<f32> {
     let cam = g.camera_pos.xyz;
     let v = world_pos - cam;
     let dist = length(v);
@@ -352,8 +358,12 @@ fn apply_fog(color: vec3<f32>, world_pos: vec3<f32>) -> vec3<f32> {
     let amount = clamp(1.0 - exp(-density * dist * integral), 0.0, 1.0);
 
     let scatter = pow(max(dot(dir, g.sun_dir.xyz), 0.0), 8.0) * g.fog_params.z;
-    let fog = g.fog_color.rgb + g.sun_color.rgb * scatter * 0.15;
-    return mix(color, fog, amount);
+    return vec4<f32>(g.fog_color.rgb + g.sun_color.rgb * scatter * 0.15, amount);
+}
+
+fn apply_fog(color: vec3<f32>, world_pos: vec3<f32>) -> vec3<f32> {
+    let fog = fog_at(world_pos);
+    return mix(color, fog.rgb, fog.a);
 }
 
 @fragment
@@ -440,4 +450,95 @@ fn fs_sky(in: SkyOut) -> @location(0) vec4<f32> {
     // Fog the sky as if it were very far away, so the horizon melts into the fog.
     color = apply_fog(color, g.camera_pos.xyz + dir * 600.0);
     return vec4<f32>(color, 1.0);
+}
+
+// ---------------------------------------------------------------- particles
+
+// Mirrors `ParticleInstance` in grimora_core.
+struct ParticleIn {
+    @location(0) position_size: vec4<f32>,
+    @location(1) color: vec4<f32>,          // sRGB, opacity
+    @location(2) stretch_rotation: vec4<f32>,
+    @location(3) params: vec4<f32>,         // x emissive, y lit, z additive, w shape
+}
+
+struct ParticleOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) color: vec4<f32>,          // premultiplied
+    @location(2) @interpolate(flat) shape: f32,
+}
+
+// Light falling on a particle, without shadows: a particle has no surface, so
+// each source counts in full and the sun is softened as if scattered inside it.
+fn particle_light(world_pos: vec3<f32>) -> vec3<f32> {
+    var total = (g.ambient_sky.rgb + g.ambient_ground.rgb) * 0.5 + g.sun_color.rgb * 0.35;
+    for (var i = 0u; i < g.counts.x; i++) {
+        let pl = g.point_lights[i];
+        let d = distance(pl.position_radius.xyz, world_pos);
+        if d < pl.position_radius.w {
+            total += point_light_radiance(pl, d, g.camera_pos.w);
+        }
+    }
+    return total;
+}
+
+@vertex
+fn vs_particle(@builtin(vertex_index) index: u32, p: ParticleIn) -> ParticleOut {
+    let corner = vec2<f32>(f32(index & 1u), f32(index >> 1u)) * 2.0 - 1.0;
+    let center = p.position_size.xyz;
+    let half_size = p.position_size.w * 0.5;
+
+    // Camera axes; straight up or down, any right vector will do.
+    let forward = g.camera_forward.xyz;
+    var right = cross(forward, vec3<f32>(0.0, 1.0, 0.0));
+    if dot(right, right) < 1e-4 {
+        right = vec3<f32>(1.0, 0.0, 0.0);
+    }
+    right = normalize(right);
+    let up = cross(right, forward);
+
+    // The long side follows the motion as seen on screen; otherwise it just turns.
+    let along = vec2<f32>(dot(p.stretch_rotation.xyz, right), dot(p.stretch_rotation.xyz, up));
+    let stretch = length(along);
+    var axis = vec2<f32>(cos(p.stretch_rotation.w), sin(p.stretch_rotation.w));
+    if stretch > 1e-4 {
+        axis = along / stretch;
+    }
+    let side = vec2<f32>(-axis.y, axis.x);
+    let offset = axis * corner.y * (half_size + stretch) + side * corner.x * half_size;
+    let world = center + right * offset.x + up * offset.y;
+
+    var light = vec3<f32>(p.params.x);
+    if p.params.y > 0.0 {
+        light += particle_light(center) * p.params.y;
+    }
+    let color = srgb_to_linear(p.color.rgb) * light;
+
+    // Fog fades added light away and tints what covers the background. Blending
+    // comes from alpha alone, so additive particles write none. Right at the lens
+    // they fade out instead of filling the screen.
+    let opacity = p.color.a * smoothstep(0.1, 0.8, distance(center, g.camera_pos.xyz));
+    let cover = opacity * (1.0 - p.params.z);
+    let fog = fog_at(center);
+
+    var out: ParticleOut;
+    out.clip = g.view_proj * vec4<f32>(world, 1.0);
+    out.uv = corner;
+    out.color = vec4<f32>(color * opacity * (1.0 - fog.a) + fog.rgb * fog.a * cover, cover);
+    out.shape = p.params.w;
+    return out;
+}
+
+@fragment
+fn fs_particle(in: ParticleOut) -> @location(0) vec4<f32> {
+    // Derivatives need uniform control flow, so take them before branching.
+    let diamond = abs(in.uv.x) + abs(in.uv.y);
+    let edge = max(fwidth(diamond), 1e-4);
+    var mask = clamp((1.0 - diamond) / edge, 0.0, 1.0);
+    if in.shape < 0.5 {
+        let falloff = clamp(1.0 - dot(in.uv, in.uv), 0.0, 1.0);
+        mask = falloff * falloff;
+    }
+    return in.color * mask;
 }

@@ -5,6 +5,7 @@
 //! See `assets/scenes/sandbox.ron` for a commented example.
 
 mod collider;
+mod effect;
 mod model;
 mod rng;
 mod shapes;
@@ -21,6 +22,7 @@ use grimora_core::{Camera, Environment, MeshData, PointLight, Transform, Vec2, V
 use serde::{Deserialize, Serialize};
 
 pub use collider::{BodyDesc, ColliderDesc, ColliderShape};
+pub use effect::{EffectDesc, SceneEffect, load_effect, parse_effect};
 pub use model::{DEFAULT_MAX_TEXTURE_SIZE, load_model};
 pub use rng::{Rng, fbm, value_noise};
 pub use shapes::{MeshDesc, blob, cube, tube};
@@ -51,6 +53,8 @@ pub struct SceneDesc {
     pub regions: Vec<RegionDesc>,
     /// Areas that tell the game when the player goes in or out.
     pub triggers: Vec<TriggerDesc>,
+    /// Particle effects on their own: mist over a valley, smoke from a chimney...
+    pub effects: Vec<EffectDesc>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -118,6 +122,9 @@ pub struct ObjectDesc {
     pub sound: Option<SoundDesc>,
     /// Lets the player use the object with a key (the game decides what happens).
     pub interact: Option<Interactable>,
+    /// Particle effect attached to the object; its position is an offset rotated
+    /// with the object, like `light`.
+    pub effect: Option<EffectDesc>,
 }
 
 impl Default for ObjectDesc {
@@ -137,6 +144,7 @@ impl Default for ObjectDesc {
             animation: None,
             sound: None,
             interact: None,
+            effect: None,
         }
     }
 }
@@ -166,6 +174,8 @@ pub struct ScatterDesc {
     pub seed: u64,
     /// Optional light attached to every copy; its position is an offset.
     pub light: Option<PointLight>,
+    /// Optional particle effect on every copy; its position is an offset.
+    pub effect: Option<EffectDesc>,
     pub collider: ColliderDesc,
 }
 
@@ -186,6 +196,7 @@ impl Default for ScatterDesc {
             sink: 0.05,
             seed: 1,
             light: None,
+            effect: None,
             collider: ColliderDesc::Auto,
         }
     }
@@ -210,6 +221,7 @@ pub struct SceneObject {
     /// with the object (but not scaled).
     pub light: Option<PointLight>,
     pub interact: Option<Interactable>,
+    pub effect: Option<SceneEffect>,
 }
 
 /// A scene ready to render: unique meshes plus the instances that use them.
@@ -229,6 +241,8 @@ pub struct Scene {
     /// `objects`, along with the region files to load.
     pub streaming: Option<SceneStreaming>,
     pub triggers: Vec<SceneTrigger>,
+    /// Effects on their own, each with where it stands.
+    pub effects: Vec<(Transform, SceneEffect)>,
 }
 
 /// Terrain render chunks are this many grid cells on a side.
@@ -281,6 +295,7 @@ impl Scene {
                     animation: None,
                     light: None,
                     interact: None,
+                    effect: None,
                 });
             }
         }
@@ -316,7 +331,7 @@ impl Scene {
             yaw: p.yaw.to_radians(),
         });
 
-        let Builder { meshes, objects, lights, sounds, triggers, .. } = builder;
+        let Builder { meshes, objects, lights, sounds, triggers, effects, .. } = builder;
         Self {
             environment: desc.environment.clone(),
             camera,
@@ -328,11 +343,12 @@ impl Scene {
             sounds,
             streaming,
             triggers,
+            effects,
         }
     }
 
     /// Loads a region file (see [`RegionDesc`]): only its objects, scatter,
-    /// lights, sounds and triggers, placed on the main scene's `terrain`.
+    /// lights, sounds, triggers and effects, placed on the main scene's `terrain`.
     pub fn load_region(path: &Path, terrain: Option<&Terrain>) -> Result<Self> {
         let desc = SceneDesc::load(path)?;
         if desc.terrain.is_some() || !desc.regions.is_empty() {
@@ -351,6 +367,7 @@ impl Scene {
             sounds: builder.sounds,
             streaming: None,
             triggers: builder.triggers,
+            effects: builder.effects,
         })
     }
 
@@ -375,6 +392,7 @@ struct Builder<'a> {
     lights: Vec<PointLight>,
     sounds: Vec<SceneSound>,
     triggers: Vec<SceneTrigger>,
+    effects: Vec<(Transform, SceneEffect)>,
     cache: HashMap<String, usize>,
     /// Directory model paths are relative to.
     dir: PathBuf,
@@ -389,6 +407,7 @@ impl<'a> Builder<'a> {
             lights: Vec::new(),
             sounds: Vec::new(),
             triggers: Vec::new(),
+            effects: Vec::new(),
             cache: HashMap::new(),
             dir: dir.to_path_buf(),
             terrain,
@@ -409,7 +428,19 @@ impl<'a> Builder<'a> {
         self.meshes.len() - 1
     }
 
-    /// Adds `desc`'s objects, scatter, lights, sounds and triggers. With `streaming`,
+    /// Loads an effect file. One that is missing or broken is logged, and the
+    /// scene goes on without it.
+    fn effect(&self, desc: &EffectDesc) -> Option<SceneEffect> {
+        match load_effect(self.dir.join(&desc.path)) {
+            Ok(effect) => Some(SceneEffect { effect, offset: desc.position, scale: desc.scale }),
+            Err(err) => {
+                log::error!("{err:#}");
+                None
+            }
+        }
+    }
+
+    /// Adds `desc`'s objects, scatter, lights, sounds, triggers and effects. With `streaming`,
     /// scattered copies go into its cells instead.
     fn add_contents(&mut self, desc: &SceneDesc, mut streaming: Option<&mut SceneStreaming>) {
         let dir = self.dir.clone();
@@ -425,6 +456,11 @@ impl<'a> Builder<'a> {
             }
             let trigger = trigger.resolve(|x, z| self.ground(x, z));
             self.triggers.push(trigger);
+        }
+        for desc in &desc.effects {
+            let Some(effect) = self.effect(desc) else { continue };
+            let at = desc.position + Vec3::Y * self.ground(desc.position.x, desc.position.z);
+            self.effects.push((Transform::from_position(at), SceneEffect { offset: Vec3::ZERO, ..effect }));
         }
         for obj in &desc.objects {
             let mut position = obj.position;
@@ -445,6 +481,7 @@ impl<'a> Builder<'a> {
                 animation: obj.animation.clone(),
                 light: obj.light.clone(),
                 interact: obj.interact.clone(),
+                effect: obj.effect.as_ref().and_then(|e| self.effect(e)),
             });
             if let Some(sound) = &obj.sound {
                 self.sounds.push(sound.attached(&dir, &transform));
@@ -453,6 +490,7 @@ impl<'a> Builder<'a> {
 
         for scatter in &desc.scatter {
             let mut rng = Rng::new(scatter.seed);
+            let effect = scatter.effect.as_ref().and_then(|e| self.effect(e));
             let variants: Vec<(usize, Option<ColliderShape>)> = (0..scatter.variants.max(1))
                 .map(|k| {
                     let desc = scatter.mesh.with_seed(scatter.seed.wrapping_mul(31).wrapping_add(u64::from(k)));
@@ -482,6 +520,7 @@ impl<'a> Builder<'a> {
                     animation: None,
                     light: scatter.light.clone(),
                     interact: None,
+                    effect: effect.clone(),
                 };
                 match streaming.as_deref_mut() {
                     Some(streaming) => {
@@ -604,6 +643,33 @@ mod tests {
         assert_eq!(interact.len(), 2);
         assert_eq!(*interact[0], Interactable::new("abrir"));
         assert_eq!((interact[1].prompt.as_str(), interact[1].radius), ("ler", 4.0));
+    }
+
+    #[test]
+    fn places_effects_and_survives_missing_files() {
+        let dir = std::env::temp_dir().join(format!("grimora_scene_effects_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("fire.ron"), "[(rate: 5.0)]").unwrap();
+        let desc = SceneDesc::parse(
+            r#"(
+                terrain: (size: 64.0, resolution: 16),
+                effects: [(path: "fire.ron", position: (3.0, 1.0, 2.0), scale: 2.0), (path: "missing.ron")],
+                objects: [(mesh: Cube, effect: (path: "fire.ron", position: (0.0, 1.0, 0.0))),
+                          (mesh: Cube, effect: (path: "missing.ron"))],
+                scatter: [(mesh: Cube, count: 3, effect: (path: "fire.ron"))],
+            )"#,
+        )
+        .unwrap();
+        assert_eq!(SceneDesc::parse(&desc.to_ron().unwrap()).unwrap(), desc);
+
+        let scene = Scene::build_in(&desc, &dir);
+        let [(at, free)] = &scene.effects[..] else { panic!("{:?}", scene.effects) };
+        assert!((at.position.y - 1.0 - scene.ground_height(3.0, 2.0)).abs() < 1e-4, "on the ground, like sounds");
+        assert_eq!((free.scale, free.offset), (2.0, Vec3::ZERO));
+        let with_effect: Vec<_> = scene.objects.iter().filter_map(|o| o.effect.as_ref()).collect();
+        assert_eq!(with_effect.len(), 4, "the object with a real file and the 3 scattered copies");
+        assert_eq!(with_effect[0].offset, Vec3::Y);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

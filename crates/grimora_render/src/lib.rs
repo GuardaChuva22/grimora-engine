@@ -1,11 +1,12 @@
 //! Grimora's wgpu renderer.
 //!
-//! Frame pipeline: shadow map → HDR main pass (sky + lit meshes, MSAA) →
-//! bloom mip chain → tonemap/grade onto the window surface → HUD ([`Ui`]) on top.
+//! Frame pipeline: shadow map → HDR main pass (sky, lit meshes, then sorted
+//! blended particles, MSAA) → bloom mip chain → tonemap/grade onto the window surface → HUD ([`Ui`]) on top.
 
 mod bloom;
 mod font;
 mod material;
+mod particle_pass;
 mod renderer;
 mod ui;
 mod ui_pass;

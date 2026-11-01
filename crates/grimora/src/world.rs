@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
-use grimora_core::{Animator, Environment, MeshData, PointLight, Transform, Vec3};
+use grimora_core::{
+    Animator, Environment, MeshData, ParticleEffect, ParticleInstance, ParticleSystem, PointLight, Transform, Vec3,
+};
 use grimora_physics::{BodyHandle, ColliderHandle, Physics};
 use grimora_scene::{PlayerSpawn, Scene, SceneObject, SceneSound, Terrain};
 pub use hecs::Entity;
@@ -116,6 +118,9 @@ impl World {
         }
         for trigger in scene.triggers {
             ecs.spawn((trigger.transform, trigger.trigger));
+        }
+        for (transform, effect) in &scene.effects {
+            ecs.spawn((*transform, effect.system(transform)));
         }
         physics.refresh();
         let streamer = scene.streaming.map(|s| Streamer::new(s, scene.terrain.as_ref()));
@@ -278,6 +283,44 @@ impl World {
         }
     }
 
+    /// Advances every [`ParticleSystem`], with `camera` deciding which are near
+    /// enough to bother, and removes the finished one-shots. The engine calls
+    /// this after `Game::update`.
+    pub fn update_particles(&mut self, dt: f32, camera: Vec3) {
+        let mut finished = Vec::new();
+        for (entity, transform, system, renderable) in
+            self.ecs.query_mut::<(Entity, &Transform, &mut ParticleSystem, Option<&Renderable>)>()
+        {
+            system.update(transform, dt, camera, renderable.is_none_or(|r| r.visible));
+            if system.despawn_when_done && system.finished() {
+                finished.push(entity);
+            }
+        }
+        for entity in finished {
+            let _ = self.ecs.despawn(entity);
+        }
+    }
+
+    /// Plays `effect` (see `grimora_scene::load_effect`) at `position`. The
+    /// entity removes itself when the effect ends; one that loops plays until
+    /// the game despawns it.
+    pub fn play_effect(&mut self, effect: &ParticleEffect, position: Vec3) -> Entity {
+        // Effects played in the same spot still differ, since live entity ids do.
+        let seed = self.ecs.len() as u64 ^ u64::from(position.x.to_bits()) ^ u64::from(position.z.to_bits()) << 32;
+        let mut system = ParticleSystem::new(effect.clone(), Vec3::ZERO, 1.0, seed);
+        system.despawn_when_done = true;
+        self.ecs.spawn((Transform::from_position(position), system))
+    }
+
+    /// Every live particle, for the renderer.
+    pub fn active_particles(&self) -> Vec<ParticleInstance> {
+        let mut particles = Vec::new();
+        for system in self.ecs.query::<&ParticleSystem>().iter() {
+            system.collect(&mut particles);
+        }
+        particles
+    }
+
     /// Copies the pose of every [`Body`] into its entity's transform, keeping
     /// the scale. The engine calls this after each physics step.
     pub fn sync_bodies(&mut self, physics: &Physics) {
@@ -322,6 +365,9 @@ pub(crate) fn object_builder(
     }
     if let Some(interact) = &o.interact {
         entity.add(interact.clone());
+    }
+    if let Some(effect) = &o.effect {
+        entity.add(effect.system(&o.transform));
     }
     if let Some(mut animator) = animator_for(meshes.get(mesh.0)) {
         if let Some(clip) = &o.animation

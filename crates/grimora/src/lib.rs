@@ -67,10 +67,10 @@ pub mod prelude {
     };
     pub use grimora_audio::{Audio, Category, Emitter, SoundId};
     pub use grimora_core::{
-        Animator, Camera, Environment, EulerRot, Input, KeyCode, Mat4, MeshData, MouseButton, PointLight, Quat, Time,
-        Transform, Vec2, Vec3, Vec4,
+        Animator, Camera, Environment, EulerRot, Input, KeyCode, Mat4, MeshData, MouseButton, ParticleDesc,
+        ParticleEffect, ParticleShape, ParticleSystem, PointLight, Quat, Time, Transform, Vec2, Vec3, Vec4,
     };
     pub use grimora_physics::{BodyHandle, CharacterBody, Physics, RayHit};
     pub use grimora_render::{Anchor, Rect, TextStyle, Ui};
-    pub use grimora_scene::{BodyDesc, Interactable, MeshDesc, Trigger, TriggerShape};
+    pub use grimora_scene::{BodyDesc, Interactable, MeshDesc, Trigger, TriggerShape, load_effect};
 }

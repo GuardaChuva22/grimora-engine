@@ -105,6 +105,7 @@ impl Hud {
             ("fora de vista", render.culled.to_string()),
             ("sombras", render.shadow_casters.to_string()),
             ("triângulos", format!("{}k", render.triangles / 1000)),
+            ("partículas", render.particles.to_string()),
             ("entidades", ctx.world.ecs.len().to_string()),
         ];
         if let Some(s) = ctx.world.streaming_stats() {

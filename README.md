@@ -59,21 +59,21 @@ cargo run --release -p sandbox -- --frames 600 --no-vsync
 Ao fechar, o motor imprime uma linha de métricas fácil de ler por scripts:
 
 ```
-[grimora] frames=80 avg_ms=5.56 p95_ms=5.88 max_ms=5.91 draw_calls=47 objects=151 culled=249 shadow_casters=305 triangles=28220 gpu="NVIDIA GeForce RTX 3060"
+[grimora] frames=80 avg_ms=5.56 p95_ms=5.88 max_ms=5.91 draw_calls=47 objects=151 culled=249 shadow_casters=305 triangles=28220 particles=340 gpu="NVIDIA GeForce RTX 3060"
 ```
 
-`objects` são os objetos desenhados na tela, `culled` os que ficaram de fora (fora da câmera ou pequenos demais) e `shadow_casters` os desenhados no mapa de sombra.
+`objects` são os objetos desenhados na tela, `culled` os que ficaram de fora (fora da câmera ou pequenos demais) e `shadow_casters` os desenhados no mapa de sombra. `particles` são as partículas vivas.
 
 ## Arquitetura
 
 ```
 crates/
-  grimora_core/    tempo, entrada, Transform, Camera, MeshData, Material, Environment (luz/névoa/céu/pós)
-  grimora_render/  renderizador wgpu: sombras, HDR + MSAA 4x, materiais PBR, névoa de altura, bloom, tonemapping, HUD
+  grimora_core/    tempo, entrada, Transform, Camera, MeshData, Material, Environment (luz/névoa/céu/pós), simulação de partículas
+  grimora_render/  renderizador wgpu: sombras, HDR + MSAA 4x, materiais PBR, névoa de altura, partículas, bloom, tonemapping, HUD
   grimora_scene/   formato de cena RON, importação glTF, terreno procedural, geradores low poly, espalhamento, colisores
   grimora_physics/ física com Rapier: mundo estático da cena, corpos dinâmicos, raycasts, corpo de personagem (cápsula)
   grimora_audio/   som com kira: efeitos, loops de ambiente e emissores 3D que seguem a câmera
-  grimora/         janela (winit), laço principal, trait Game, World (entidades hecs), gatilhos e interação, FlyCamera, ThirdPersonController, CLI, hot-reload
+  grimora/         janela (winit), laço principal, trait Game, World (entidades hecs), gatilhos e interação, partículas, FlyCamera, ThirdPersonController, CLI, hot-reload
 examples/
   sandbox/         cena de teste do motor
 assets/scenes/     cenas .ron
@@ -81,7 +81,7 @@ assets/models/     modelos glTF (com a licença de cada um)
 assets/sounds/     sons WAV/OGG (os do sandbox são gerados por tools/gen_sounds.py)
 ```
 
-Quadro a quadro: mapa de sombra do sol → passe HDR (céu + malhas iluminadas, MSAA) → cadeia de bloom → tonemap ACES, contraste, saturação, vinheta e granulado na tela → HUD por cima. Objetos com a mesma malha são desenhados numa única chamada instanciada.
+Quadro a quadro: mapa de sombra do sol → passe HDR (céu + malhas iluminadas + partículas ordenadas, MSAA) → cadeia de bloom → tonemap ACES, contraste, saturação, vinheta e granulado na tela → HUD por cima. Objetos com a mesma malha são desenhados numa única chamada instanciada.
 
 | Componente | Escolha |
 | --- | --- |
@@ -141,6 +141,7 @@ Cada objeto do mundo é uma entidade do [`hecs`](https://docs.rs/hecs) em `ctx.w
 | `Animator` | esqueleto animado |
 | `Trigger` | área que avisa quando o jogador entra ou sai |
 | `Interactable` | objeto que o jogador usa com uma tecla |
+| `ParticleSystem` | efeito de partículas que sai da entidade |
 | `Body` / `Collider` | corpo dinâmico ou colisor estático na física |
 | `SceneIndex` | posição no `objects` da cena (usado pelo save) |
 
@@ -183,11 +184,11 @@ Exporte do Blender como glTF 2.0 (`.gltf` + `.bin` + texturas, ou `.glb`) para `
 - A cena inteira do arquivo vira uma malha: transformações dos nós são aplicadas e cada primitiva vira uma submalha com seu material.
 - Materiais metallic-roughness: cor base, normal map, metal/rugosidade, oclusão, emissão (`emissiveFactor`, `emissiveTexture` e `KHR_materials_emissive_strength`) e `doubleSided`. Cores de vértice também são lidas. Faltando normais ou tangentes, o motor gera.
 - Emissão acima de 1 alimenta o bloom: no Blender, aumente a força (Strength) do Emission para a runa ou brasa brilhar.
-- Transparência (`alphaMode`): `MASK` recorta o que estiver abaixo do `alphaCutoff` (folhagem, pano rasgado, grades), com bordas suavizadas pelo MSAA (alpha-to-coverage) e recorte também na sombra. `BLEND` é aproximado por alpha-to-coverage: não precisa ordenar objetos, mas tem poucos níveis de transparência e um leve pontilhado; para vidro e água de verdade ainda falta mistura ordenada.
+- Transparência (`alphaMode`): `MASK` recorta o que estiver abaixo do `alphaCutoff` (folhagem, pano rasgado, grades), com bordas suavizadas pelo MSAA (alpha-to-coverage) e recorte também na sombra. `BLEND` é aproximado por alpha-to-coverage: não precisa ordenar objetos, mas tem poucos níveis de transparência e um leve pontilhado; para vidro e água de verdade ainda falta mistura ordenada em malhas (por enquanto, só as partículas têm).
 - Texturas maiores que `max_texture_size` (padrão 2048) são reduzidas pela metade até caber: `Model(path: "...", max_texture_size: 1024)`.
 - O modelo mantém a origem e a escala do arquivo. O colisor automático é o casco convexo; use `collider: Mesh` para formas côncavas grandes (casas, ruínas) ou `None` para decoração.
 - Modelos ficam em cache enquanto o arquivo não muda, então o hot-reload da cena é instantâneo. Editar só o modelo não recarrega a cena: salve o `.ron` para recarregar.
-- Ainda não suportados: mistura de transparência ordenada, morph targets e um segundo conjunto de UVs.
+- Ainda não suportados: mistura de transparência ordenada em malhas, morph targets e um segundo conjunto de UVs.
 - O estandarte do sandbox é gerado por [tools/gen_banner.py](tools/gen_banner.py) (Python puro), um exemplo de como criar um glTF por código.
 
 ### Animação esquelética
@@ -318,6 +319,73 @@ if let Some(alvo) = ctx.world.interaction_target(centro, ctx.camera.forward(), &
 - A recarga da cena (hot-reload ou F5) recria tudo: gatilhos disparam de novo.
 
 No sandbox, entrar no círculo de pedras mostra o nome do lugar, o santuário só avisa uma vez e **E** apaga e acende o cristal do altar. O F3 mostra a área atual.
+
+### Partículas
+
+![Tochas com chama, fumaça e fagulhas, e o cristal do altar ao fundo](docs/particles.png)
+
+Um efeito é um arquivo `.ron` com uma lista de emissores que tocam juntos. Todos os campos são opcionais ([`ParticleDesc`](crates/grimora_core/src/particles.rs) lista cada um):
+
+```ron
+// assets/effects/brasa.ron
+[
+    (
+        rate: 20.0,                  // por segundo; `burst` solta de uma vez
+        lifetime: (0.5, 1.2),        // (mínimo, máximo) em segundos
+        area: (0.1, 0.0, 0.1),       // meias-medidas da caixa de onde nascem
+        direction: (0.0, 1.0, 0.0),
+        spread: 20.0,                // graus em torno de `direction` (180 = todas)
+        speed: (0.5, 1.5),
+        acceleration: (0.0, -1.0, 0.0),
+        drag: 0.5,
+        turbulence: 2.0,
+        sizes: [0.1, 0.0],           // chaves ao longo da vida
+        colors: [(1.0, 0.7, 0.3, 1.0), (1.0, 0.2, 0.1, 0.0)], // sRGB com opacidade
+        emissive: 5.0,               // brilho próprio, que alimenta o bloom
+        additive: 1.0,               // 0 = cobre o fundo, 1 = soma luz
+        lit: 0.0,                    // quanto recebe a luz da cena (fumaça, poeira)
+        stretch: 0.02,               // estica na direção do movimento (fagulhas)
+        shape: Diamond,              // Soft (padrão) ou Diamond
+    ),
+]
+```
+
+A cena põe o efeito num objeto, ou solto. Regiões e `scatter` aceitam igual:
+
+```ron
+objects: [
+    (mesh: Cone(segments: 5), position: (4.5, 1.7, 6.0),
+     // `position` gira com o objeto; `scale` multiplica tamanhos, velocidades e distâncias.
+     effect: (path: "../effects/torch.ron", position: (0.0, 0.2, 0.0), scale: 1.0)),
+],
+effects: [
+    (path: "../effects/dust.ron", position: (0.0, 1.8, 2.0)), // `y` a partir do chão
+],
+```
+
+No código, `ParticleSystem` é um componente como outro qualquer:
+
+```rust
+// Uma vez só: a entidade some sozinha quando o efeito acaba.
+let faisca = load_effect("assets/effects/faisca.ron")?;
+ctx.world.play_effect(&faisca, posicao);
+
+// Num inimigo, seguindo-o até o jogo tirar o componente ou a entidade.
+ctx.world.ecs.insert_one(inimigo, ParticleSystem::new(aura, Vec3::Y, 1.0, 7))?;
+
+// Liga e desliga sem cortar o que já está no ar.
+ctx.world.ecs.get::<&mut ParticleSystem>(inimigo)?.emitting = false;
+```
+
+- **Mundo:** as partículas ficam onde nasceram: mover o objeto deixa um rastro, em vez de arrastar a chama inteira. Objeto com `visible: false` para de emitir.
+- **Laços:** efeitos sem `duration` já começam no meio do ciclo, com a tocha acesa desde o primeiro quadro. A semente vem da posição: tochas iguais não dançam juntas, e o mesmo lugar sempre começa igual.
+- **Ordem:** um único passe desenha tudo, do mais longe para o mais perto, então chama e fumaça se misturam na ordem certa.
+- **Luz e névoa:** `lit` usa o ambiente, o sol e as luzes pontuais, sem sombra. A névoa apaga a luz somada e tinge o que cobre o fundo. Colada na câmera, a partícula some em vez de encher a tela.
+- **Desempenho:** além de `max_distance` (padrão 60 m) o emissor dorme e não custa nada. Numa RTX 3060 em 1280x720 (`--release`), as ~340 partículas do sandbox custam 0,02 ms por quadro e 19,5 mil custam 2,1 ms.
+- **Fora de escopo por enquanto:** a partícula corta seco ao encostar na geometria (sem *soft particles*), não colide com o chão e não faz nem recebe sombra. Elas também não entram no save: voltam a queimar sozinhas.
+- **Hot-reload:** editar só o efeito não recarrega a cena. Salve o `.ron` da cena (ou aperte F5).
+
+No sandbox, as tochas têm chama, fumaça e fagulhas, há poeira no ar, e **E** faz o cristal do altar estourar em faíscas ao despertar. O F3 mostra quantas partículas estão ativas.
 
 ### Áudio
 
@@ -463,6 +531,7 @@ Diretrizes:
 - [x] Salvamento de jogo: slots em RON com gravação atômica, estado do jogo + objetos e corpos da cena
 - [x] HUD: texto com fonte bitmap embutida (com acentos), contorno, painéis e barras
 - [x] Gatilhos de área e objetos usáveis, na cena, com estado que sobrevive ao streaming e ao save
+- [x] Partículas: efeitos em `.ron`, passe ordenado com luz e névoa, emissores em objetos, regiões e `scatter`
 
 **Próximos passos**
 - [x] Avaliação de ECS: `hecs` recomendado, `bevy_ecs` descartado ([docs/ecs.md](docs/ecs.md))

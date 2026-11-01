@@ -85,6 +85,9 @@ SceneDesc(
             // The player can use it from `radius` meters of its origin, if nothing solid is
             // in between (default 2.5). The game shows `prompt` and decides what happens.
             interact: (prompt: "tocar o cristal", radius: 3.0),
+            // Particles attached to the object; the file holds the effect, so scenes can share it.
+            // `position` is an offset rotated with the object and `scale` multiplies the effect.
+            effect: (path: "../effects/heart.ron", position: (0.0, 0.6, 0.0)),
         ),
 
         // ---- glTF models (paths are relative to this file). The banner comes from
@@ -131,18 +134,22 @@ SceneDesc(
         (mesh: Cylinder(segments: 5), position: ( 4.5, 0.0, 6.0), scale: (0.14, 1.7, 0.14), color: (0.3, 0.22, 0.16)),
         (mesh: Cone(segments: 5), position: ( 4.5, 1.7, 6.0), scale: (0.3, 0.5, 0.3), color: (1.0, 0.55, 0.2), emissive: 6.0,
          light: (position: (0.0, 0.4, 0.0), color: (1.0, 0.55, 0.25), intensity: 16.0, radius: 12.0, flicker: 1.0),
+         effect: (path: "../effects/torch.ron", position: (0.0, 0.2, 0.0)),
          sound: (path: "../sounds/fire.wav", position: (0.0, 0.3, 0.0), volume: 0.8, min_distance: 1.5, max_distance: 16.0)),
         (mesh: Cylinder(segments: 5), position: (-4.5, 0.0, 6.0), scale: (0.14, 1.7, 0.14), color: (0.3, 0.22, 0.16)),
         (mesh: Cone(segments: 5), position: (-4.5, 1.7, 6.0), scale: (0.3, 0.5, 0.3), color: (1.0, 0.55, 0.2), emissive: 6.0,
          light: (position: (0.0, 0.4, 0.0), color: (1.0, 0.55, 0.25), intensity: 16.0, radius: 12.0, flicker: 1.0),
+         effect: (path: "../effects/torch.ron", position: (0.0, 0.2, 0.0)),
          sound: (path: "../sounds/fire.wav", position: (0.0, 0.3, 0.0), volume: 0.8, min_distance: 1.5, max_distance: 16.0)),
         (mesh: Cylinder(segments: 5), position: ( 4.5, 0.0, -6.0), scale: (0.14, 1.7, 0.14), color: (0.3, 0.22, 0.16)),
         (mesh: Cone(segments: 5), position: ( 4.5, 1.7, -6.0), scale: (0.3, 0.5, 0.3), color: (1.0, 0.55, 0.2), emissive: 6.0,
          light: (position: (0.0, 0.4, 0.0), color: (1.0, 0.55, 0.25), intensity: 16.0, radius: 12.0, flicker: 1.0),
+         effect: (path: "../effects/torch.ron", position: (0.0, 0.2, 0.0)),
          sound: (path: "../sounds/fire.wav", position: (0.0, 0.3, 0.0), volume: 0.8, min_distance: 1.5, max_distance: 16.0)),
         (mesh: Cylinder(segments: 5), position: (-4.5, 0.0, -6.0), scale: (0.14, 1.7, 0.14), color: (0.3, 0.22, 0.16)),
         (mesh: Cone(segments: 5), position: (-4.5, 1.7, -6.0), scale: (0.3, 0.5, 0.3), color: (1.0, 0.55, 0.2), emissive: 6.0,
          light: (position: (0.0, 0.4, 0.0), color: (1.0, 0.55, 0.25), intensity: 16.0, radius: 12.0, flicker: 1.0),
+         effect: (path: "../effects/torch.ron", position: (0.0, 0.2, 0.0)),
          sound: (path: "../sounds/fire.wav", position: (0.0, 0.3, 0.0), volume: 0.8, min_distance: 1.5, max_distance: 16.0)),
     ],
 
@@ -180,6 +187,11 @@ SceneDesc(
     // off) and `rotation` turns boxes. `once: true` fires only the first time, for good.
     triggers: [
         (name: "circle", shape: Cylinder(radius: 9.5, height: 6.0)),
+    ],
+
+    // Particle effects on their own, not attached to anything (`y` from the ground).
+    effects: [
+        (path: "../effects/dust.ron", position: (0.0, 1.8, 2.0)),
     ],
 
     // Looping sounds (WAV or OGG, paths relative to this file; made by tools/gen_sounds.py).

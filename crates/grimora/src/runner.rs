@@ -317,6 +317,7 @@ impl<G: Game> App<G> {
             self.ctx.ui.begin(size, scale);
         }
         self.ctx.world.update_animations(self.ctx.time.delta());
+        self.ctx.world.update_particles(self.ctx.time.delta(), self.ctx.camera.position);
         if self.ctx.world.update_streaming(self.ctx.camera.position, &mut self.ctx.physics) {
             self.ctx.audio.set_scene_sounds(&self.ctx.world.active_sounds());
         }
@@ -359,6 +360,7 @@ impl<G: Game> App<G> {
             lights: &world.active_lights(),
             draws: &draws,
             joint_matrices: &joint_matrices,
+            particles: &world.active_particles(),
             time: self.ctx.time.elapsed(),
             ui: &self.ctx.ui,
         };
@@ -440,14 +442,15 @@ impl<G: Game> App<G> {
         let s = self.ctx.stats;
         let gpu = self.renderer.as_ref().map(|r| r.adapter_info().name.clone()).unwrap_or_default();
         println!(
-            "[grimora] frames={} avg_ms={avg:.2} p95_ms={p95:.2} max_ms={:.2} draw_calls={} objects={} culled={} shadow_casters={} triangles={} gpu=\"{gpu}\"",
+            "[grimora] frames={} avg_ms={avg:.2} p95_ms={p95:.2} max_ms={:.2} draw_calls={} objects={} culled={} shadow_casters={} triangles={} particles={} gpu=\"{gpu}\"",
             sorted.len(),
             sorted[sorted.len() - 1],
             s.draw_calls,
             s.instances,
             s.culled,
             s.shadow_casters,
-            s.triangles
+            s.triangles,
+            s.particles
         );
     }
 }

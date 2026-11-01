@@ -20,6 +20,8 @@ const DEFAULT_SCENE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/s
 
 /// The animated wanderer (made by tools/gen_wanderer.py).
 const WANDERER: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/models/wanderer/wanderer.gltf");
+/// Played when the altar's crystal wakes up.
+const HEART_BURST: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/effects/heart_burst.ron");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum Mode {
@@ -150,11 +152,24 @@ impl Sandbox {
         match target.name.as_deref() {
             Some("heart") => {
                 self.heart_asleep = !self.heart_asleep;
+                if !self.heart_asleep {
+                    self.burst_heart(ctx);
+                }
                 let text = if self.heart_asleep { "O cristal adormece" } else { "O cristal desperta" };
                 self.hud.notify(ctx, text, true);
             }
             Some("shrine_crystal") => self.hud.notify(ctx, "A pedra está fria ao toque", true),
             _ => {}
+        }
+    }
+
+    fn burst_heart(&self, ctx: &mut Context) {
+        let Some(at) = self.heart.as_ref().and_then(|h| ctx.world.transform(h.entity)) else { return };
+        match load_effect(HEART_BURST) {
+            Ok(effect) => {
+                ctx.world.play_effect(&effect, at.position + Vec3::Y * 0.6);
+            }
+            Err(err) => eprintln!("[sandbox] {err:#}"),
         }
     }
 
@@ -166,8 +181,15 @@ impl Sandbox {
         let target = if self.heart_asleep { ASLEEP_GLOW } else { 1.0 };
         self.heart_glow += (target - self.heart_glow) * (1.0 - (-3.0 * ctx.time.delta()).exp());
         let glow = self.heart_glow;
-        let query = ctx.world.ecs.query_one_mut::<(&mut Transform, &mut Renderable, &mut Light)>(heart.entity);
-        let Ok((transform, renderable, Light(light))) = query else { return };
+        let asleep = self.heart_asleep;
+        let query = ctx
+            .world
+            .ecs
+            .query_one_mut::<(&mut Transform, &mut Renderable, &mut Light, Option<&mut ParticleSystem>)>(heart.entity);
+        let Ok((transform, renderable, Light(light), motes)) = query else { return };
+        if let Some(motes) = motes {
+            motes.emitting = !asleep;
+        }
         // It sinks and slows as it goes dark.
         transform.position = heart.rest + Vec3::Y * (0.25 * glow + 0.15 * glow * (t * 1.3).sin());
         transform.rotation = Quat::from_rotation_y(t * 0.4);

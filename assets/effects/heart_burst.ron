@@ -1,0 +1,21 @@
+// The crystal waking up: `rate: 0` with a `burst` plays once and ends, so
+// `World::play_effect` removes it by itself.
+[
+    (
+        rate: 0.0,
+        burst: 60,
+        lifetime: (0.5, 1.4),
+        area: (0.15, 0.15, 0.15),
+        speed: (1.5, 3.6),
+        acceleration: (0.0, 0.6, 0.0),
+        drag: 2.2,
+        turbulence: 2.0,
+        sizes: [0.09, 0.0],
+        size_jitter: 0.4,
+        colors: [(0.85, 0.65, 1.0, 1.0), (0.55, 0.3, 1.0, 1.0)],
+        emissive: 10.0,
+        additive: 1.0,
+        stretch: 0.04,
+        shape: Diamond,
+    ),
+]

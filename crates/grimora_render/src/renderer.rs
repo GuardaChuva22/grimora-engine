@@ -1,10 +1,13 @@
 use anyhow::{Context as _, Result, anyhow};
-use grimora_core::{BoundingSphere, Camera, Environment, Frustum, Mat4, MeshData, PointLight, Transform, Vec3};
+use grimora_core::{
+    BoundingSphere, Camera, Environment, Frustum, Mat4, MeshData, ParticleInstance, PointLight, Transform, Vec3,
+};
 use image::RgbaImage;
 use wgpu::util::DeviceExt as _;
 
 use crate::bloom::Bloom;
 use crate::material::{GpuMaterial, MaterialCache};
+use crate::particle_pass::ParticlePass;
 use crate::ui::Ui;
 use crate::ui_pass::UiPass;
 use crate::uniforms::{self, Cascades, Globals, InstanceRaw, MAX_CASCADES, PostParams};
@@ -55,6 +58,8 @@ pub struct Frame<'a> {
     /// Skinning matrices of every animated draw, one block per draw
     /// (see [`grimora_core::Animator::skinning_matrices`]).
     pub joint_matrices: &'a [Mat4],
+    /// Drawn over the opaque scene, sorted by the renderer.
+    pub particles: &'a [ParticleInstance],
     /// Seconds since start; drives flicker and film grain.
     pub time: f32,
     /// Drawn over the finished image.
@@ -74,6 +79,8 @@ pub struct FrameStats {
     pub culled: u32,
     /// Objects drawn into the shadow maps, counted once per cascade.
     pub shadow_casters: u32,
+    /// Particles drawn; part of the main pass's draw calls and triangles.
+    pub particles: u32,
 }
 
 struct GpuMesh {
@@ -138,6 +145,7 @@ pub struct Renderer {
     /// Shadow caster that cuts out alpha-tested texels.
     shadow_masked_pipeline: wgpu::RenderPipeline,
     tonemap_pipeline: wgpu::RenderPipeline,
+    particles: ParticlePass,
     ui: UiPass,
 
     targets: Targets,
@@ -532,6 +540,7 @@ impl Renderer {
             cache: None,
         });
 
+        let particles = ParticlePass::new(&device, &scene_shader, &globals_layout, msaa);
         let ui = UiPass::new(&device, &queue, format, &linear_sampler);
 
         let targets = create_targets(&device, config.width, config.height, msaa);
@@ -569,6 +578,7 @@ impl Renderer {
             shadow_pipeline,
             shadow_masked_pipeline,
             tonemap_pipeline,
+            particles,
             ui,
             targets,
             bloom,
@@ -702,6 +712,11 @@ impl Renderer {
             self.queue.write_buffer(&self.cascade_buffer, offset, bytemuck::bytes_of(&view_proj.to_cols_array_2d()));
         }
         self.prepare_instances(frame, cascades.as_ref());
+        let aspect = self.aspect();
+        let particles = self.particles.prepare(&self.device, &self.queue, frame.particles, frame.camera, aspect);
+        self.stats.particles = particles;
+        self.stats.draw_calls += u32::from(particles > 0);
+        self.stats.triangles += u64::from(particles) * 2;
         self.upload_joints(frame.joint_matrices);
         self.ui.prepare(&self.device, &self.queue, frame.ui, self.config.width, self.config.height);
 
@@ -750,6 +765,7 @@ impl Renderer {
             pass.set_pipeline(&self.sky_pipeline);
             pass.draw(0..3, 0..1);
             self.draw_batches(&mut pass, &self.batches, true);
+            self.particles.draw(&mut pass);
         }
 
         self.bloom.render(&mut encoder);
@@ -907,6 +923,7 @@ impl Renderer {
                 .sum(),
             culled,
             shadow_casters: self.casters.iter().map(|c| c.len() as u32).sum(),
+            particles: 0,
         };
     }
 
@@ -1007,7 +1024,11 @@ pub(crate) fn sampler_entry(binding: u32, ty: wgpu::SamplerBindingType) -> wgpu:
     }
 }
 
-fn depth_state(write: bool, compare: wgpu::CompareFunction, bias: wgpu::DepthBiasState) -> wgpu::DepthStencilState {
+pub(crate) fn depth_state(
+    write: bool,
+    compare: wgpu::CompareFunction,
+    bias: wgpu::DepthBiasState,
+) -> wgpu::DepthStencilState {
     wgpu::DepthStencilState {
         format: DEPTH_FORMAT,
         depth_write_enabled: Some(write),
