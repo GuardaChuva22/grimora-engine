@@ -254,7 +254,7 @@ def main():
         "bufferViews": views,
         "accessors": accessors,
     }
-    with open(os.path.join(OUT, "banner.gltf"), "w") as f:
+    with open(os.path.join(OUT, "banner.gltf"), "w", newline="\n") as f:
         json.dump(doc, f, indent=1)
     print("wrote", os.path.normpath(OUT))
 

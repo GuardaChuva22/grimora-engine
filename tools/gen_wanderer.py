@@ -451,7 +451,7 @@ def main():
         "bufferViews": views,
         "accessors": accessors,
     }
-    with open(os.path.join(OUT, "wanderer.gltf"), "w") as f:
+    with open(os.path.join(OUT, "wanderer.gltf"), "w", newline="\n") as f:
         json.dump(doc, f, indent=1)
     vertices = sum(len(p.pos) for p in PRIMS)
     print(f"wrote {os.path.normpath(OUT)}: {vertices} vertices, {len(JOINTS)} joints, {len(CLIPS)} clips")
