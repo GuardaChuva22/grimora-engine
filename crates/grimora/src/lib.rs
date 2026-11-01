@@ -24,6 +24,7 @@
 mod config;
 mod fly_camera;
 mod runner;
+pub mod save;
 mod streaming;
 mod third_person;
 mod world;
@@ -31,8 +32,9 @@ mod world;
 pub use config::{EngineConfig, USAGE};
 pub use fly_camera::FlyCamera;
 pub use runner::{Context, run};
+pub use save::SaveStore;
 pub use streaming::StreamingStats;
-pub use third_person::ThirdPersonController;
+pub use third_person::{CharacterState, ThirdPersonController};
 pub use world::{MeshId, Object, World};
 
 pub use grimora_audio as audio;
@@ -55,7 +57,9 @@ pub trait Game: 'static {
 }
 
 pub mod prelude {
-    pub use crate::{Context, EngineConfig, FlyCamera, Game, MeshId, Object, ThirdPersonController, World};
+    pub use crate::{
+        CharacterState, Context, EngineConfig, FlyCamera, Game, MeshId, Object, SaveStore, ThirdPersonController, World,
+    };
     pub use grimora_audio::{Audio, Category, Emitter, SoundId};
     pub use grimora_core::{
         Animator, Camera, Environment, EulerRot, Input, KeyCode, Mat4, MeshData, MouseButton, PointLight, Quat, Time,

@@ -942,6 +942,8 @@ dependencies = [
  "grimora_scene",
  "log",
  "pollster",
+ "ron",
+ "serde",
  "winit",
 ]
 
@@ -2415,6 +2417,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "grimora",
+ "serde",
 ]
 
 [[package]]

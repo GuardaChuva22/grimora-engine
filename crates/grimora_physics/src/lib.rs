@@ -170,6 +170,21 @@ impl Physics {
         Some((from_rapier(pose.translation), Quat::from_xyzw(r.x, r.y, r.z, r.w)))
     }
 
+    /// Linear and angular velocity of a dynamic body.
+    pub fn body_velocity(&self, body: BodyHandle) -> Option<(Vec3, Vec3)> {
+        let body = self.world.bodies.get(body.0)?;
+        Some((from_rapier(body.linvel()), from_rapier(body.angvel())))
+    }
+
+    /// Moves a dynamic body (teleports it, as when loading a saved game) and
+    /// sets its velocities. Its object follows on the next `World::sync_bodies`.
+    pub fn set_body_state(&mut self, body: BodyHandle, position: Vec3, rotation: Quat, linear: Vec3, angular: Vec3) {
+        let Some(body) = self.world.bodies.get_mut(body.0) else { return };
+        body.set_position(Pose::from_parts(to_rapier(position), self::rotation(rotation)), true);
+        body.set_linvel(to_rapier(linear), true);
+        body.set_angvel(to_rapier(angular), true);
+    }
+
     /// Dynamic bodies created by [`Physics::from_scene`], with their object indices.
     pub fn scene_bodies(&self) -> &[SceneBody] {
         &self.scene_bodies

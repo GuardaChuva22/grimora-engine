@@ -26,6 +26,12 @@ pub struct EngineConfig {
     pub hot_reload: bool,
     /// Play sound (screenshot runs mix without opening a device).
     pub audio: bool,
+    /// Folder for saved games; defaults to the user's data folder (see
+    /// [`crate::SaveStore::for_game`], named after `title`).
+    pub save_dir: Option<PathBuf>,
+    /// Saved game slot for the game to load at startup (it decides how, with
+    /// [`crate::Context::load_game`]).
+    pub load: Option<String>,
 }
 
 impl Default for EngineConfig {
@@ -43,6 +49,8 @@ impl Default for EngineConfig {
             look_at: None,
             hot_reload: true,
             audio: true,
+            save_dir: None,
+            load: None,
         }
     }
 }
@@ -59,6 +67,8 @@ Options:
   --no-msaa                 Disable anti-aliasing
   --no-hot-reload           Do not watch the scene file
   --no-audio                No sound (screenshots are always silent)
+  --save-dir <folder>       Where saved games go
+  --load <slot>             Ask the game to load this saved game at startup
   --help                    Show this message
 
 Controls: hold right mouse + move to look, WASD move, E/Q up/down,
@@ -86,6 +96,8 @@ impl EngineConfig {
                 "--no-msaa" => self.msaa = 1,
                 "--no-hot-reload" => self.hot_reload = false,
                 "--no-audio" => self.audio = false,
+                "--save-dir" => self.save_dir = Some(value()?.into()),
+                "--load" => self.load = Some(value()?),
                 "--help" | "-h" => {
                     println!("{USAGE}");
                     std::process::exit(0);
@@ -125,6 +137,9 @@ mod tests {
         assert_eq!(config.scene.unwrap().to_str(), Some("a.ron"));
         assert_eq!(config.camera_position, Some(Vec3::new(1.0, 2.5, -3.0)));
         assert_eq!((config.width, config.height), (800, 600));
+        let config =
+            EngineConfig::default().with_args(["--load", "quick", "--save-dir", "s"].map(String::from)).unwrap();
+        assert_eq!((config.load.as_deref(), config.save_dir.unwrap().to_str()), (Some("quick"), Some("s")));
         assert_eq!(EngineConfig { screenshot: Some("x".into()), ..Default::default() }.frame_limit(), Some(90));
     }
 

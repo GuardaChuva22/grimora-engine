@@ -240,6 +240,22 @@ impl Streamer {
         changed
     }
 
+    /// Unloads every cell and region; the next update loads them again as the
+    /// scene describes them (regions that failed stay failed).
+    pub fn unload_all(&mut self, physics: &mut Physics) {
+        for (_, chunk) in self.loaded.drain() {
+            chunk.unload(physics);
+        }
+        for region in &mut self.regions {
+            match std::mem::replace(&mut region.state, RegionState::Unloaded) {
+                RegionState::Loaded(chunk) => chunk.unload(physics),
+                // A build still in flight is dropped when it arrives.
+                RegionState::Loading | RegionState::Unloaded => {}
+                RegionState::Failed => region.state = RegionState::Failed,
+            }
+        }
+    }
+
     pub fn chunks(&self) -> impl Iterator<Item = &Chunk> {
         self.loaded.values().chain(self.regions.iter().filter_map(|r| match &r.state {
             RegionState::Loaded(chunk) => Some(chunk),

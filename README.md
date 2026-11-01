@@ -22,7 +22,7 @@ Você controla um andarilho encapuzado com uma lanterna:
 | Espaço | pula | sobe (E/Q também) |
 | Roda | aproxima/afasta a câmera | ajusta a velocidade |
 
-**F5** recarrega a cena, **F12** salva uma captura em `screenshots/`, **Esc** sai.
+**F5** recarrega a cena, **F6** salva o jogo, **F9** carrega o último save, **F12** salva uma captura em `screenshots/`, **Esc** sai.
 
 ![Andarilho com lanterna](docs/wanderer.png)
 
@@ -51,6 +51,8 @@ cargo run --release -p sandbox -- --frames 600 --no-vsync
 | `--size LxA` | Tamanho da janela |
 | `--no-vsync`, `--no-msaa`, `--no-hot-reload` | Benchmark e depuração |
 | `--no-audio` | Sem som (com `--screenshot` o áudio já roda mudo, sem abrir o dispositivo) |
+| `--save-dir <pasta>` | Pasta dos saves (padrão: `%APPDATA%\<título do jogo>\saves`) |
+| `--load <slot>` | Pede ao jogo para carregar esse save ao abrir (o sandbox atende) |
 
 Ao fechar, o motor imprime uma linha de métricas fácil de ler por scripts:
 
@@ -259,6 +261,32 @@ regions: [
 
 Em [bench_forest.ron](assets/scenes/bench_forest.ron) (`load_distance: 450`, mesma máquina da tabela acima), o quadro na visão do jogador cai de 2,3 ms para 1,35 ms (medido antes das sombras em cascata), com 188 de 315 células carregadas. A carga inicial das células leva ~2 ms.
 
+### Salvamento de jogo
+
+Cada save é um arquivo RON legível num slot (`quick.ron`, `slot_1.ron`...). O jogo decide o que guardar do próprio estado; o motor junta a câmera e os objetos da cena que mudaram:
+
+```rust
+#[derive(Serialize, Deserialize)]
+struct MeuSave { jogador: CharacterState, ouro: u32 }
+
+ctx.save_game("slot_1", &MeuSave { jogador: player.state(), ouro: self.ouro })?;
+
+let save: MeuSave = ctx.load_game("slot_1")?;
+player.restore(&save.jogador);
+self.ouro = save.ouro;
+```
+
+- **O que o motor guarda sozinho:** a câmera e cada objeto da cena (`objects` do `.ron`) que foi movido, escondido (`visible = false`) ou ainda está rolando, com a velocidade dos corpos dinâmicos. Objetos que não mudaram ficam de fora, então o save é pequeno.
+- **Ao carregar:** os objetos da cena voltam para onde o arquivo da cena os colocou, as mudanças salvas são aplicadas por cima (caixas empurradas voltam com física e tudo), a câmera volta e o conteúdo de streaming é recarregado em volta dela.
+- **Fica com o jogo:** objetos criados pelo jogo (`World::spawn`) e o personagem (`ThirdPersonController::state()`/`restore()` dão um `CharacterState` pronto para salvar).
+- **Segurança:**
+  - A gravação é atômica: o arquivo novo só substitui o antigo depois de inteiro no disco.
+  - Um save feito em outra cena é recusado sem mexer em nada.
+  - Um objeto salvo cujo nome não bate mais com a cena (porque o `.ron` mudou) é pulado com aviso.
+  - Campos novos no estado do jogo com `#[serde(default)]` mantêm saves antigos válidos.
+- **Slots:** `ctx.saves` (`SaveStore`) lista os slots do mais recente ao mais antigo, apaga e lê/grava qualquer valor serializável (útil também para configurações).
+- **Limitação:** objetos espalhados por streaming (`scatter` com `streaming`) não são salvos; voltam ao estado da cena quando a célula recarrega.
+
 ## Visão
 
 O objetivo inicial é dar suporte a um jogo de mundo aberto com visual low poly dark fantasy estilizado, priorizando iluminação, atmosfera e identidade em vez de realismo.
@@ -287,9 +315,9 @@ Diretrizes:
 
 - [x] Culling por frustum (câmera e sombra), descarte de objetos minúsculos e LOD por tamanho na tela
 - [x] Mundo em células e regiões com carregamento por streaming (regiões montadas em segundo plano)
+- [x] Salvamento de jogo: slots em RON com gravação atômica, estado do jogo + objetos e corpos da cena
 
 **Próximos passos**
-- [ ] Salvamento de jogo
 - [ ] ECS (avaliar `hecs` ou `bevy_ecs` quando a quantidade de sistemas justificar)
 
 ## Em aberto

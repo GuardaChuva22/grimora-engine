@@ -1,5 +1,6 @@
 use grimora_core::{Camera, Input, KeyCode, Quat, Transform, Vec3};
 use grimora_physics::{CharacterBody, Physics};
+use serde::{Deserialize, Serialize};
 
 /// Third-person character: walks relative to the camera, runs, jumps, and
 /// keeps an orbit camera behind it that never clips into walls or terrain.
@@ -28,7 +29,41 @@ pub struct ThirdPersonController {
     current_distance: f32,
 }
 
+/// What of a [`ThirdPersonController`] belongs in a saved game.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct CharacterState {
+    /// Feet.
+    pub position: Vec3,
+    pub facing: f32,
+    pub velocity: Vec3,
+    pub camera_yaw: f32,
+    pub camera_pitch: f32,
+    pub camera_distance: f32,
+}
+
 impl ThirdPersonController {
+    pub fn state(&self) -> CharacterState {
+        CharacterState {
+            position: self.body.position,
+            facing: self.facing,
+            velocity: self.velocity,
+            camera_yaw: self.camera_yaw,
+            camera_pitch: self.camera_pitch,
+            camera_distance: self.camera_distance,
+        }
+    }
+
+    /// Puts the character back as saved; the camera follows on the next `update`.
+    pub fn restore(&mut self, state: &CharacterState) {
+        self.body.position = state.position;
+        self.facing = state.facing;
+        self.velocity = state.velocity;
+        self.camera_yaw = state.camera_yaw;
+        self.camera_pitch = state.camera_pitch;
+        self.camera_distance = state.camera_distance;
+        self.current_distance = state.camera_distance;
+    }
+
     pub fn new(position: Vec3, facing: f32) -> Self {
         Self {
             body: CharacterBody::new(position, 0.35, 1.8),

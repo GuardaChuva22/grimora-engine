@@ -2,12 +2,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use grimora_audio::Audio;
 use grimora_core::{Camera, Input, KeyCode, Time, Vec2};
 use grimora_physics::Physics;
 use grimora_render::{DrawItem, Frame, FrameStats, MeshHandle, Renderer, RendererSettings};
 use grimora_scene::Scene;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::{DeviceEvent, DeviceId, ElementState, MouseScrollDelta, WindowEvent};
@@ -15,7 +17,8 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::PhysicalKey;
 use winit::window::{CursorGrabMode, Window, WindowId};
 
-use crate::{EngineConfig, Game, World};
+use crate::save::{SAVE_FORMAT, SaveFile, WorldState};
+use crate::{EngineConfig, Game, SaveStore, World};
 
 /// Frames ignored by the timing report while shaders and caches warm up.
 const WARMUP_FRAMES: u64 = 10;
@@ -33,6 +36,8 @@ pub struct Context {
     /// Sound. Scene loops are replaced on every (re)load; loops the game starts
     /// stay until it stops them. The listener follows `camera` after `update`.
     pub audio: Audio,
+    /// Where [`Context::save_game`] and [`Context::load_game`] keep their slots.
+    pub saves: SaveStore,
     config: EngineConfig,
     exit: bool,
     cursor_grab: bool,
@@ -71,6 +76,38 @@ impl Context {
     pub fn config(&self) -> &EngineConfig {
         &self.config
     }
+
+    /// Saves `game` (the game's own state) to `slot`, together with the camera
+    /// and the scene objects that moved or were hidden. Returns the file written.
+    pub fn save_game<T: Serialize>(&self, slot: &str, game: &T) -> Result<PathBuf> {
+        let world = WorldState::capture(&self.world, &self.physics, &self.camera);
+        let path = self.saves.write(slot, &SaveFile::new(self.config.scene.as_deref(), world, game))?;
+        log::info!("Saved {}", path.display());
+        Ok(path)
+    }
+
+    /// Loads `slot`: puts the camera and scene objects back as they were saved
+    /// and returns the game's own state for it to apply. Fails, changing
+    /// nothing, if the file is missing or broken or was saved in another scene.
+    pub fn load_game<T: DeserializeOwned>(&mut self, slot: &str) -> Result<T> {
+        let file: SaveFile<T> = self.saves.read(slot)?;
+        if file.format > SAVE_FORMAT {
+            bail!("save slot {slot:?} is from a newer engine (format {})", file.format);
+        }
+        let current = self.config.scene.as_deref().and_then(Path::file_name).map(|n| n.to_string_lossy());
+        if let (Some(saved), Some(current)) = (&file.scene, &current)
+            && saved != current
+        {
+            bail!("save slot {slot:?} was made in {saved}, but {current} is loaded");
+        }
+        let unmatched = file.world.restore(&mut self.world, &mut self.physics, &mut self.camera);
+        if unmatched > 0 {
+            log::warn!("{unmatched} saved objects no longer match the scene");
+        }
+        self.audio.set_scene_sounds(&self.world.active_sounds());
+        log::info!("Loaded save slot {slot:?}");
+        Ok(file.game)
+    }
 }
 
 /// Opens a window and runs `game` until it exits.
@@ -88,6 +125,7 @@ pub fn run(config: EngineConfig, game: impl Game) -> Result<()> {
             world: World::default(),
             physics: Physics::new(),
             audio: start_audio(&config),
+            saves: config.save_dir.clone().map_or_else(|| SaveStore::for_game(&config.title), SaveStore::new),
             config,
             exit: false,
             cursor_grab: false,

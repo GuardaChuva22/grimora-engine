@@ -71,6 +71,9 @@ pub struct World {
     pub sounds: Vec<SceneSound>,
     meshes: Vec<MeshData>,
     streamer: Option<Streamer>,
+    /// Transforms of the scene's objects as the file placed them (the first
+    /// `baseline.len()` entries of `objects`), for saved games.
+    pub(crate) baseline: Vec<Transform>,
 }
 
 impl World {
@@ -79,6 +82,7 @@ impl World {
     pub fn from_scene(scene: Scene) -> Self {
         let objects = scene.objects.iter().map(|o| Object::from_scene(o, MeshId(o.mesh), &scene.meshes)).collect();
         let streamer = scene.streaming.map(|s| Streamer::new(s, scene.terrain.as_ref()));
+        let baseline = scene.objects.iter().map(|o| o.transform).collect();
         Self {
             environment: scene.environment,
             lights: scene.lights,
@@ -88,6 +92,7 @@ impl World {
             sounds: scene.sounds,
             meshes: scene.meshes,
             streamer,
+            baseline,
         }
     }
 
@@ -109,6 +114,15 @@ impl World {
     fn stream(&mut self, focus: Vec3, physics: &mut Physics, wait: bool) -> bool {
         let Some(streamer) = &mut self.streamer else { return false };
         streamer.update(focus, &mut self.meshes, physics, wait)
+    }
+
+    /// Drops everything streamed in and loads what is around `focus` afresh,
+    /// as the scene describes it.
+    pub(crate) fn reload_streaming(&mut self, focus: Vec3, physics: &mut Physics) {
+        if let Some(streamer) = &mut self.streamer {
+            streamer.unload_all(physics);
+            self.load_around(focus, physics);
+        }
     }
 
     /// How much of the world is loaded, or `None` without streaming.

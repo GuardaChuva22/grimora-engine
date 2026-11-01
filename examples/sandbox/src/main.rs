@@ -6,18 +6,31 @@
 //!     cargo run -p sandbox -- --help
 //!
 //! Passing `--camera` starts in fly mode, so screenshots can frame any view.
+//! F6 saves the game to the "quick" slot and F9 loads it; `--load <slot>`
+//! loads a slot at startup.
 
 use grimora::prelude::*;
+use serde::{Deserialize, Serialize};
 
 const DEFAULT_SCENE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/scenes/sandbox.ron");
 
 /// The animated wanderer (made by tools/gen_wanderer.py).
 const WANDERER: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/models/wanderer/wanderer.gltf");
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 enum Mode {
     Play,
     Fly,
+}
+
+const QUICK_SLOT: &str = "quick";
+
+/// The sandbox's part of a saved game; the engine adds the camera and the
+/// crates and stones the wanderer pushed around.
+#[derive(Debug, Serialize, Deserialize)]
+struct SandboxSave {
+    player: CharacterState,
+    mode: Mode,
 }
 
 struct Sandbox {
@@ -56,12 +69,36 @@ impl Sandbox {
         println!("[sandbox] player spawned at {position}");
         self.player = Some(ThirdPersonController::new(position + Vec3::Y * 0.1, yaw));
     }
+
+    fn save(&self, ctx: &Context, slot: &str) {
+        let Some(player) = &self.player else { return };
+        match ctx.save_game(slot, &SandboxSave { player: player.state(), mode: self.mode }) {
+            Ok(path) => println!("[sandbox] saved to {}", path.display()),
+            Err(err) => eprintln!("[sandbox] save failed: {err:#}"),
+        }
+    }
+
+    fn load(&mut self, ctx: &mut Context, slot: &str) {
+        match ctx.load_game::<SandboxSave>(slot) {
+            Ok(save) => {
+                if let Some(player) = &mut self.player {
+                    player.restore(&save.player);
+                }
+                self.mode = save.mode;
+                println!("[sandbox] loaded {slot:?}");
+            }
+            Err(err) => eprintln!("[sandbox] load failed: {err:#}"),
+        }
+    }
 }
 
 impl Game for Sandbox {
     fn init(&mut self, ctx: &mut Context) {
         if ctx.config().camera_position.is_some() || ctx.config().look_at.is_some() {
             self.mode = Mode::Fly;
+        }
+        if let Some(slot) = ctx.config().load.clone() {
+            self.load(ctx, &slot);
         }
     }
 
@@ -99,6 +136,12 @@ impl Game for Sandbox {
     fn update(&mut self, ctx: &mut Context) {
         if ctx.input.just_pressed(KeyCode::Tab) {
             self.mode = if self.mode == Mode::Play { Mode::Fly } else { Mode::Play };
+        }
+        if ctx.input.just_pressed(KeyCode::F6) {
+            self.save(ctx, QUICK_SLOT);
+        }
+        if ctx.input.just_pressed(KeyCode::F9) {
+            self.load(ctx, QUICK_SLOT);
         }
         let dt = ctx.time.delta();
         let automated = ctx.config().screenshot.is_some();
