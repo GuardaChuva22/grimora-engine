@@ -3,6 +3,7 @@
 
 use std::path::PathBuf;
 
+use grimora::SceneIndex;
 use grimora::prelude::*;
 use grimora::save::{SaveFile, WorldState};
 use grimora::scene::{Scene, SceneDesc};
@@ -11,13 +12,21 @@ const SCENE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/scenes/sa
 const DT: f32 = 1.0 / 60.0;
 
 fn sandbox() -> (Physics, World) {
-    let scene = Scene::load(SCENE).unwrap();
-    let physics = Physics::from_scene(&scene);
-    (physics, World::from_scene(scene))
+    let mut physics = Physics::new();
+    let world = World::from_scene(Scene::load(SCENE).unwrap(), &mut physics);
+    (physics, world)
 }
 
-fn object_index(world: &World, name: &str) -> usize {
-    world.objects.iter().position(|o| o.name.as_deref() == Some(name)).unwrap()
+fn entity(world: &World, name: &str) -> Entity {
+    world.find(name).unwrap()
+}
+
+fn scene_index(world: &World, entity: Entity) -> usize {
+    world.get::<SceneIndex>(entity).unwrap().0
+}
+
+fn transform(world: &World, entity: Entity) -> Transform {
+    world.transform(entity).unwrap()
 }
 
 /// Steps physics and the player walking towards -Z, like the engine's frame loop.
@@ -55,23 +64,25 @@ fn temp_store(name: &str) -> (SaveStore, PathBuf) {
 fn a_saved_game_puts_pushed_crates_and_the_player_back() {
     let (mut physics, mut world) = sandbox();
     settle(&mut physics, &mut world, 0.5);
-    let crate_index = object_index(&world, "crate");
-    let stone = object_index(&world, "stone");
-    let altar = object_index(&world, "altar");
+    let crate_entity = entity(&world, "crate");
+    let stone = entity(&world, "stone");
+    let altar = entity(&world, "altar");
 
     // Shove the crate, hide the altar (as if destroyed), then save.
     let mut camera = Camera::default();
     let mut player = ThirdPersonController::new(Vec3::new(-2.75, world.ground_height(-2.75, 14.0) + 0.1, 14.0), 0.0);
     walk(&mut physics, &mut world, &mut player, &mut camera, 2.0);
     settle(&mut physics, &mut world, 2.0);
-    world.objects[altar].visible = false;
-    let pushed = world.objects[crate_index].transform;
-    let stone_at_save = world.objects[stone].transform;
+    world.get_mut::<Renderable>(altar).unwrap().visible = false;
+    let pushed = transform(&world, crate_entity);
+    let stone_at_save = transform(&world, stone);
     assert!(pushed.position.z < 10.5, "the crate wasn't pushed: {}", pushed.position);
 
     let state = WorldState::capture(&world, &physics, &camera);
-    assert!(state.objects.iter().any(|o| o.index == crate_index) && state.objects.iter().any(|o| o.index == altar));
-    assert!(state.objects.len() < world.objects.len() / 2, "only changed objects are saved: {}", state.objects.len());
+    let saved = |e| state.objects.iter().any(|o| o.index == scene_index(&world, e));
+    assert!(saved(crate_entity) && saved(altar));
+    let scene_objects = world.ecs.query::<&SceneIndex>().iter().count();
+    assert!(state.objects.len() < scene_objects / 2, "only changed objects are saved: {}", state.objects.len());
     let (store, dir) = temp_store("round_trip");
     let file = SaveFile::new(Some(SCENE.as_ref()), state, player.state());
     let path = store.write("slot_1", &file).unwrap();
@@ -83,8 +94,8 @@ fn a_saved_game_puts_pushed_crates_and_the_player_back() {
     // Keep playing: knock the stone away, bring the altar back, wander off.
     let mut other = ThirdPersonController::new(Vec3::new(-1.0, world.ground_height(-1.0, 15.5) + 0.1, 15.5), 0.0);
     walk(&mut physics, &mut world, &mut other, &mut camera, 2.0);
-    world.objects[altar].visible = true;
-    assert!(world.objects[stone].transform.position.distance(stone_at_save.position) > 1.0);
+    world.get_mut::<Renderable>(altar).unwrap().visible = true;
+    assert!(transform(&world, stone).position.distance(stone_at_save.position) > 1.0);
     let saved_camera = read.world.camera;
     camera.position += Vec3::new(30.0, 5.0, 0.0);
 
@@ -92,31 +103,58 @@ fn a_saved_game_puts_pushed_crates_and_the_player_back() {
     let unmatched = read.world.restore(&mut world, &mut physics, &mut camera);
     player.restore(&read.game);
     assert_eq!(unmatched, 0);
-    assert_eq!(world.objects[crate_index].transform, pushed);
-    assert_eq!(world.objects[stone].transform, stone_at_save, "the stone rolled after saving; it goes back");
-    assert!(!world.objects[altar].visible);
+    assert_eq!(transform(&world, crate_entity), pushed, "entities keep their ids across a load");
+    assert_eq!(transform(&world, stone), stone_at_save, "the stone rolled after saving; it goes back");
+    assert!(!world.get::<Renderable>(altar).unwrap().visible);
     assert_eq!(camera.position, saved_camera.position);
     assert_eq!(player.state(), read.game);
     settle(&mut physics, &mut world, 1.0);
-    assert!(world.objects[crate_index].transform.position.distance(pushed.position) < 0.05);
-    assert!(world.objects[stone].transform.position.distance(stone_at_save.position) < 0.05);
+    assert!(transform(&world, crate_entity).position.distance(pushed.position) < 0.05);
+    assert!(transform(&world, stone).position.distance(stone_at_save.position) < 0.05);
     std::fs::remove_dir_all(dir).ok();
 }
 
 #[test]
 fn objects_that_left_the_scene_are_skipped() {
     let (physics, mut world) = sandbox();
-    let altar = object_index(&world, "altar");
-    let placed = world.objects[altar].transform;
-    world.objects[altar].transform.position.y += 3.0;
+    let altar = entity(&world, "altar");
+    let placed = transform(&world, altar);
+    world.get_mut::<Transform>(altar).unwrap().position.y += 3.0;
     let mut state = WorldState::capture(&world, &physics, &Camera::default());
-    let saved = state.objects.iter_mut().find(|o| o.index == altar).unwrap();
+    let saved = state.objects.iter_mut().find(|o| o.index == scene_index(&world, altar)).unwrap();
     saved.name = Some("renamed".into());
 
     let (mut physics, mut world) = sandbox();
     let unmatched = state.restore(&mut world, &mut physics, &mut Camera::default());
     assert_eq!(unmatched, 1);
-    assert_eq!(world.objects[altar].transform, placed);
+    assert_eq!(transform(&world, entity(&world, "altar")), placed);
+}
+
+#[test]
+fn despawned_scene_objects_stay_gone_and_come_back_with_older_saves() {
+    let (mut physics, mut world) = sandbox();
+    // Loading streams the world in around the camera; start with the same cells.
+    world.load_around(Camera::default().position, &mut physics);
+    let colliders = physics.collider_count();
+    let before = WorldState::capture(&world, &physics, &Camera::default());
+    let altar = entity(&world, "altar");
+    let index = scene_index(&world, altar);
+    assert!(world.despawn(altar, &mut physics));
+    assert!(!world.despawn(altar, &mut physics), "already gone");
+    assert_eq!(physics.collider_count(), colliders - 1, "its collider went with it");
+    let after = WorldState::capture(&world, &physics, &Camera::default());
+    assert!(after.objects.iter().any(|o| o.index == index && o.removed));
+
+    // A save from before the altar was destroyed brings it back, collider included.
+    before.restore(&mut world, &mut physics, &mut Camera::default());
+    let respawned = world.find("altar").expect("respawned");
+    assert_ne!(respawned, altar, "a despawned id is never reused");
+    assert_eq!(physics.collider_count(), colliders);
+    assert!(world.get::<Name>(altar).is_none());
+
+    after.restore(&mut world, &mut physics, &mut Camera::default());
+    assert!(world.find("altar").is_none());
+    assert_eq!(physics.collider_count(), colliders - 1);
 }
 
 #[test]
@@ -127,16 +165,16 @@ fn loading_streams_the_world_in_around_the_saved_camera() {
     )
     .unwrap();
     let scene = Scene::build(&desc);
-    let mut physics = Physics::from_scene(&scene);
-    let mut world = World::from_scene(scene);
+    let mut physics = Physics::new();
+    let mut world = World::from_scene(scene, &mut physics);
     let mut camera = Camera { position: Vec3::new(100.0, 2.0, 0.0), ..Default::default() };
     let state = WorldState::capture(&world, &physics, &camera);
 
     camera.position = Vec3::ZERO;
     world.load_around(camera.position, &mut physics);
     state.restore(&mut world, &mut physics, &mut camera);
-    let near = |o: &Object| (o.transform.position - Vec3::new(100.0, 0.0, 0.0)).with_y(0.0).length() < 40.0 + 30.0;
-    assert!(world.all_objects().count() > 0 && world.all_objects().all(near));
+    let near = |t: &Transform| (t.position - Vec3::new(100.0, 0.0, 0.0)).with_y(0.0).length() < 40.0 + 30.0;
+    assert!(!world.ecs.is_empty() && world.ecs.query::<&Transform>().iter().all(near));
 }
 
 #[test]

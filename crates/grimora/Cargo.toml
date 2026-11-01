@@ -16,6 +16,7 @@ pollster.workspace = true
 log.workspace = true
 env_logger.workspace = true
 anyhow.workspace = true
+hecs.workspace = true
 serde.workspace = true
 ron.workspace = true
 

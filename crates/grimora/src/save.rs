@@ -1,11 +1,11 @@
 //! Saved games: named slots on disk ([`SaveStore`]), each a RON [`SaveFile`]
 //! holding the game's own state next to what the engine puts back by itself
-//! ([`WorldState`]: the camera and the scene objects that moved or were hidden).
+//! ([`WorldState`]: the camera and the scene objects that moved, were hidden
+//! or were despawned).
 //!
 //! Most games only need [`crate::Context::save_game`] and
 //! [`crate::Context::load_game`].
 
-use std::collections::HashMap;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -17,6 +17,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::World;
+use crate::world::{Body, Renderable};
 
 /// Version of the [`SaveFile`] layout. Files written by a newer engine are refused.
 pub const SAVE_FORMAT: u32 = 1;
@@ -48,8 +49,9 @@ impl<T> SaveFile<T> {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct WorldState {
     pub camera: CameraState,
-    /// Scene objects that differ from the scene file: moved, hidden or still
-    /// tumbling. Objects the game spawned and streamed scatter are not saved.
+    /// Scene objects that differ from the scene file: moved, hidden, still
+    /// tumbling or despawned. Entities the game spawned and streamed scatter
+    /// are not saved.
     #[serde(default)]
     pub objects: Vec<ObjectState>,
 }
@@ -75,6 +77,9 @@ pub struct ObjectState {
     /// Dynamic bodies still in motion: linear and angular velocity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub velocity: Option<(Vec3, Vec3)>,
+    /// Despawned since the scene loaded (picked up, destroyed...).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub removed: bool,
 }
 
 fn visible_default() -> bool {
@@ -85,65 +90,78 @@ fn is_visible(visible: &bool) -> bool {
     *visible
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 impl WorldState {
-    /// Records the camera and every scene object that differs from the scene file.
+    /// Records the camera and every scene object that differs from the scene
+    /// file: moved, hidden, still tumbling or despawned.
     pub fn capture(world: &World, physics: &Physics, camera: &Camera) -> Self {
-        let bodies: HashMap<usize, _> = physics.scene_bodies().iter().map(|b| (b.object, b.body)).collect();
-        let objects = world
-            .objects
-            .iter()
-            .zip(&world.baseline)
-            .enumerate()
-            .filter_map(|(index, (object, rest))| {
-                let velocity = bodies
-                    .get(&index)
-                    .and_then(|&body| physics.body_velocity(body))
-                    .filter(|(linear, angular)| linear.length_squared() + angular.length_squared() > 1e-8);
-                let changed = object.transform != *rest || !object.visible || velocity.is_some();
-                changed.then(|| ObjectState {
+        let live = world.scene_entities();
+        let mut objects = Vec::new();
+        for (index, desc) in world.scene_objects.iter().enumerate() {
+            let Some(&entity) = live.get(&index) else {
+                objects.push(ObjectState {
                     index,
-                    name: object.name.clone(),
-                    transform: object.transform,
-                    visible: object.visible,
+                    name: desc.name.clone(),
+                    transform: desc.transform,
+                    visible: true,
+                    velocity: None,
+                    removed: true,
+                });
+                continue;
+            };
+            let mut query = world.ecs.query_one::<(&Transform, Option<&Renderable>, Option<&Body>)>(entity);
+            let Ok((transform, renderable, body)) = query.get() else { continue };
+            let visible = renderable.is_none_or(|r| r.visible);
+            let velocity = body
+                .and_then(|Body(body)| physics.body_velocity(*body))
+                .filter(|(linear, angular)| linear.length_squared() + angular.length_squared() > 1e-8);
+            if *transform != desc.transform || !visible || velocity.is_some() {
+                objects.push(ObjectState {
+                    index,
+                    name: desc.name.clone(),
+                    transform: *transform,
+                    visible,
                     velocity,
-                })
-            })
-            .collect();
+                    removed: false,
+                });
+            }
+        }
         let camera = CameraState { position: camera.position, yaw: camera.yaw, pitch: camera.pitch };
         Self { camera, objects }
     }
 
-    /// Puts the scene objects back as the scene file placed them, applies the
-    /// saved changes on top (dynamic bodies included), moves the camera, and
-    /// streams the world in afresh around it. Objects the game spawned are left
-    /// to the game. Returns how many saved objects no longer match the scene.
+    /// Puts the scene objects back as the scene file placed them (respawning
+    /// despawned ones), applies the saved changes on top (dynamic bodies
+    /// included), moves the camera, and streams the world in afresh around it.
+    /// Entities the game spawned are left to the game; scene entities that
+    /// were never despawned keep their ids. Returns how many saved objects no
+    /// longer match the scene.
     pub fn restore(&self, world: &mut World, physics: &mut Physics, camera: &mut Camera) -> usize {
-        for (object, rest) in world.objects.iter_mut().zip(&world.baseline) {
-            object.transform = *rest;
-            object.visible = true;
-        }
-        let bodies: HashMap<usize, _> = physics.scene_bodies().iter().map(|b| (b.object, b.body)).collect();
-        for (&index, &body) in &bodies {
-            let rest = world.baseline[index];
-            physics.set_body_state(body, rest.position, rest.rotation, Vec3::ZERO, Vec3::ZERO);
-        }
-
+        let live = world.reset_scene_objects(physics);
         let mut unmatched = 0;
         for saved in &self.objects {
-            let object = world
-                .objects
-                .get_mut(saved.index)
-                .filter(|o| saved.index < world.baseline.len() && o.name == saved.name);
-            let Some(object) = object else {
+            let in_scene = world.scene_objects.get(saved.index).is_some_and(|o| o.name == saved.name);
+            let Some(&entity) = live.get(&saved.index).filter(|_| in_scene) else {
                 log::warn!("saved object #{} ({:?}) is no longer in the scene; skipped", saved.index, saved.name);
                 unmatched += 1;
                 continue;
             };
-            object.transform = saved.transform;
-            object.visible = saved.visible;
-            if let Some(&body) = bodies.get(&saved.index) {
+            if saved.removed {
+                world.despawn(entity, physics);
+                continue;
+            }
+            let query = world.ecs.query_one_mut::<(&mut Transform, Option<&mut Renderable>, Option<&Body>)>(entity);
+            let Ok((transform, renderable, body)) = query else { continue };
+            *transform = saved.transform;
+            if let Some(renderable) = renderable {
+                renderable.visible = saved.visible;
+            }
+            if let Some(Body(body)) = body {
                 let (linear, angular) = saved.velocity.unwrap_or_default();
-                physics.set_body_state(body, saved.transform.position, saved.transform.rotation, linear, angular);
+                physics.set_body_state(*body, saved.transform.position, saved.transform.rotation, linear, angular);
             }
         }
 

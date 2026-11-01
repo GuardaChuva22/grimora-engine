@@ -71,7 +71,7 @@ crates/
   grimora_scene/   formato de cena RON, importação glTF, terreno procedural, geradores low poly, espalhamento, colisores
   grimora_physics/ física com Rapier: mundo estático da cena, corpos dinâmicos, raycasts, corpo de personagem (cápsula)
   grimora_audio/   som com kira: efeitos, loops de ambiente e emissores 3D que seguem a câmera
-  grimora/         janela (winit), laço principal, trait Game, World, FlyCamera, ThirdPersonController, CLI, hot-reload
+  grimora/         janela (winit), laço principal, trait Game, World (entidades hecs), FlyCamera, ThirdPersonController, CLI, hot-reload
 examples/
   sandbox/         cena de teste do motor
 assets/scenes/     cenas .ron
@@ -87,6 +87,7 @@ Quadro a quadro: mapa de sombra do sol → passe HDR (céu + malhas iluminadas, 
 | Janela e entrada | `winit` 0.30 |
 | Matemática | `glam` 0.34 |
 | Física e colisão | `rapier3d` 0.36 |
+| Entidades | `hecs` 0.11 |
 | Cenas | `ron` + `serde` |
 | Modelos | `gltf` 1.4 |
 | Áudio | `kira` 0.12 (WAV e OGG) |
@@ -110,8 +111,10 @@ impl Game for MeuJogo {
         // Anda, pula e colide com a cena; a câmera segue sem atravessar paredes.
         jogador.update(&ctx.input, &mut ctx.physics, &mut ctx.camera, ctx.time.delta());
         ctx.set_cursor_grab(true);
-        if let Some(obj) = ctx.world.find_mut("altar") {
-            obj.transform.rotation = Quat::from_rotation_y(ctx.time.elapsed());
+        if let Some(altar) = ctx.world.find("altar")
+            && let Some(transform) = ctx.world.get_mut::<Transform>(altar)
+        {
+            transform.rotation = Quat::from_rotation_y(ctx.time.elapsed());
         }
     }
 }
@@ -121,6 +124,41 @@ fn main() -> anyhow::Result<()> {
     grimora::run(config.with_cli()?, MeuJogo::default())
 }
 ```
+
+### Entidades e componentes
+
+Cada objeto do mundo é uma entidade do [`hecs`](https://docs.rs/hecs) em `ctx.world.ecs`. O motor usa estes componentes:
+
+| Componente | Para quê |
+| --- | --- |
+| `Transform` | posição, rotação e escala |
+| `Renderable` | malha, cor, emissão e `visible` |
+| `Name` | o `name:` da cena (`World::find`) |
+| `Light` | luz pontual que acompanha a entidade |
+| `Animator` | esqueleto animado |
+| `Body` / `Collider` | corpo dinâmico ou colisor estático na física |
+| `SceneIndex` | posição no `objects` da cena (usado pelo save) |
+
+O jogo pendura os próprios componentes e consulta tudo junto:
+
+```rust
+struct Vida(u32);
+
+let goblin = ctx.world.spawn(malha, Transform::from_position(Vec3::new(4.0, 0.0, -2.0)));
+ctx.world.ecs.insert_one(goblin, Vida(10)).unwrap(); // acabou de nascer
+
+for (transform, vida) in ctx.world.ecs.query_mut::<(&mut Transform, &mut Vida)>() {
+    // ...
+}
+if ctx.world.get::<Vida>(goblin).is_some_and(|v| v.0 == 0) {
+    ctx.world.despawn(goblin, &mut ctx.physics); // tira o colisor ou corpo junto
+}
+```
+
+- Um `Entity` vale até a entidade ser removida, e um id removido nunca aponta para outra entidade: guarde-os à vontade.
+- Remova entidades com física por `World::despawn`, que tira o colisor ou corpo do Rapier; `ecs.despawn` direto deixaria o colisor para trás.
+- Luzes: `light:` num objeto da cena vira o componente `Light` (deslocamento girado com a entidade, sem escala). Para prender uma luz a um osso, crie uma entidade `(Transform, Light(...))` e copie `joint_transform` para o `Transform` dela. `World::lights` guarda só as luzes soltas.
+- Cada (re)carga da cena recria todas as entidades; `Game::scene_loaded` é o lugar de achá-las de novo.
 
 ### Formato de cena
 
@@ -159,13 +197,16 @@ Modelos glTF com esqueleto (skin) e animações tocam direto: o skinning roda na
 
 ```rust
 // No jogo: escolha o clipe pelo movimento; a troca faz crossfade.
-if let Some(animator) = ctx.world.objects[avatar].animator.as_mut() {
+if let Some(animator) = ctx.world.get_mut::<Animator>(avatar) {
     animator.play(if correndo { "run" } else { "walk" }, 0.2);
     animator.speed = velocidade / 4.5; // pés sem deslizar
 }
 // Prenda coisas aos ossos (luz, arma, partículas): transformação no mundo.
-if let Some(mao) = ctx.world.joint_transform(avatar, "hand.L") {
-    ctx.world.lights[luz].position = mao.position;
+// `tocha` é uma entidade com `Transform` e `Light`.
+if let Some(mao) = ctx.world.joint_transform(avatar, "hand.L")
+    && let Some(transform) = ctx.world.get_mut::<Transform>(tocha)
+{
+    *transform = mao;
 }
 ```
 
@@ -257,7 +298,7 @@ regions: [
 - **Terreno:** é cortado em blocos de 32×32 quadrados, cada um com seu colisor, para o culling descartar o que está fora da tela.
 - **Luzes:** o renderizador usa as 32 luzes pontuais mais próximas da câmera, então um mundo grande pode ter quantas quiser.
 - Deixe `load_distance` além do ponto em que a névoa apaga tudo (cerca de `4 / fog.density`), senão a borda do mundo carregado aparece em vistas aéreas.
-- No código: `World::all_objects()` percorre objetos fixos e carregados; `World::streaming_stats()` diz quanto está carregado; `World::load_around(ponto, physics)` carrega tudo de uma vez (útil em testes e teletransportes).
+- No código: as entidades carregadas entram e saem de `world.ecs` (uma entidade streamada que o jogo removeu volta quando a célula recarrega); `World::streaming_stats()` diz quanto está carregado; `World::load_around(ponto, physics)` carrega tudo de uma vez (útil em testes e teletransportes).
 
 Em [bench_forest.ron](assets/scenes/bench_forest.ron) (`load_distance: 450`, mesma máquina da tabela acima), o quadro na visão do jogador cai de 2,3 ms para 1,35 ms (medido antes das sombras em cascata), com 188 de 315 células carregadas. A carga inicial das células leva ~2 ms.
 
@@ -276,9 +317,9 @@ player.restore(&save.jogador);
 self.ouro = save.ouro;
 ```
 
-- **O que o motor guarda sozinho:** a câmera e cada objeto da cena (`objects` do `.ron`) que foi movido, escondido (`visible = false`) ou ainda está rolando, com a velocidade dos corpos dinâmicos. Objetos que não mudaram ficam de fora, então o save é pequeno.
-- **Ao carregar:** os objetos da cena voltam para onde o arquivo da cena os colocou, as mudanças salvas são aplicadas por cima (caixas empurradas voltam com física e tudo), a câmera volta e o conteúdo de streaming é recarregado em volta dela.
-- **Fica com o jogo:** objetos criados pelo jogo (`World::spawn`) e o personagem (`ThirdPersonController::state()`/`restore()` dão um `CharacterState` pronto para salvar).
+- **O que o motor guarda sozinho:** a câmera e cada objeto da cena (`objects` do `.ron`) que foi movido, escondido (`visible = false` no `Renderable`), removido (`World::despawn`) ou ainda está rolando, com a velocidade dos corpos dinâmicos. Objetos que não mudaram ficam de fora, então o save é pequeno.
+- **Ao carregar:** os objetos da cena voltam para onde o arquivo da cena os colocou (os removidos são recriados; os outros mantêm o mesmo `Entity`), as mudanças salvas são aplicadas por cima (caixas empurradas voltam com física e tudo), a câmera volta e o conteúdo de streaming é recarregado em volta dela.
+- **Fica com o jogo:** entidades criadas pelo jogo (`World::spawn`), componentes do próprio jogo e o personagem (`ThirdPersonController::state()`/`restore()` dão um `CharacterState` pronto para salvar).
 - **Segurança:**
   - A gravação é atômica: o arquivo novo só substitui o antigo depois de inteiro no disco.
   - Um save feito em outra cena é recusado sem mexer em nada.
@@ -319,7 +360,7 @@ Diretrizes:
 
 **Próximos passos**
 - [x] Avaliação de ECS: `hecs` recomendado, `bevy_ecs` descartado ([docs/ecs.md](docs/ecs.md))
-- [ ] Migrar o `World` para `hecs`: entidades estáveis, `despawn`, componentes do jogo e luzes presas a objetos
+- [x] `World` sobre `hecs`: entidades estáveis, `despawn`, componentes do jogo e luzes presas a entidades
 
 ## Em aberto
 

@@ -199,6 +199,9 @@ pub struct SceneObject {
     pub body: BodyDesc,
     /// Clip to loop when the mesh has a skeleton.
     pub animation: Option<String>,
+    /// Light that moves with the object; its position is an offset rotated
+    /// with the object (but not scaled).
+    pub light: Option<PointLight>,
 }
 
 /// A scene ready to render: unique meshes plus the instances that use them.
@@ -206,6 +209,7 @@ pub struct SceneObject {
 pub struct Scene {
     pub environment: Environment,
     pub camera: Camera,
+    /// Free-standing lights; those on objects are in [`SceneObject::light`].
     pub lights: Vec<PointLight>,
     pub meshes: Vec<MeshData>,
     pub objects: Vec<SceneObject>,
@@ -266,6 +270,7 @@ impl Scene {
                     collider,
                     body: BodyDesc::Static,
                     animation: None,
+                    light: None,
                 });
             }
         }
@@ -351,11 +356,6 @@ impl Scene {
     }
 }
 
-/// Places a light relative to its object: rotated with it, but not scaled.
-fn attached_light(light: &PointLight, transform: &Transform) -> PointLight {
-    PointLight { position: transform.position + transform.rotation * light.position, ..light.clone() }
-}
-
 /// Collects unique meshes so identical descriptions share one GPU buffer.
 struct Builder<'a> {
     meshes: Vec<MeshData>,
@@ -421,10 +421,8 @@ impl<'a> Builder<'a> {
                 collider,
                 body: obj.body,
                 animation: obj.animation.clone(),
+                light: obj.light.clone(),
             });
-            if let Some(light) = &obj.light {
-                self.lights.push(attached_light(light, &transform));
-            }
             if let Some(sound) = &obj.sound {
                 self.sounds.push(sound.attached(&dir, &transform));
             }
@@ -459,18 +457,14 @@ impl<'a> Builder<'a> {
                     collider,
                     body: BodyDesc::Static,
                     animation: None,
+                    light: scatter.light.clone(),
                 };
-                let light = scatter.light.as_ref().map(|light| attached_light(light, &transform));
                 match streaming.as_deref_mut() {
                     Some(streaming) => {
                         let cell = streaming.cells.entry(streaming.cell_of(transform.position)).or_default();
                         cell.objects.push(object);
-                        cell.lights.extend(light);
                     }
-                    None => {
-                        self.objects.push(object);
-                        self.lights.extend(light);
-                    }
+                    None => self.objects.push(object),
                 }
             }
         }
@@ -501,7 +495,8 @@ mod tests {
         let scene = Scene::build(&desc);
         // terrain + 2 objects + 20 trees
         assert_eq!(scene.objects.len(), 23);
-        assert_eq!(scene.lights.len(), 1);
+        assert!(scene.lights.is_empty(), "the crystal's light stays on the crystal");
+        assert_eq!(scene.objects.iter().filter(|o| o.light.is_some()).count(), 1);
         assert!(scene.find("altar").is_some());
         // Terrain is a triangle mesh; pines get an automatic trunk cylinder.
         assert!(matches!(scene.find("terrain").unwrap().collider, Some(ColliderShape::TriMesh { .. })));

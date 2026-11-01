@@ -35,21 +35,23 @@ pub use runner::{Context, run};
 pub use save::SaveStore;
 pub use streaming::StreamingStats;
 pub use third_person::{CharacterState, ThirdPersonController};
-pub use world::{MeshId, Object, World};
+pub use world::{Body, Collider, Entity, Light, MeshId, Name, Renderable, SceneIndex, World};
 
 pub use grimora_audio as audio;
 pub use grimora_core as core;
 pub use grimora_physics as physics;
 pub use grimora_render as render;
 pub use grimora_scene as scene;
+/// The entity storage under [`World`]: `world.ecs` is a [`hecs::World`].
+pub use hecs;
 
 /// Your game. The engine calls these from its main loop.
 pub trait Game: 'static {
     /// Once, after the window, renderer and initial scene are ready.
     fn init(&mut self, _ctx: &mut Context) {}
 
-    /// After the scene file is loaded or hot-reloaded. Objects were replaced,
-    /// so re-find anything you keep by name here.
+    /// After the scene file is loaded or hot-reloaded. Every entity was
+    /// replaced, so re-find or re-spawn anything you keep here.
     fn scene_loaded(&mut self, _ctx: &mut Context) {}
 
     /// Every frame, before rendering.
@@ -58,7 +60,8 @@ pub trait Game: 'static {
 
 pub mod prelude {
     pub use crate::{
-        CharacterState, Context, EngineConfig, FlyCamera, Game, MeshId, Object, SaveStore, ThirdPersonController, World,
+        Body, CharacterState, Collider, Context, EngineConfig, Entity, FlyCamera, Game, Light, MeshId, Name,
+        Renderable, SaveStore, ThirdPersonController, World,
     };
     pub use grimora_audio::{Audio, Category, Emitter, SoundId};
     pub use grimora_core::{

@@ -37,11 +37,12 @@ struct Sandbox {
     mode: Mode,
     fly: FlyCamera,
     player: Option<ThirdPersonController>,
-    /// Indices into the world, re-created whenever the scene (re)loads.
-    avatar: usize,
-    lantern_light: usize,
+    /// Entities re-created whenever the scene (re)loads.
+    avatar: Entity,
+    /// Carries the lantern's light; follows the `lantern` joint.
+    lantern: Entity,
     /// The "heart" crystal and its resting position.
-    heart: Option<(usize, Vec3)>,
+    heart: Option<(Entity, Vec3)>,
     steps: Footsteps,
 }
 
@@ -51,8 +52,8 @@ impl Sandbox {
             mode: Mode::Play,
             fly: FlyCamera::default(),
             player: None,
-            avatar: 0,
-            lantern_light: 0,
+            avatar: Entity::DANGLING,
+            lantern: Entity::DANGLING,
             heart: None,
             steps: Footsteps::default(),
         }
@@ -103,12 +104,7 @@ impl Game for Sandbox {
     }
 
     fn scene_loaded(&mut self, ctx: &mut Context) {
-        self.heart = ctx
-            .world
-            .objects
-            .iter()
-            .position(|o| o.name.as_deref() == Some("heart"))
-            .map(|i| (i, ctx.world.objects[i].transform.position));
+        self.heart = ctx.world.find("heart").and_then(|e| Some((e, ctx.world.transform(e)?.position)));
 
         // Hot reloads keep the player where they are; only the first load spawns.
         if self.player.is_none() {
@@ -122,15 +118,15 @@ impl Game for Sandbox {
                 MeshDesc::Wanderer.build()
             });
         let wanderer = ctx.world.add_mesh(mesh);
-        self.avatar = ctx.world.spawn(wanderer, Transform::IDENTITY, Vec3::ONE);
-        ctx.world.lights.push(PointLight {
+        self.avatar = ctx.world.spawn(wanderer, Transform::IDENTITY);
+        let light = PointLight {
+            position: Vec3::new(0.0, -0.1, 0.0),
             color: Vec3::new(1.0, 0.68, 0.38),
             intensity: 7.0,
             radius: 9.0,
             flicker: 0.6,
-            ..Default::default()
-        });
-        self.lantern_light = ctx.world.lights.len() - 1;
+        };
+        self.lantern = ctx.world.ecs.spawn((Transform::IDENTITY, Light(light)));
     }
 
     fn update(&mut self, ctx: &mut Context) {
@@ -166,9 +162,10 @@ impl Game for Sandbox {
         }
 
         let Some(player) = self.player.as_ref() else { return };
-        let avatar = &mut ctx.world.objects[self.avatar];
-        avatar.transform = player.transform();
-        if let Some(animator) = avatar.animator.as_mut() {
+        if let Some(transform) = ctx.world.get_mut::<Transform>(self.avatar) {
+            *transform = player.transform();
+        }
+        if let Some(animator) = ctx.world.get_mut::<Animator>(self.avatar) {
             animate(animator, player);
             if self.mode == Mode::Play {
                 self.steps.update(&mut ctx.audio, animator, player, dt);
@@ -176,17 +173,20 @@ impl Game for Sandbox {
         }
 
         // The light hangs from the lantern joint, so it swings with the walk.
-        if let Some(lantern) = ctx.world.joint_transform(self.avatar, "lantern") {
-            ctx.world.lights[self.lantern_light].position =
-                lantern.position + lantern.rotation * Vec3::new(0.0, -0.1, 0.0);
+        if let Some(joint) = ctx.world.joint_transform(self.avatar, "lantern")
+            && let Some(lantern) = ctx.world.get_mut::<Transform>(self.lantern)
+        {
+            *lantern = joint;
         }
 
         let t = ctx.time.elapsed();
 
-        if let Some((index, rest)) = self.heart {
-            let heart = &mut ctx.world.objects[index];
-            heart.transform.position = rest + Vec3::Y * (0.25 + 0.15 * (t * 1.3).sin());
-            heart.transform.rotation = Quat::from_rotation_y(t * 0.4);
+        // Its light is a component of the same entity, so it floats along.
+        if let Some((heart, rest)) = self.heart
+            && let Some(transform) = ctx.world.get_mut::<Transform>(heart)
+        {
+            transform.position = rest + Vec3::Y * (0.25 + 0.15 * (t * 1.3).sin());
+            transform.rotation = Quat::from_rotation_y(t * 0.4);
         }
     }
 }

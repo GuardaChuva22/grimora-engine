@@ -4,7 +4,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context as _, Result, bail};
 use grimora_audio::Audio;
-use grimora_core::{Camera, Input, KeyCode, Time, Vec2};
+use grimora_core::{Animator, Camera, Input, KeyCode, Time, Transform, Vec2};
 use grimora_physics::Physics;
 use grimora_render::{DrawItem, Frame, FrameStats, MeshHandle, Renderer, RendererSettings};
 use grimora_scene::Scene;
@@ -18,7 +18,7 @@ use winit::keyboard::PhysicalKey;
 use winit::window::{CursorGrabMode, Window, WindowId};
 
 use crate::save::{SAVE_FORMAT, SaveFile, WorldState};
-use crate::{EngineConfig, Game, SaveStore, World};
+use crate::{EngineConfig, Game, Renderable, SaveStore, World};
 
 /// Frames ignored by the timing report while shaders and caches warm up.
 const WARMUP_FRAMES: u64 = 10;
@@ -226,13 +226,14 @@ impl<G: Game> App<G> {
             }
         }
         let started = Instant::now();
-        self.ctx.physics = Physics::from_scene(&scene);
+        self.ctx.physics = Physics::new();
+        self.ctx.world = World::from_scene(scene, &mut self.ctx.physics);
         log::info!(
-            "Built {} colliders in {:.0} ms",
+            "Built {} entities and {} colliders in {:.0} ms",
+            self.ctx.world.ecs.len(),
             self.ctx.physics.collider_count(),
             started.elapsed().as_secs_f64() * 1000.0
         );
-        self.ctx.world = World::from_scene(scene);
         if self.ctx.world.streaming_stats().is_some() {
             let started = Instant::now();
             self.ctx.world.load_around(self.ctx.camera.position, &mut self.ctx.physics);
@@ -322,18 +323,20 @@ impl<G: Game> App<G> {
             self.handles.push(renderer.upload_mesh(mesh));
         }
         let mut joint_matrices = Vec::new();
-        let draws: Vec<DrawItem> = world
-            .all_objects()
-            .filter(|o| o.visible)
-            .filter_map(|o| {
-                let mesh = *self.handles.get(o.mesh.0)?;
-                let joints = o.animator.as_ref().map(|a| {
+        let mut query = world.ecs.query::<(&Transform, &Renderable, Option<&Animator>)>();
+        let draws: Vec<DrawItem> = query
+            .iter()
+            .filter(|(_, r, _)| r.visible)
+            .filter_map(|(transform, r, animator)| {
+                let mesh = *self.handles.get(r.mesh.0)?;
+                let joints = animator.map(|a| {
                     joint_matrices.extend_from_slice(a.skinning_matrices());
                     (joint_matrices.len() - a.skinning_matrices().len()) as u32
                 });
-                Some(DrawItem { mesh, transform: o.transform, color: o.color, emissive: o.emissive, joints })
+                Some(DrawItem { mesh, transform: *transform, color: r.color, emissive: r.emissive, joints })
             })
             .collect();
+        drop(query);
         let frame = Frame {
             camera: &self.ctx.camera,
             environment: &world.environment,

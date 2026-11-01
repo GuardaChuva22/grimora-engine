@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use grimora_core::{PointLight, Vec2, Vec3};
+use grimora_core::{Vec2, Vec3};
 use serde::{Deserialize, Serialize};
 
 use crate::SceneObject;
@@ -51,7 +51,7 @@ pub type CellCoord = (i32, i32);
 pub struct SceneStreaming {
     pub cell_size: f32,
     pub load_distance: f32,
-    /// Scattered objects (and their lights) by cell.
+    /// Scattered objects by cell.
     pub cells: BTreeMap<CellCoord, SceneCell>,
     pub regions: Vec<SceneRegion>,
 }
@@ -59,7 +59,6 @@ pub struct SceneStreaming {
 #[derive(Debug, Clone, Default)]
 pub struct SceneCell {
     pub objects: Vec<SceneObject>,
-    pub lights: Vec<PointLight>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

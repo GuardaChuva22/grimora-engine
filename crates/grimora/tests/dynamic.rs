@@ -16,13 +16,13 @@ fn simulate(physics: &mut Physics, world: &mut World, seconds: f32) {
 }
 
 fn sandbox() -> (Physics, World) {
-    let scene = Scene::load(SCENE).unwrap();
-    let physics = Physics::from_scene(&scene);
-    (physics, World::from_scene(scene))
+    let mut physics = Physics::new();
+    let world = World::from_scene(Scene::load(SCENE).unwrap(), &mut physics);
+    (physics, world)
 }
 
-fn object_index(world: &World, name: &str) -> usize {
-    world.objects.iter().position(|o| o.name.as_deref() == Some(name)).unwrap()
+fn entity(world: &World, name: &str) -> Entity {
+    world.find(name).unwrap()
 }
 
 #[test]
@@ -34,13 +34,13 @@ fn body_dropped_on_terrain_comes_to_rest() {
     )
     .unwrap();
     let scene = Scene::build(&desc);
-    let mut physics = Physics::from_scene(&scene);
-    let mut world = World::from_scene(scene);
-    let index = object_index(&world, "box");
-    let start = world.objects[index].transform;
+    let mut physics = Physics::new();
+    let mut world = World::from_scene(scene, &mut physics);
+    let index = entity(&world, "box");
+    let start = world.transform(index).unwrap();
 
     simulate(&mut physics, &mut world, 5.0);
-    let rest = world.objects[index].transform;
+    let rest = world.transform(index).unwrap();
     assert!(rest.position.y < start.position.y - 3.0, "did not fall: {}", rest.position);
     assert_eq!(rest.scale, start.scale);
     // The box's center sits half a unit (give or take the tilt of the ground) above the terrain.
@@ -49,24 +49,25 @@ fn body_dropped_on_terrain_comes_to_rest() {
     assert!(center.y > ground + 0.3 && center.y < ground + 0.8, "center {center} vs ground {ground}");
 
     simulate(&mut physics, &mut world, 1.0);
-    let later = world.objects[index].transform.position;
+    let later = world.transform(index).unwrap().position;
     assert!(later.distance(rest.position) < 0.01, "still moving: {} -> {later}", rest.position);
 }
 
 #[test]
 fn sandbox_bodies_rest_where_placed() {
     let (mut physics, mut world) = sandbox();
-    assert!(physics.scene_bodies().len() >= 4, "sandbox should have a crate stack and a stone");
-    let start: Vec<Transform> = physics.scene_bodies().iter().map(|b| world.objects[b.object].transform).collect();
+    let bodies: Vec<(Entity, Transform)> =
+        world.ecs.query::<(Entity, &Transform, &Body)>().iter().map(|(e, t, _)| (e, *t)).collect();
+    assert!(bodies.len() >= 4, "sandbox should have a crate stack and a stone");
 
     // The crate stack and the stone stay put for a few seconds.
     simulate(&mut physics, &mut world, 5.0);
-    for (body, start) in physics.scene_bodies().iter().zip(&start) {
-        let now = world.objects[body.object].transform;
+    for (entity, start) in &bodies {
+        let now = world.transform(*entity).unwrap();
         assert!(
             now.position.distance(start.position) < 0.05,
             "{:?} drifted from {} to {}",
-            world.objects[body.object].name,
+            world.get::<Name>(*entity).map(|n| n.0.clone()),
             start.position,
             now.position
         );
@@ -87,8 +88,8 @@ fn center(transform: &Transform) -> Vec3 {
 fn push(name: &str, x: f32, z: f32, seconds: f32) -> (Vec3, ThirdPersonController) {
     let (mut physics, mut world) = sandbox();
     simulate(&mut physics, &mut world, 0.5);
-    let index = object_index(&world, name);
-    let start = center(&world.objects[index].transform);
+    let index = entity(&world, name);
+    let start = center(&world.transform(index).unwrap());
 
     let mut player = ThirdPersonController::new(Vec3::new(x, world.ground_height(x, z) + 0.1, z), 0.0);
     let mut camera = Camera::default();
@@ -103,10 +104,10 @@ fn push(name: &str, x: f32, z: f32, seconds: f32) -> (Vec3, ThirdPersonControlle
         let z = player.body.position.z;
         assert!(z <= previous + 1e-3, "player jittered back at frame {frame}: {previous} -> {z}");
         previous = z;
-        let c = center(&world.objects[index].transform);
+        let c = center(&world.transform(index).unwrap());
         assert!(c.y < start.y + 0.1, "{name} was thrown up to {c} at frame {frame}");
     }
-    (center(&world.objects[index].transform) - start, player)
+    (center(&world.transform(index).unwrap()) - start, player)
 }
 
 #[test]

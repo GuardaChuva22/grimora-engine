@@ -13,7 +13,7 @@ fn raycast_down(physics: &Physics, at: Vec3) -> bool {
 
 /// Horizontal distance from the origin of the farthest object in the world.
 fn reach(world: &World, from: Vec3) -> f32 {
-    world.all_objects().map(|o| (o.transform.position - from).with_y(0.0).length()).fold(0.0, f32::max)
+    world.ecs.query::<&Transform>().iter().map(|t| (t.position - from).with_y(0.0).length()).fold(0.0, f32::max)
 }
 
 #[test]
@@ -30,9 +30,9 @@ fn scattered_objects_follow_the_focus() {
     assert!(scene.objects.is_empty(), "scatter goes to cells, not to the always-present objects");
     let far = *streamed.iter().find(|p| p.length() > 150.0).unwrap();
 
-    let mut physics = Physics::from_scene(&scene);
-    let mut world = World::from_scene(scene);
-    assert_eq!(world.all_objects().count(), 0, "nothing loads before it's asked to");
+    let mut physics = Physics::new();
+    let mut world = World::from_scene(scene, &mut physics);
+    assert_eq!(world.ecs.len(), 0, "nothing loads before it's asked to");
 
     world.load_around(Vec3::ZERO, &mut physics);
     let near = world.streaming_stats().unwrap();
@@ -49,7 +49,8 @@ fn scattered_objects_follow_the_focus() {
     }
     physics.refresh();
     assert!(raycast_down(&physics, far), "the cube there is solid now");
-    assert!(world.all_objects().all(|o| (o.transform.position - far).with_y(0.0).length() < 50.0 + 20.0 * 1.5 + 10.0));
+    let near_far = |t: &Transform| (t.position - far).with_y(0.0).length() < 50.0 + 20.0 * 1.5 + 10.0;
+    assert!(world.ecs.query::<&Transform>().iter().all(near_far));
     assert!(!raycast_down(
         &physics,
         streamed.iter().copied().min_by(|a, b| a.length().total_cmp(&b.length())).unwrap()
@@ -89,8 +90,8 @@ fn regions_load_in_the_background_and_unload_when_left() {
     )
     .unwrap();
     let scene = Scene::build_in(&desc, &dir);
-    let mut physics = Physics::from_scene(&scene);
-    let mut world = World::from_scene(scene);
+    let mut physics = Physics::new();
+    let mut world = World::from_scene(scene, &mut physics);
     let shrine = Vec3::new(100.0, 0.0, 0.0);
 
     world.load_around(Vec3::ZERO, &mut physics);

@@ -1,6 +1,8 @@
 # Avaliação: ECS no Grimora
 
-Novembro de 2026. Compara o modelo atual (`World` com `Vec<Object>` e índices) com `hecs` 0.11.2 e `bevy_ecs` 0.20.1.
+**Status:** migração feita em novembro de 2026. O `World` guarda as entidades num `hecs::World` (`world.ecs`); o uso está no README, em "Entidades e componentes". O texto abaixo é o registro da decisão.
+
+Novembro de 2026. Compara o modelo de então (`World` com `Vec<Object>` e índices) com `hecs` 0.11.2 e `bevy_ecs` 0.20.1.
 
 ## Recomendação
 
