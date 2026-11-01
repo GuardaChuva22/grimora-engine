@@ -12,7 +12,19 @@ Requisitos: Windows 10/11, GPU com Vulkan ou DirectX 12, [Rust](https://rustup.r
 cargo run -p sandbox
 ```
 
-Controles: segure o **botão direito do mouse** e mova para olhar, **WASD** anda, **E/Q** sobe/desce, **Shift** acelera, roda do mouse ajusta a velocidade, **F5** recarrega a cena, **F12** salva uma captura em `screenshots/`, **Esc** sai.
+Você controla um andarilho encapuzado com uma lanterna:
+
+| Tecla | Modo personagem (padrão) | Modo voo (**Tab** alterna) |
+| --- | --- | --- |
+| Mouse | gira a câmera | segure o botão direito para olhar |
+| WASD | anda relativo à câmera | voa |
+| Shift | corre | acelera |
+| Espaço | pula | sobe (E/Q também) |
+| Roda | aproxima/afasta a câmera | ajusta a velocidade |
+
+**F5** recarrega a cena, **F12** salva uma captura em `screenshots/`, **Esc** sai.
+
+![Andarilho com lanterna](docs/wanderer.png)
 
 Com o jogo aberto, edite [assets/scenes/sandbox.ron](assets/scenes/sandbox.ron) e salve: a cena recarrega na hora. Se o arquivo tiver um erro, o motor mostra linha e coluna no terminal e continua com a versão anterior.
 
@@ -35,7 +47,7 @@ cargo run --release -p sandbox -- --frames 600 --no-vsync
 | `--scene <arquivo.ron>` | Cena a carregar |
 | `--screenshot <arquivo.png>` | Renderiza, salva a imagem e fecha |
 | `--frames <n>` | Fecha após n quadros (padrão 90 com `--screenshot`) |
-| `--camera x,y,z` / `--look-at x,y,z` | Posiciona a câmera |
+| `--camera x,y,z` / `--look-at x,y,z` | Posiciona a câmera (Y absoluto; no sandbox, ativa o modo voo) |
 | `--size LxA` | Tamanho da janela |
 | `--no-vsync`, `--no-msaa`, `--no-hot-reload` | Benchmark e depuração |
 
@@ -51,8 +63,9 @@ Ao fechar, o motor imprime uma linha de métricas fácil de ler por scripts:
 crates/
   grimora_core/    tempo, entrada, Transform, Camera, MeshData, Environment (luz/névoa/céu/pós)
   grimora_render/  renderizador wgpu: sombras, HDR + MSAA 4x, névoa de altura, bloom, tonemapping
-  grimora_scene/   formato de cena RON, terreno procedural, geradores low poly, espalhamento
-  grimora/         janela (winit), laço principal, trait Game, World, FlyCamera, CLI, hot-reload
+  grimora_scene/   formato de cena RON, terreno procedural, geradores low poly, espalhamento, colisores
+  grimora_physics/ colisão com Rapier: mundo estático da cena, raycasts, corpo de personagem (cápsula)
+  grimora/         janela (winit), laço principal, trait Game, World, FlyCamera, ThirdPersonController, CLI, hot-reload
 examples/
   sandbox/         cena de teste do motor
 assets/scenes/     cenas .ron
@@ -65,6 +78,7 @@ Quadro a quadro: mapa de sombra do sol → passe HDR (céu + malhas iluminadas, 
 | Gráficos | `wgpu` 30 (Vulkan/DX12) com shaders WGSL |
 | Janela e entrada | `winit` 0.30 |
 | Matemática | `glam` 0.34 |
+| Física e colisão | `rapier3d` 0.36 |
 | Cenas | `ron` + `serde` |
 
 ### Criando um jogo
@@ -73,12 +87,19 @@ Quadro a quadro: mapa de sombra do sol → passe HDR (céu + malhas iluminadas, 
 use grimora::prelude::*;
 
 #[derive(Default)]
-struct MeuJogo { camera: FlyCamera }
+struct MeuJogo { jogador: Option<ThirdPersonController> }
 
 impl Game for MeuJogo {
+    fn scene_loaded(&mut self, ctx: &mut Context) {
+        let inicio = ctx.world.player_spawn.expect("a cena define `player`");
+        self.jogador = Some(ThirdPersonController::new(inicio.position, inicio.yaw));
+    }
+
     fn update(&mut self, ctx: &mut Context) {
-        let olhando = self.camera.update(&mut ctx.camera, &ctx.input, ctx.time.delta());
-        ctx.set_cursor_grab(olhando);
+        let Some(jogador) = &mut self.jogador else { return };
+        // Anda, pula e colide com a cena; a câmera segue sem atravessar paredes.
+        jogador.update(&ctx.input, &ctx.physics, &mut ctx.camera, ctx.time.delta());
+        ctx.set_cursor_grab(true);
         if let Some(obj) = ctx.world.find_mut("altar") {
             obj.transform.rotation = Quat::from_rotation_y(ctx.time.elapsed());
         }
@@ -93,7 +114,7 @@ fn main() -> anyhow::Result<()> {
 
 ### Formato de cena
 
-Tudo é dado: ambiente (sol, luz ambiente, névoa, céu, sombras, pós-processamento), câmera, terreno, objetos, espalhamento aleatório com semente e luzes pontuais. Cores em sRGB 0..1, ângulos em graus, distâncias em metros. Malhas disponíveis: `Cube`, `Plane`, `Cylinder`, `Cone`, `Sphere`, `Pine`, `DeadTree`, `Rock`, `Crystal`, `Pillar`. Veja o exemplo comentado em [sandbox.ron](assets/scenes/sandbox.ron).
+Tudo é dado: ambiente (sol, luz ambiente, névoa, céu, sombras, pós-processamento), câmera, ponto de início do jogador, terreno, objetos, espalhamento aleatório com semente e luzes pontuais. Todo objeto colide automaticamente com uma forma adequada (tronco para árvores, casco convexo para rochas e pilares, malha exata para o terreno); use `collider: None` para decoração ou escolha `Box(...)`, `Cylinder(...)`, `Ball(...)`, `Hull` ou `Mesh`. Cores em sRGB 0..1, ângulos em graus, distâncias em metros. Malhas disponíveis: `Cube`, `Plane`, `Cylinder`, `Cone`, `Sphere`, `Pine`, `DeadTree`, `Rock`, `Crystal`, `Pillar`, `Wanderer`. Veja o exemplo comentado em [sandbox.ron](assets/scenes/sandbox.ron).
 
 ## Visão
 
@@ -113,11 +134,12 @@ Diretrizes:
 - [x] Renderizador wgpu: HDR, MSAA 4x, sombra direcional com PCF e estabilização, névoa de altura com dispersão do sol, céu procedural, até 32 luzes pontuais com cintilação, materiais emissivos, bloom, tonemapping ACES e gradação de cor
 - [x] Cenas RON com hot-reload, terreno procedural e geradores de props low poly
 - [x] Capturas, posicionamento de câmera e métricas por linha de comando
+- [x] Colisão com Rapier: terreno, props e colisores declarados na cena
+- [x] Personagem em terceira pessoa: andar, correr, pular, degraus e rampas; câmera orbital que não atravessa paredes
 
 **Próximos passos**
-- [ ] Física e colisão (avaliar Rapier; Jolt via bindings se necessário)
 - [ ] Importação de modelos glTF (personagens e props feitos em Blender)
-- [ ] Personagem controlável em terceira pessoa com câmera orbital
+- [ ] Corpos dinâmicos (objetos que caem, rolam e podem ser empurrados)
 - [ ] Culling por frustum e LOD
 - [ ] Animação esquelética
 - [ ] Áudio (avaliar `kira`)

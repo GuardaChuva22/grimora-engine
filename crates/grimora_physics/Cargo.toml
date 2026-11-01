@@ -1,0 +1,14 @@
+[package]
+name = "grimora_physics"
+description = "Collision and character movement for Grimora, built on Rapier."
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+grimora_core.workspace = true
+grimora_scene.workspace = true
+rapier3d.workspace = true
+log.workspace = true
+
+[lints]
+workspace = true

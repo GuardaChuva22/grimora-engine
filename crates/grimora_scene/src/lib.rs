@@ -4,6 +4,7 @@
 //! object instances, lights and a camera that the engine can render.
 //! See `assets/scenes/sandbox.ron` for a commented example.
 
+mod collider;
 mod rng;
 mod shapes;
 mod terrain;
@@ -15,6 +16,7 @@ use anyhow::{Context as _, Result};
 use grimora_core::{Camera, Environment, MeshData, PointLight, Transform, Vec3};
 use serde::{Deserialize, Serialize};
 
+pub use collider::{ColliderDesc, ColliderShape};
 pub use rng::{Rng, fbm, value_noise};
 pub use shapes::{MeshDesc, blob, cube, tube};
 pub use terrain::{Terrain, TerrainDesc};
@@ -29,6 +31,25 @@ pub struct SceneDesc {
     pub objects: Vec<ObjectDesc>,
     pub scatter: Vec<ScatterDesc>,
     pub lights: Vec<PointLight>,
+    /// Where the player character starts, if the game has one.
+    pub player: Option<PlayerDesc>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PlayerDesc {
+    /// With a terrain, `y` is measured from the ground.
+    pub position: Vec3,
+    /// Facing in degrees. 0 looks towards -Z.
+    pub yaw: f32,
+}
+
+/// Resolved player start in world space.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlayerSpawn {
+    pub position: Vec3,
+    /// Radians.
+    pub yaw: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -69,6 +90,7 @@ pub struct ObjectDesc {
     /// Optional light attached to the object; its position is an offset in
     /// world units, rotated with the object (not scaled).
     pub light: Option<PointLight>,
+    pub collider: ColliderDesc,
 }
 
 impl Default for ObjectDesc {
@@ -83,6 +105,7 @@ impl Default for ObjectDesc {
             emissive: 0.0,
             snap_to_ground: true,
             light: None,
+            collider: ColliderDesc::Auto,
         }
     }
 }
@@ -112,6 +135,7 @@ pub struct ScatterDesc {
     pub seed: u64,
     /// Optional light attached to every copy; its position is an offset.
     pub light: Option<PointLight>,
+    pub collider: ColliderDesc,
 }
 
 impl Default for ScatterDesc {
@@ -131,6 +155,7 @@ impl Default for ScatterDesc {
             sink: 0.05,
             seed: 1,
             light: None,
+            collider: ColliderDesc::Auto,
         }
     }
 }
@@ -144,6 +169,8 @@ pub struct SceneObject {
     pub transform: Transform,
     pub color: Vec3,
     pub emissive: f32,
+    /// Collision shape in local space; the transform (scale included) still applies.
+    pub collider: Option<ColliderShape>,
 }
 
 /// A scene ready to render: unique meshes plus the instances that use them.
@@ -155,6 +182,7 @@ pub struct Scene {
     pub meshes: Vec<MeshData>,
     pub objects: Vec<SceneObject>,
     pub terrain: Option<Terrain>,
+    pub player: Option<PlayerSpawn>,
 }
 
 impl SceneDesc {
@@ -184,12 +212,14 @@ impl Scene {
         if let Some(terrain) = &terrain {
             let mesh = builder.meshes.len();
             builder.meshes.push(terrain.mesh());
+            let collider = Some(ColliderShape::trimesh(&builder.meshes[mesh]));
             builder.objects.push(SceneObject {
                 name: Some("terrain".into()),
                 mesh,
                 transform: Transform::IDENTITY,
                 color: Vec3::ONE,
                 emissive: 0.0,
+                collider,
             });
         }
         let ground = |x: f32, z: f32| terrain.as_ref().map_or(0.0, |t| t.height_at(x, z));
@@ -202,12 +232,14 @@ impl Scene {
             }
             let transform = Transform::from_euler_degrees(position, obj.rotation, obj.scale);
             let mesh = builder.mesh(&obj.mesh);
+            let collider = obj.collider.resolve(&obj.mesh, &builder.meshes[mesh]);
             builder.objects.push(SceneObject {
                 name: obj.name.clone(),
                 mesh,
                 transform,
                 color: obj.color,
                 emissive: obj.emissive,
+                collider,
             });
             if let Some(light) = &obj.light {
                 lights.push(attached_light(light, &transform));
@@ -216,9 +248,11 @@ impl Scene {
 
         for scatter in &desc.scatter {
             let mut rng = Rng::new(scatter.seed);
-            let variants: Vec<usize> = (0..scatter.variants.max(1))
+            let variants: Vec<(usize, Option<ColliderShape>)> = (0..scatter.variants.max(1))
                 .map(|k| {
-                    builder.mesh(&scatter.mesh.with_seed(scatter.seed.wrapping_mul(31).wrapping_add(u64::from(k))))
+                    let desc = scatter.mesh.with_seed(scatter.seed.wrapping_mul(31).wrapping_add(u64::from(k)));
+                    let mesh = builder.mesh(&desc);
+                    (mesh, scatter.collider.resolve(&desc, &builder.meshes[mesh]))
                 })
                 .collect();
             let (r0, r1) = (scatter.min_radius.max(0.0), scatter.radius.max(scatter.min_radius));
@@ -231,13 +265,14 @@ impl Scene {
                 let scale = rng.range(scatter.scale.0, scatter.scale.1);
                 let rotation = Vec3::new(rng.jitter(scatter.tilt), rng.range(0.0, 360.0), rng.jitter(scatter.tilt));
                 let transform = Transform::from_euler_degrees(Vec3::new(x, y, z), rotation, Vec3::splat(scale));
-                let mesh = variants[(rng.next_u64() % variants.len() as u64) as usize];
+                let (mesh, collider) = variants[(rng.next_u64() % variants.len() as u64) as usize].clone();
                 builder.objects.push(SceneObject {
                     name: None,
                     mesh,
                     transform,
                     color: scatter.color * (1.0 + rng.jitter(scatter.color_jitter)),
                     emissive: scatter.emissive,
+                    collider,
                 });
                 if let Some(light) = &scatter.light {
                     lights.push(attached_light(light, &transform));
@@ -252,6 +287,11 @@ impl Scene {
             camera.look_at(target);
         }
 
+        let player = desc.player.as_ref().map(|p| PlayerSpawn {
+            position: p.position + Vec3::Y * ground(p.position.x, p.position.z),
+            yaw: p.yaw.to_radians(),
+        });
+
         Self {
             environment: desc.environment.clone(),
             camera,
@@ -259,6 +299,7 @@ impl Scene {
             meshes: builder.meshes,
             objects: builder.objects,
             terrain,
+            player,
         }
     }
 
@@ -327,6 +368,9 @@ mod tests {
         assert_eq!(scene.objects.len(), 23);
         assert_eq!(scene.lights.len(), 1);
         assert!(scene.find("altar").is_some());
+        // Terrain is a triangle mesh; pines get an automatic trunk cylinder.
+        assert!(matches!(scene.find("terrain").unwrap().collider, Some(ColliderShape::TriMesh { .. })));
+        assert!(scene.objects.iter().any(|o| matches!(o.collider, Some(ColliderShape::Cylinder { .. }))));
         // The altar sits on the terrain surface.
         let altar = scene.find("altar").unwrap();
         assert!((altar.transform.position.y - scene.ground_height(0.0, 0.0)).abs() < 1e-4);

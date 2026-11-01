@@ -1,5 +1,5 @@
 use grimora_core::{Environment, MeshData, PointLight, Transform, Vec3};
-use grimora_scene::{Scene, Terrain};
+use grimora_scene::{PlayerSpawn, Scene, Terrain};
 
 /// Index of a mesh stored in the [`World`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -26,6 +26,8 @@ pub struct World {
     pub lights: Vec<PointLight>,
     pub objects: Vec<Object>,
     pub terrain: Option<Terrain>,
+    /// Player start from the scene file, if any.
+    pub player_spawn: Option<PlayerSpawn>,
     meshes: Vec<MeshData>,
 }
 
@@ -48,6 +50,7 @@ impl World {
             lights: scene.lights,
             objects,
             terrain: scene.terrain,
+            player_spawn: scene.player,
             meshes: scene.meshes,
         }
     }

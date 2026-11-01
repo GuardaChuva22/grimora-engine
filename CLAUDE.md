@@ -1,6 +1,6 @@
 # Grimora Engine — guia para agentes de IA
 
-Motor 3D em Rust (wgpu 30, winit 0.30, glam 0.34) para jogos low poly dark fantasy. Visão e roteiro: [README.md](README.md). O usuário fala português; código e comentários ficam em inglês.
+Motor 3D em Rust (wgpu 30, winit 0.30, glam 0.34, rapier3d 0.36) para jogos low poly dark fantasy. Visão e roteiro: [README.md](README.md). O usuário fala português; código e comentários ficam em inglês.
 
 ## Comandos
 
@@ -24,7 +24,10 @@ Outros ângulos: `--camera x,y,z --look-at x,y,z`. A última linha impressa (`[g
 - `crates/grimora_core` — tipos compartilhados: `Time`, `Input`, `Transform`, `Camera`, `MeshData`/`Vertex`, `Environment`/`PointLight`.
 - `crates/grimora_render` — `Renderer`. Shaders em `src/shaders/*.wgsl`. Os structs em `uniforms.rs` espelham os structs WGSL campo a campo: altere os dois juntos.
 - `crates/grimora_scene` — formato RON (`SceneDesc`), `Scene::build`, terreno (`terrain.rs`), geradores de malha (`shapes.rs`), RNG/ruído determinísticos (`rng.rs`).
-- `crates/grimora` — laço principal (`runner.rs`), trait `Game`, `World`, `FlyCamera`, CLI (`config.rs`).
+- `crates/grimora_scene/src/collider.rs` — `ColliderDesc` (no arquivo de cena) → `ColliderShape` (forma resolvida, só dados).
+- `crates/grimora_physics` — `Physics` (envolve o `PhysicsWorld` do Rapier: colisores estáticos da cena, raycast, passo fixo de 60 Hz) e `CharacterBody` (cápsula com `KinematicCharacterController`).
+- `crates/grimora` — laço principal (`runner.rs`), trait `Game`, `World`, `FlyCamera`, `ThirdPersonController` (`third_person.rs`), CLI (`config.rs`). O runner reconstrói `ctx.physics` a cada (re)carga de cena e chama `physics.step` antes de `Game::update`.
+- `crates/grimora/tests/character.rs` — testes que dirigem o personagem pela cena real com teclas simuladas (`Input::key_down`), sem janela nem GPU. Prefira testar jogabilidade assim.
 - `examples/sandbox` + `assets/scenes/sandbox.ron` — cena de teste.
 
 ## Convenções
@@ -35,6 +38,10 @@ Outros ângulos: `--camera x,y,z --look-at x,y,z`. A última linha impressa (`[g
 - Faces em sentido anti-horário vistas de fora (back-face culling ativo). `MeshData::push_triangle` gera normais planas — é o visual low poly.
 - Tudo procedural recebe semente: a mesma semente gera sempre o mesmo mundo.
 - Ao adicionar campos a `Environment` ou ao formato de cena, use `#[serde(default)]` para não quebrar cenas existentes e acrescente exemplo/comentário em `sandbox.ron`.
+
+## Armadilhas do Rapier 0.36
+
+O Rapier usa sua própria cópia do glam (0.31, via `glamx`), incompatível com o glam 0.34 do motor: converta nos limites com `to_rapier`/`from_rapier` em `grimora_physics`. Não exponha tipos do Rapier na API pública além de `ColliderHandle`. Colisores adicionados só aparecem nas consultas depois de `step`/`refresh`.
 
 ## Armadilhas da API wgpu 30
 

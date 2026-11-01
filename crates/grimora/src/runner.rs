@@ -4,6 +4,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context as _, Result};
 use grimora_core::{Camera, Input, KeyCode, Time, Vec2};
+use grimora_physics::Physics;
 use grimora_render::{DrawItem, Frame, FrameStats, MeshHandle, Renderer, RendererSettings};
 use grimora_scene::Scene;
 use winit::application::ApplicationHandler;
@@ -25,6 +26,9 @@ pub struct Context {
     pub input: Input,
     pub camera: Camera,
     pub world: World,
+    /// Collision world built from the scene's colliders; stepped before `update`.
+    pub physics: Physics,
+    config: EngineConfig,
     exit: bool,
     cursor_grab: bool,
     screenshot: Option<PathBuf>,
@@ -57,6 +61,11 @@ impl Context {
     pub fn aspect(&self) -> f32 {
         self.aspect
     }
+
+    /// How the engine was started (command line flags included).
+    pub fn config(&self) -> &EngineConfig {
+        &self.config
+    }
 }
 
 /// Opens a window and runs `game` until it exits.
@@ -65,13 +74,15 @@ pub fn run(config: EngineConfig, game: impl Game) -> Result<()> {
     let event_loop = EventLoop::new().context("creating event loop")?;
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = App {
-        config,
+        config: config.clone(),
         game,
         ctx: Context {
             time: Time::new(),
             input: Input::default(),
             camera: Camera::default(),
             world: World::default(),
+            physics: Physics::new(),
+            config,
             exit: false,
             cursor_grab: false,
             screenshot: None,
@@ -158,6 +169,13 @@ impl<G: Game> App<G> {
                 self.ctx.camera.look_at(target);
             }
         }
+        let started = Instant::now();
+        self.ctx.physics = Physics::from_scene(&scene);
+        log::info!(
+            "Built {} colliders in {:.0} ms",
+            self.ctx.physics.collider_count(),
+            started.elapsed().as_secs_f64() * 1000.0
+        );
         self.ctx.world = World::from_scene(scene);
         if let Some(renderer) = &mut self.renderer {
             renderer.clear_meshes();
@@ -206,6 +224,7 @@ impl<G: Game> App<G> {
             self.ctx.screenshot(format!("screenshots/grimora_{stamp}.png"));
         }
 
+        self.ctx.physics.step(self.ctx.time.delta());
         self.game.update(&mut self.ctx);
         self.apply_cursor_grab();
 

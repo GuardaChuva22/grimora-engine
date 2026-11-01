@@ -12,6 +12,7 @@ grimora = { path = "crates/grimora" }
 grimora_core = { path = "crates/grimora_core" }
 grimora_render = { path = "crates/grimora_render" }
 grimora_scene = { path = "crates/grimora_scene" }
+grimora_physics = { path = "crates/grimora_physics" }
 
 wgpu = "30"
 winit = "0.30"
@@ -23,6 +24,7 @@ ron = "0.12"
 log = "0.4"
 env_logger = "0.11"
 anyhow = "1"
+rapier3d = "0.36"
 image = { version = "0.25", default-features = false, features = ["png"] }
 
 [workspace.lints.rust]

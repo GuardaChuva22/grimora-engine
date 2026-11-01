@@ -2,6 +2,9 @@
 //
 // Everything here is plain data. Save the file while the engine runs and it
 // hot-reloads. Colors are sRGB 0..1, angles are degrees, distances are meters.
+// Objects collide automatically (trunks for trees, hulls for rocks and
+// pillars); set `collider: None` for decoration or pick `Box(...)`, `Hull`,
+// `Mesh`, `Cylinder(...)` or `Ball(...)`.
 // Unlisted fields use their defaults (see crates/grimora_core/src/environment.rs
 // and crates/grimora_scene/src/lib.rs).
 SceneDesc(
@@ -40,6 +43,9 @@ SceneDesc(
             bloom: 0.14,
         ),
     ),
+
+    // Where the player character starts (sandbox: Tab switches to a free camera).
+    player: (position: (0.0, 0.0, 15.0), yaw: 0.0),
 
     camera: (
         position: (0.0, 5.5, 21.0),

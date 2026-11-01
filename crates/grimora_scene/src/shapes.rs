@@ -55,6 +55,8 @@ pub enum MeshDesc {
         #[serde(default)]
         seed: u64,
     },
+    /// Hooded, cloaked figure with a staff, 1.9 units tall, facing -Z. The player character.
+    Wanderer,
     /// Stone column on a plinth, about 3.4 units tall; `broken` snaps the top off.
     Pillar {
         #[serde(default)]
@@ -78,7 +80,12 @@ impl MeshDesc {
             | Self::Rock { seed }
             | Self::Crystal { seed }
             | Self::Pillar { seed, .. } => *seed = new_seed,
-            Self::Cube | Self::Plane { .. } | Self::Cylinder { .. } | Self::Cone { .. } | Self::Sphere { .. } => {}
+            Self::Cube
+            | Self::Wanderer
+            | Self::Plane { .. }
+            | Self::Cylinder { .. }
+            | Self::Cone { .. }
+            | Self::Sphere { .. } => {}
         }
         d
     }
@@ -119,6 +126,7 @@ impl MeshDesc {
             Self::Rock { seed } => rock(seed),
             Self::Crystal { seed } => crystal(seed),
             Self::Pillar { seed, broken } => pillar(seed, broken),
+            Self::Wanderer => wanderer(),
         }
     }
 }
@@ -339,6 +347,30 @@ fn crystal(seed: u64) -> MeshData {
     m
 }
 
+fn wanderer() -> MeshData {
+    let mut rng = Rng::new(1);
+    let mut m = MeshData::new();
+    let cloak = Vec3::new(0.36, 0.11, 0.1);
+    let hood = Vec3::new(0.3, 0.09, 0.09);
+    let wood = Vec3::new(0.3, 0.22, 0.15);
+    let v = Vec3::new;
+
+    // Cloak and shoulders.
+    tube(&mut m, v(0.0, 0.02, 0.0), v(0.0, 1.3, 0.0), 0.4, 0.2, 8, 0.2, cloak, Some(&mut rng));
+    tube(&mut m, v(0.0, 1.3, 0.0), v(0.0, 1.42, 0.0), 0.2, 0.16, 8, 0.2, cloak, Some(&mut rng));
+    // Hood, its pointed tip falling back, and the shadowed face.
+    blob(&mut m, v(0.0, 1.56, 0.02), v(0.19, 0.21, 0.21), 1, |_| 1.0, hood, Some(&mut rng));
+    tube(&mut m, v(0.0, 1.66, 0.08), v(0.0, 1.9, 0.34), 0.13, 0.0, 6, 0.0, hood, Some(&mut rng));
+    blob(&mut m, v(0.0, 1.54, -0.13), v(0.11, 0.12, 0.06), 0, |_| 1.0, Vec3::splat(0.04), None);
+    // Arms reaching forward.
+    for side in [-1.0, 1.0] {
+        tube(&mut m, v(0.2 * side, 1.34, 0.0), v(0.3 * side, 0.92, -0.16), 0.08, 0.06, 5, 0.0, cloak, Some(&mut rng));
+    }
+    // Staff in the right hand.
+    tube(&mut m, v(0.33, 0.0, -0.2), v(0.33, 1.95, -0.2), 0.03, 0.025, 5, 0.0, wood, Some(&mut rng));
+    m
+}
+
 fn pillar(seed: u64, broken: bool) -> MeshData {
     let mut rng = Rng::new(seed);
     let mut m = MeshData::new();
@@ -377,6 +409,7 @@ mod tests {
             MeshDesc::Rock { seed: 3 },
             MeshDesc::Crystal { seed: 4 },
             MeshDesc::Pillar { seed: 5, broken: true },
+            MeshDesc::Wanderer,
         ];
         for shape in shapes {
             let mesh = shape.build();

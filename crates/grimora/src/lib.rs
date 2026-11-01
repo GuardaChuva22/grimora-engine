@@ -24,14 +24,17 @@
 mod config;
 mod fly_camera;
 mod runner;
+mod third_person;
 mod world;
 
 pub use config::{EngineConfig, USAGE};
 pub use fly_camera::FlyCamera;
 pub use runner::{Context, run};
+pub use third_person::ThirdPersonController;
 pub use world::{MeshId, Object, World};
 
 pub use grimora_core as core;
+pub use grimora_physics as physics;
 pub use grimora_render as render;
 pub use grimora_scene as scene;
 
@@ -49,10 +52,11 @@ pub trait Game: 'static {
 }
 
 pub mod prelude {
-    pub use crate::{Context, EngineConfig, FlyCamera, Game, MeshId, Object, World};
+    pub use crate::{Context, EngineConfig, FlyCamera, Game, MeshId, Object, ThirdPersonController, World};
     pub use grimora_core::{
         Camera, Environment, EulerRot, Input, KeyCode, Mat4, MeshData, MouseButton, PointLight, Quat, Time, Transform,
         Vec2, Vec3, Vec4,
     };
+    pub use grimora_physics::{CharacterBody, Physics, RayHit};
     pub use grimora_scene::MeshDesc;
 }
