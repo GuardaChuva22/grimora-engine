@@ -139,6 +139,17 @@ SceneDesc(
          sound: (path: "../sounds/fire.wav", position: (0.0, 0.3, 0.0), volume: 0.8, min_distance: 1.5, max_distance: 16.0)),
     ],
 
+    // Streaming: scattered objects are grouped into `cell_size` cells and only
+    // those within `load_distance` of the camera are loaded (drawn, lit and solid).
+    // Keep it beyond where the fog swallows everything (about 4 / fog.density)
+    // or, as here, beyond the far edge of the map seen from its center.
+    streaming: (cell_size: 32.0, load_distance: 150.0),
+    // Regions: scene fragments in their own files, built in the background when
+    // the camera comes within `load_distance` of their circle (center, radius).
+    regions: [
+        (path: "regions/shrine.ron", center: (-55.0, 0.0, -60.0), radius: 10.0),
+    ],
+
     // Random placement; the same seed always gives the same layout.
     scatter: [
         // dark pine forest ringing the valley

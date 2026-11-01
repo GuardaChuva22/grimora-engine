@@ -9,13 +9,14 @@ mod model;
 mod rng;
 mod shapes;
 mod sound;
+mod streaming;
 mod terrain;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
-use grimora_core::{Camera, Environment, MeshData, PointLight, Transform, Vec3};
+use grimora_core::{Camera, Environment, MeshData, PointLight, Transform, Vec2, Vec3};
 use serde::{Deserialize, Serialize};
 
 pub use collider::{BodyDesc, ColliderDesc, ColliderShape};
@@ -23,6 +24,7 @@ pub use model::{DEFAULT_MAX_TEXTURE_SIZE, load_model};
 pub use rng::{Rng, fbm, value_noise};
 pub use shapes::{MeshDesc, blob, cube, tube};
 pub use sound::{SceneSound, SoundDesc};
+pub use streaming::{CellCoord, RegionDesc, SceneCell, SceneRegion, SceneStreaming, StreamingDesc};
 pub use terrain::{Terrain, TerrainDesc};
 
 /// The on-disk scene format.
@@ -39,6 +41,12 @@ pub struct SceneDesc {
     pub player: Option<PlayerDesc>,
     /// Looping ambience and positional emitters.
     pub sounds: Vec<SoundDesc>,
+    /// Load scattered objects only near the camera (see [`StreamingDesc`]).
+    /// Implied, with default settings, when there are `regions`.
+    pub streaming: Option<StreamingDesc>,
+    /// Scene fragments in their own files, loaded in the background when the
+    /// camera gets close.
+    pub regions: Vec<RegionDesc>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -205,7 +213,13 @@ pub struct Scene {
     pub player: Option<PlayerSpawn>,
     /// Looping sounds, positions in world space and paths resolved from the scene directory.
     pub sounds: Vec<SceneSound>,
+    /// With streaming on, scattered objects live here (by cell) instead of in
+    /// `objects`, along with the region files to load.
+    pub streaming: Option<SceneStreaming>,
 }
+
+/// Terrain render chunks are this many grid cells on a side.
+const TERRAIN_CHUNK: usize = 32;
 
 impl SceneDesc {
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
@@ -237,87 +251,42 @@ impl Scene {
 
     /// Builds a scene, resolving model paths from `dir`.
     pub fn build_in(desc: &SceneDesc, dir: &Path) -> Self {
-        let mut builder = Builder { dir: dir.to_path_buf(), ..Default::default() };
         let terrain = desc.terrain.clone().map(Terrain::new);
+        let mut builder = Builder::new(dir, terrain.as_ref());
         if let Some(terrain) = &terrain {
-            let mesh = builder.meshes.len();
-            builder.meshes.push(terrain.mesh());
-            let collider = Some(ColliderShape::trimesh(&builder.meshes[mesh]));
-            builder.objects.push(SceneObject {
-                name: Some("terrain".into()),
-                mesh,
-                transform: Transform::IDENTITY,
-                color: Vec3::ONE,
-                emissive: 0.0,
-                collider,
-                body: BodyDesc::Static,
-                animation: None,
-            });
-        }
-        let ground = |x: f32, z: f32| terrain.as_ref().map_or(0.0, |t| t.height_at(x, z));
-
-        let mut lights = desc.lights.clone();
-        let mut sounds: Vec<SceneSound> = desc.sounds.iter().map(|s| s.resolve(dir, ground)).collect();
-        for obj in &desc.objects {
-            let mut position = obj.position;
-            if obj.snap_to_ground {
-                position.y += ground(position.x, position.z);
-            }
-            let transform = Transform::from_euler_degrees(position, obj.rotation, obj.scale);
-            let mesh = builder.mesh(&obj.mesh);
-            let collider = obj.collider.resolve(&obj.mesh, &builder.meshes[mesh]);
-            builder.objects.push(SceneObject {
-                name: obj.name.clone(),
-                mesh,
-                transform,
-                color: obj.color,
-                emissive: obj.emissive,
-                collider,
-                body: obj.body,
-                animation: obj.animation.clone(),
-            });
-            if let Some(light) = &obj.light {
-                lights.push(attached_light(light, &transform));
-            }
-            if let Some(sound) = &obj.sound {
-                sounds.push(sound.attached(dir, &transform));
-            }
-        }
-
-        for scatter in &desc.scatter {
-            let mut rng = Rng::new(scatter.seed);
-            let variants: Vec<(usize, Option<ColliderShape>)> = (0..scatter.variants.max(1))
-                .map(|k| {
-                    let desc = scatter.mesh.with_seed(scatter.seed.wrapping_mul(31).wrapping_add(u64::from(k)));
-                    let mesh = builder.mesh(&desc);
-                    (mesh, scatter.collider.resolve(&desc, &builder.meshes[mesh]))
-                })
-                .collect();
-            let (r0, r1) = (scatter.min_radius.max(0.0), scatter.radius.max(scatter.min_radius));
-            for _ in 0..scatter.count {
-                // sqrt keeps the density uniform over the ring's area.
-                let r = (rng.f32() * (r1 * r1 - r0 * r0) + r0 * r0).sqrt();
-                let a = rng.range(0.0, std::f32::consts::TAU);
-                let (x, z) = (scatter.center.x + a.cos() * r, scatter.center.z + a.sin() * r);
-                let y = ground(x, z) + scatter.center.y - scatter.sink;
-                let scale = rng.range(scatter.scale.0, scatter.scale.1);
-                let rotation = Vec3::new(rng.jitter(scatter.tilt), rng.range(0.0, 360.0), rng.jitter(scatter.tilt));
-                let transform = Transform::from_euler_degrees(Vec3::new(x, y, z), rotation, Vec3::splat(scale));
-                let (mesh, collider) = variants[(rng.next_u64() % variants.len() as u64) as usize].clone();
+            for chunk in terrain.chunk_meshes(TERRAIN_CHUNK) {
+                let collider = Some(ColliderShape::trimesh(&chunk));
+                builder.meshes.push(chunk);
                 builder.objects.push(SceneObject {
-                    name: None,
-                    mesh,
-                    transform,
-                    color: scatter.color * (1.0 + rng.jitter(scatter.color_jitter)),
-                    emissive: scatter.emissive,
+                    name: Some("terrain".into()),
+                    mesh: builder.meshes.len() - 1,
+                    transform: Transform::IDENTITY,
+                    color: Vec3::ONE,
+                    emissive: 0.0,
                     collider,
                     body: BodyDesc::Static,
                     animation: None,
                 });
-                if let Some(light) = &scatter.light {
-                    lights.push(attached_light(light, &transform));
-                }
             }
+        }
+
+        let settings = desc.streaming.clone().or_else(|| (!desc.regions.is_empty()).then(StreamingDesc::default));
+        let mut streaming = settings.map(|s| SceneStreaming {
+            cell_size: s.cell_size.max(1.0),
+            load_distance: s.load_distance.max(0.0),
+            ..Default::default()
+        });
+        builder.add_contents(desc, streaming.as_mut());
+        if let Some(streaming) = &mut streaming {
+            streaming.regions = desc
+                .regions
+                .iter()
+                .map(|r| SceneRegion {
+                    path: dir.join(&r.path),
+                    center: Vec2::new(r.center.x, r.center.z),
+                    radius: r.radius.max(0.0),
+                })
+                .collect();
         }
 
         let c = &desc.camera;
@@ -328,20 +297,44 @@ impl Scene {
         }
 
         let player = desc.player.as_ref().map(|p| PlayerSpawn {
-            position: p.position + Vec3::Y * ground(p.position.x, p.position.z),
+            position: p.position + Vec3::Y * builder.ground(p.position.x, p.position.z),
             yaw: p.yaw.to_radians(),
         });
 
+        let Builder { meshes, objects, lights, sounds, .. } = builder;
         Self {
             environment: desc.environment.clone(),
             camera,
             lights,
-            meshes: builder.meshes,
-            objects: builder.objects,
+            meshes,
+            objects,
             terrain,
             player,
             sounds,
+            streaming,
         }
+    }
+
+    /// Loads a region file (see [`RegionDesc`]): only its objects, scatter,
+    /// lights and sounds, placed on the main scene's `terrain`.
+    pub fn load_region(path: &Path, terrain: Option<&Terrain>) -> Result<Self> {
+        let desc = SceneDesc::load(path)?;
+        if desc.terrain.is_some() || !desc.regions.is_empty() {
+            log::warn!("{}: regions can't have a terrain or regions of their own; ignored", path.display());
+        }
+        let mut builder = Builder::new(path.parent().unwrap_or(Path::new("")), terrain);
+        builder.add_contents(&desc, None);
+        Ok(Self {
+            environment: Environment::default(),
+            camera: Camera::default(),
+            lights: builder.lights,
+            meshes: builder.meshes,
+            objects: builder.objects,
+            terrain: None,
+            player: None,
+            sounds: builder.sounds,
+            streaming: None,
+        })
     }
 
     /// Ground height at `(x, z)`, or 0 without terrain.
@@ -364,16 +357,34 @@ fn attached_light(light: &PointLight, transform: &Transform) -> PointLight {
 }
 
 /// Collects unique meshes so identical descriptions share one GPU buffer.
-#[derive(Default)]
-struct Builder {
+struct Builder<'a> {
     meshes: Vec<MeshData>,
     objects: Vec<SceneObject>,
+    lights: Vec<PointLight>,
+    sounds: Vec<SceneSound>,
     cache: HashMap<String, usize>,
     /// Directory model paths are relative to.
     dir: PathBuf,
+    terrain: Option<&'a Terrain>,
 }
 
-impl Builder {
+impl<'a> Builder<'a> {
+    fn new(dir: &Path, terrain: Option<&'a Terrain>) -> Self {
+        Self {
+            meshes: Vec::new(),
+            objects: Vec::new(),
+            lights: Vec::new(),
+            sounds: Vec::new(),
+            cache: HashMap::new(),
+            dir: dir.to_path_buf(),
+            terrain,
+        }
+    }
+
+    fn ground(&self, x: f32, z: f32) -> f32 {
+        self.terrain.map_or(0.0, |t| t.height_at(x, z))
+    }
+
     fn mesh(&mut self, desc: &MeshDesc) -> usize {
         let key = format!("{desc:?}");
         if let Some(&index) = self.cache.get(&key) {
@@ -382,6 +393,87 @@ impl Builder {
         self.meshes.push(desc.build_in(&self.dir));
         self.cache.insert(key, self.meshes.len() - 1);
         self.meshes.len() - 1
+    }
+
+    /// Adds `desc`'s objects, scatter, lights and sounds. With `streaming`,
+    /// scattered copies go into its cells instead.
+    fn add_contents(&mut self, desc: &SceneDesc, mut streaming: Option<&mut SceneStreaming>) {
+        let dir = self.dir.clone();
+        self.lights.extend(desc.lights.iter().cloned());
+        for sound in &desc.sounds {
+            let sound = sound.resolve(&dir, |x, z| self.ground(x, z));
+            self.sounds.push(sound);
+        }
+        for obj in &desc.objects {
+            let mut position = obj.position;
+            if obj.snap_to_ground {
+                position.y += self.ground(position.x, position.z);
+            }
+            let transform = Transform::from_euler_degrees(position, obj.rotation, obj.scale);
+            let mesh = self.mesh(&obj.mesh);
+            let collider = obj.collider.resolve(&obj.mesh, &self.meshes[mesh]);
+            self.objects.push(SceneObject {
+                name: obj.name.clone(),
+                mesh,
+                transform,
+                color: obj.color,
+                emissive: obj.emissive,
+                collider,
+                body: obj.body,
+                animation: obj.animation.clone(),
+            });
+            if let Some(light) = &obj.light {
+                self.lights.push(attached_light(light, &transform));
+            }
+            if let Some(sound) = &obj.sound {
+                self.sounds.push(sound.attached(&dir, &transform));
+            }
+        }
+
+        for scatter in &desc.scatter {
+            let mut rng = Rng::new(scatter.seed);
+            let variants: Vec<(usize, Option<ColliderShape>)> = (0..scatter.variants.max(1))
+                .map(|k| {
+                    let desc = scatter.mesh.with_seed(scatter.seed.wrapping_mul(31).wrapping_add(u64::from(k)));
+                    let mesh = self.mesh(&desc);
+                    (mesh, scatter.collider.resolve(&desc, &self.meshes[mesh]))
+                })
+                .collect();
+            let (r0, r1) = (scatter.min_radius.max(0.0), scatter.radius.max(scatter.min_radius));
+            for _ in 0..scatter.count {
+                // sqrt keeps the density uniform over the ring's area.
+                let r = (rng.f32() * (r1 * r1 - r0 * r0) + r0 * r0).sqrt();
+                let a = rng.range(0.0, std::f32::consts::TAU);
+                let (x, z) = (scatter.center.x + a.cos() * r, scatter.center.z + a.sin() * r);
+                let y = self.ground(x, z) + scatter.center.y - scatter.sink;
+                let scale = rng.range(scatter.scale.0, scatter.scale.1);
+                let rotation = Vec3::new(rng.jitter(scatter.tilt), rng.range(0.0, 360.0), rng.jitter(scatter.tilt));
+                let transform = Transform::from_euler_degrees(Vec3::new(x, y, z), rotation, Vec3::splat(scale));
+                let (mesh, collider) = variants[(rng.next_u64() % variants.len() as u64) as usize].clone();
+                let object = SceneObject {
+                    name: None,
+                    mesh,
+                    transform,
+                    color: scatter.color * (1.0 + rng.jitter(scatter.color_jitter)),
+                    emissive: scatter.emissive,
+                    collider,
+                    body: BodyDesc::Static,
+                    animation: None,
+                };
+                let light = scatter.light.as_ref().map(|light| attached_light(light, &transform));
+                match streaming.as_deref_mut() {
+                    Some(streaming) => {
+                        let cell = streaming.cells.entry(streaming.cell_of(transform.position)).or_default();
+                        cell.objects.push(object);
+                        cell.lights.extend(light);
+                    }
+                    None => {
+                        self.objects.push(object);
+                        self.lights.extend(light);
+                    }
+                }
+            }
+        }
     }
 }
 

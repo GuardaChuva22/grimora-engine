@@ -24,12 +24,14 @@
 mod config;
 mod fly_camera;
 mod runner;
+mod streaming;
 mod third_person;
 mod world;
 
 pub use config::{EngineConfig, USAGE};
 pub use fly_camera::FlyCamera;
 pub use runner::{Context, run};
+pub use streaming::StreamingStats;
 pub use third_person::ThirdPersonController;
 pub use world::{MeshId, Object, World};
 

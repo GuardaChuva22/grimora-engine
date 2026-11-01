@@ -110,6 +110,26 @@ impl Terrain {
         mesh
     }
 
+    /// [`Terrain::mesh`] cut into square chunks of `quads` × `quads` grid cells
+    /// (smaller at the far edges), so each chunk can be culled on its own. The
+    /// triangles and colors are exactly those of the whole mesh.
+    pub fn chunk_meshes(&self, quads: usize) -> Vec<MeshData> {
+        let res = self.desc.resolution as usize;
+        let quads = quads.max(1);
+        let per_side = res.div_ceil(quads);
+        let whole = self.mesh();
+        let mut chunks = vec![MeshData::new(); per_side * per_side];
+        // `mesh()` emits two triangles (six vertices) per grid cell, row by row.
+        for (cell, vertices) in whole.vertices.as_chunks::<6>().0.iter().enumerate() {
+            let (i, j) = (cell % res, cell / res);
+            let chunk = &mut chunks[(j / quads) * per_side + i / quads];
+            let base = chunk.vertices.len() as u32;
+            chunk.vertices.extend_from_slice(vertices);
+            chunk.indices.extend(base..base + 6);
+        }
+        chunks
+    }
+
     fn face_color(&self, a: Vec3, b: Vec3, c: Vec3, rng: &mut Rng) -> Vec3 {
         let normal = (b - a).cross(c - a).normalize_or(Vec3::Y);
         let slope = 1.0 - normal.y;
@@ -157,5 +177,23 @@ mod tests {
     fn mesh_has_two_triangles_per_cell() {
         let terrain = Terrain::new(TerrainDesc { resolution: 8, ..Default::default() });
         assert_eq!(terrain.mesh().triangle_count(), 8 * 8 * 2);
+    }
+
+    #[test]
+    fn chunks_split_the_mesh_exactly() {
+        let terrain = Terrain::new(TerrainDesc { resolution: 10, size: 40.0, ..Default::default() });
+        let chunks = terrain.chunk_meshes(4);
+        // 10 cells per side in chunks of 4: 3 × 3 chunks, the last row and column 2 cells wide.
+        assert_eq!(chunks.len(), 9);
+        assert_eq!(chunks[0].triangle_count(), 4 * 4 * 2);
+        assert_eq!(chunks[8].triangle_count(), 2 * 2 * 2);
+        let mut whole: Vec<_> = terrain.mesh().vertices.iter().map(|v| format!("{v:?}")).collect();
+        let mut split: Vec<_> = chunks.iter().flat_map(|c| &c.vertices).map(|v| format!("{v:?}")).collect();
+        whole.sort();
+        split.sort();
+        assert_eq!(whole, split);
+        // Chunk (1, 0) covers x in 16..32 of the -20..20 grid, z in -20..-4.
+        let bounds = chunks[1].bounding_sphere();
+        assert!(bounds.center.x > -4.0 && bounds.center.x < 12.0 && bounds.center.z < -4.0, "{bounds:?}");
     }
 }

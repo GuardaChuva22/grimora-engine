@@ -1,0 +1,300 @@
+//! Loads and unloads parts of the world around a point (see
+//! [`grimora_scene::SceneStreaming`]): grid cells of scattered objects, built
+//! when the scene loads and switched on and off here, and region files, read
+//! and built on a background thread.
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver, Sender};
+
+use grimora_core::{MeshData, PointLight, Vec3};
+use grimora_physics::{BodyHandle, ColliderHandle, Physics};
+use grimora_scene::{CellCoord, Scene, SceneObject, SceneRegion, SceneSound, SceneStreaming, Terrain};
+
+use crate::world::{MeshId, Object};
+
+/// Cells switched on per frame at most, so walking into new ground never stalls a frame.
+const CELLS_PER_FRAME: usize = 8;
+
+/// What a loaded cell or region adds to the world.
+#[derive(Debug, Default)]
+pub(crate) struct Chunk {
+    pub objects: Vec<Object>,
+    pub lights: Vec<PointLight>,
+    pub sounds: Vec<SceneSound>,
+    colliders: Vec<ColliderHandle>,
+    /// Dynamic bodies and the index of the object each one moves.
+    pub bodies: Vec<(BodyHandle, usize)>,
+}
+
+impl Chunk {
+    fn new(
+        objects: &[SceneObject],
+        mesh: impl Fn(usize) -> MeshId,
+        meshes: &[MeshData],
+        physics: &mut Physics,
+    ) -> Self {
+        let mut chunk = Chunk::default();
+        for (index, o) in objects.iter().enumerate() {
+            chunk.objects.push(Object::from_scene(o, mesh(o.mesh), meshes));
+            let Some(shape) = &o.collider else { continue };
+            if o.body.is_dynamic() {
+                if let Some(body) = physics.add_body(shape, &o.transform, &o.body) {
+                    chunk.bodies.push((body, index));
+                }
+            } else if let Some(collider) = physics.add_static(shape, &o.transform) {
+                chunk.colliders.push(collider);
+            }
+        }
+        chunk
+    }
+
+    fn unload(self, physics: &mut Physics) {
+        for collider in self.colliders {
+            physics.remove(collider);
+        }
+        for (body, _) in self.bodies {
+            physics.remove_body(body);
+        }
+    }
+}
+
+#[derive(Debug)]
+enum RegionState {
+    Unloaded,
+    /// Being built on the worker thread.
+    Loading,
+    Loaded(Chunk),
+    /// Failed to load; not retried until the scene reloads.
+    Failed,
+}
+
+#[derive(Debug)]
+struct Region {
+    desc: SceneRegion,
+    state: RegionState,
+    /// World meshes from an earlier load, reused when the region comes back.
+    meshes: Vec<MeshId>,
+}
+
+type RegionResult = (usize, anyhow::Result<Scene>);
+
+/// Builds region files off the main thread.
+#[derive(Debug)]
+struct Worker {
+    jobs: Sender<(usize, PathBuf)>,
+    results: Receiver<RegionResult>,
+}
+
+impl Worker {
+    /// The thread ends on its own once the streamer (and so `jobs`) is dropped.
+    fn spawn(terrain: Option<Terrain>) -> Self {
+        let (jobs, inbox) = mpsc::channel::<(usize, PathBuf)>();
+        let (outbox, results) = mpsc::channel();
+        std::thread::Builder::new()
+            .name("grimora-regions".into())
+            .spawn(move || {
+                for (index, path) in inbox {
+                    let started = std::time::Instant::now();
+                    let scene = Scene::load_region(&path, terrain.as_ref());
+                    if scene.is_ok() {
+                        log::info!(
+                            "Built region {} in {:.0} ms",
+                            path.display(),
+                            started.elapsed().as_secs_f64() * 1000.0
+                        );
+                    }
+                    if outbox.send((index, scene)).is_err() {
+                        break;
+                    }
+                }
+            })
+            .expect("spawning the region loader thread");
+        Self { jobs, results }
+    }
+}
+
+/// How much of the world is loaded (see [`crate::World::streaming_stats`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct StreamingStats {
+    pub loaded_cells: usize,
+    pub cells: usize,
+    pub loaded_regions: usize,
+    pub regions: usize,
+    /// Objects in loaded cells and regions.
+    pub objects: usize,
+}
+
+#[derive(Debug)]
+pub(crate) struct Streamer {
+    scene: SceneStreaming,
+    terrain: Option<Terrain>,
+    pub loaded: HashMap<CellCoord, Chunk>,
+    regions: Vec<Region>,
+    worker: Option<Worker>,
+}
+
+impl Streamer {
+    pub fn new(scene: SceneStreaming, terrain: Option<&Terrain>) -> Self {
+        let regions: Vec<Region> = scene
+            .regions
+            .iter()
+            .map(|desc| Region { desc: desc.clone(), state: RegionState::Unloaded, meshes: Vec::new() })
+            .collect();
+        let worker = (!regions.is_empty()).then(|| Worker::spawn(terrain.cloned()));
+        Self { scene, terrain: terrain.cloned(), loaded: HashMap::new(), regions, worker }
+    }
+
+    /// Loads what is within reach of `focus` and unloads what was left behind.
+    /// With `wait`, everything in reach is loaded before returning; otherwise
+    /// cells come in a few per frame and regions in the background. Returns
+    /// whether anything changed.
+    pub fn update(&mut self, focus: Vec3, meshes: &mut Vec<MeshData>, physics: &mut Physics, wait: bool) -> bool {
+        let load = self.scene.load_distance;
+        // Things unload a little further out than they load, so walking along
+        // the edge doesn't flip them on and off.
+        let unload = load + (self.scene.cell_size * 0.5).max(10.0);
+        let mut changed = false;
+
+        let scene = &self.scene;
+        self.loaded.retain(|&cell, chunk| {
+            let keep = scene.cell_distance(cell, focus) <= unload;
+            if !keep {
+                std::mem::take(chunk).unload(physics);
+                changed = true;
+            }
+            keep
+        });
+        let reach = (load / scene.cell_size).ceil() as i32;
+        let (cx, cz) = scene.cell_of(focus);
+        let mut wanted: Vec<(f32, CellCoord)> = (cx - reach..=cx + reach)
+            .flat_map(|x| (cz - reach..=cz + reach).map(move |z| (x, z)))
+            .filter(|cell| scene.cells.contains_key(cell) && !self.loaded.contains_key(cell))
+            .map(|cell| (scene.cell_distance(cell, focus), cell))
+            .filter(|&(distance, _)| distance < load)
+            .collect();
+        wanted.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let budget = if wait { wanted.len() } else { CELLS_PER_FRAME };
+        for (_, cell) in wanted.into_iter().take(budget) {
+            let objects = &scene.cells[&cell].objects;
+            let mut chunk = Chunk::new(objects, MeshId, meshes, physics);
+            chunk.lights = scene.cells[&cell].lights.clone();
+            self.loaded.insert(cell, chunk);
+            changed = true;
+        }
+
+        changed |= self.update_regions(focus, load, unload, meshes, physics, wait);
+        changed
+    }
+
+    fn update_regions(
+        &mut self,
+        focus: Vec3,
+        load: f32,
+        unload: f32,
+        meshes: &mut Vec<MeshData>,
+        physics: &mut Physics,
+        wait: bool,
+    ) -> bool {
+        let mut changed = false;
+        for index in 0..self.regions.len() {
+            let region = &mut self.regions[index];
+            let distance = region.desc.distance(focus);
+            match region.state {
+                RegionState::Loaded(_) if distance > unload => {
+                    if let RegionState::Loaded(chunk) = std::mem::replace(&mut region.state, RegionState::Unloaded) {
+                        chunk.unload(physics);
+                    }
+                    log::info!("Unloaded region {}", region.desc.path.display());
+                    changed = true;
+                }
+                RegionState::Unloaded if distance < load => {
+                    if wait {
+                        let scene = Scene::load_region(&region.desc.path, self.terrain.as_ref());
+                        changed |= finish(region, scene, meshes, physics);
+                    } else if let Some(worker) = &self.worker {
+                        region.state = RegionState::Loading;
+                        let _ = worker.jobs.send((index, region.desc.path.clone()));
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let Some(worker) = &self.worker else { return changed };
+        loop {
+            let pending = self.regions.iter().any(|r| matches!(r.state, RegionState::Loading));
+            let result = if wait && pending { worker.results.recv().ok() } else { worker.results.try_recv().ok() };
+            let Some((index, scene)) = result else { break };
+            let region = &mut self.regions[index];
+            if !matches!(region.state, RegionState::Loading) {
+                continue;
+            }
+            if region.desc.distance(focus) > unload {
+                // The camera moved on while it was being built.
+                region.state = RegionState::Unloaded;
+                continue;
+            }
+            changed |= finish(region, scene, meshes, physics);
+        }
+        changed
+    }
+
+    pub fn chunks(&self) -> impl Iterator<Item = &Chunk> {
+        self.loaded.values().chain(self.regions.iter().filter_map(|r| match &r.state {
+            RegionState::Loaded(chunk) => Some(chunk),
+            _ => None,
+        }))
+    }
+
+    pub fn chunks_mut(&mut self) -> impl Iterator<Item = &mut Chunk> {
+        self.loaded.values_mut().chain(self.regions.iter_mut().filter_map(|r| match &mut r.state {
+            RegionState::Loaded(chunk) => Some(chunk),
+            _ => None,
+        }))
+    }
+
+    pub fn stats(&self) -> StreamingStats {
+        StreamingStats {
+            loaded_cells: self.loaded.len(),
+            cells: self.scene.cells.len(),
+            loaded_regions: self.regions.iter().filter(|r| matches!(r.state, RegionState::Loaded(_))).count(),
+            regions: self.regions.len(),
+            objects: self.chunks().map(|c| c.objects.len()).sum(),
+        }
+    }
+}
+
+/// Adds a built region to the world, or records why it couldn't be built.
+fn finish(
+    region: &mut Region,
+    scene: anyhow::Result<Scene>,
+    meshes: &mut Vec<MeshData>,
+    physics: &mut Physics,
+) -> bool {
+    let scene = match scene {
+        Ok(scene) => scene,
+        Err(err) => {
+            log::error!("Region {}: {err:#}", region.desc.path.display());
+            region.state = RegionState::Failed;
+            return false;
+        }
+    };
+    if region.meshes.len() != scene.meshes.len() {
+        region.meshes = scene
+            .meshes
+            .into_iter()
+            .map(|mesh| {
+                meshes.push(mesh);
+                MeshId(meshes.len() - 1)
+            })
+            .collect();
+    }
+    let ids = &region.meshes;
+    let mut chunk = Chunk::new(&scene.objects, |i| ids[i], meshes, physics);
+    chunk.lights = scene.lights;
+    chunk.sounds = scene.sounds;
+    log::info!("Loaded region {} ({} objects)", region.desc.path.display(), chunk.objects.len());
+    region.state = RegionState::Loaded(chunk);
+    true
+}

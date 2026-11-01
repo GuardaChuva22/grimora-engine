@@ -194,8 +194,23 @@ impl<G: Game> App<G> {
             self.ctx.physics.collider_count(),
             started.elapsed().as_secs_f64() * 1000.0
         );
-        self.ctx.audio.set_scene_sounds(&scene.sounds);
         self.ctx.world = World::from_scene(scene);
+        if self.ctx.world.streaming_stats().is_some() {
+            let started = Instant::now();
+            self.ctx.world.load_around(self.ctx.camera.position, &mut self.ctx.physics);
+            if let Some(s) = self.ctx.world.streaming_stats() {
+                log::info!(
+                    "Streaming: {}/{} cells and {}/{} regions loaded ({} objects) in {:.0} ms",
+                    s.loaded_cells,
+                    s.cells,
+                    s.loaded_regions,
+                    s.regions,
+                    s.objects,
+                    started.elapsed().as_secs_f64() * 1000.0
+                );
+            }
+        }
+        self.ctx.audio.set_scene_sounds(&self.ctx.world.active_sounds());
         if let Some(renderer) = &mut self.renderer {
             renderer.clear_meshes();
         }
@@ -247,6 +262,9 @@ impl<G: Game> App<G> {
         self.ctx.world.sync_bodies(&self.ctx.physics);
         self.game.update(&mut self.ctx);
         self.ctx.world.update_animations(self.ctx.time.delta());
+        if self.ctx.world.update_streaming(self.ctx.camera.position, &mut self.ctx.physics) {
+            self.ctx.audio.set_scene_sounds(&self.ctx.world.active_sounds());
+        }
         self.ctx.audio.follow_camera(&self.ctx.camera);
         self.ctx.audio.update();
         self.apply_cursor_grab();
@@ -267,8 +285,7 @@ impl<G: Game> App<G> {
         }
         let mut joint_matrices = Vec::new();
         let draws: Vec<DrawItem> = world
-            .objects
-            .iter()
+            .all_objects()
             .filter(|o| o.visible)
             .filter_map(|o| {
                 let mesh = *self.handles.get(o.mesh.0)?;
@@ -282,7 +299,7 @@ impl<G: Game> App<G> {
         let frame = Frame {
             camera: &self.ctx.camera,
             environment: &world.environment,
-            lights: &world.lights,
+            lights: &world.active_lights(),
             draws: &draws,
             joint_matrices: &joint_matrices,
             time: self.ctx.time.elapsed(),

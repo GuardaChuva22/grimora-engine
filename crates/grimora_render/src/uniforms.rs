@@ -117,6 +117,18 @@ pub fn sun_view_proj(camera: &Camera, sun_dir: Vec3, distance: f32, map_size: u3
     (proj * view, texel)
 }
 
+/// The lights to upload: all of them, or when there are more than the shader
+/// takes, those whose reach comes closest to `eye`.
+fn nearest_lights(lights: &[PointLight], eye: Vec3) -> Vec<&PointLight> {
+    let mut chosen: Vec<&PointLight> = lights.iter().collect();
+    if chosen.len() > MAX_POINT_LIGHTS {
+        let gap = |l: &PointLight| l.position.distance(eye) - l.radius;
+        chosen.select_nth_unstable_by(MAX_POINT_LIGHTS - 1, |a, b| gap(a).total_cmp(&gap(b)));
+        chosen.truncate(MAX_POINT_LIGHTS);
+    }
+    chosen
+}
+
 fn lin(c: Vec3) -> Vec4 {
     srgb_to_linear_vec(c).extend(0.0)
 }
@@ -135,10 +147,7 @@ pub fn globals(
 
     let mut point_lights = [GpuPointLight::zeroed(); MAX_POINT_LIGHTS];
     let count = lights.len().min(MAX_POINT_LIGHTS);
-    if lights.len() > MAX_POINT_LIGHTS {
-        log::warn!("{} point lights in view, only the first {MAX_POINT_LIGHTS} are used", lights.len());
-    }
-    for (gpu, light) in point_lights.iter_mut().zip(lights) {
+    for (gpu, light) in point_lights.iter_mut().zip(nearest_lights(lights, camera.position)) {
         *gpu = GpuPointLight {
             position_radius: light.position.extend(light.radius.max(0.01)).into(),
             color_intensity: srgb_to_linear_vec(light.color).extend(light.intensity).into(),
@@ -181,3 +190,20 @@ pub fn post_params(env: &Environment, time: f32, bloom_mips: u32) -> PostParams 
 const _: () = assert!(size_of::<Globals>().is_multiple_of(16));
 const _: () = assert!(size_of::<PostParams>() == 32);
 const _: () = assert!(size_of::<InstanceRaw>() == 128);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keeps_the_lights_nearest_the_eye() {
+        let lights: Vec<PointLight> = (0..40)
+            .map(|i| PointLight { position: Vec3::new(i as f32 * 10.0, 0.0, 0.0), radius: 5.0, ..Default::default() })
+            .collect();
+        assert_eq!(nearest_lights(&lights[..10], Vec3::ZERO).len(), 10);
+        let chosen = nearest_lights(&lights, Vec3::new(400.0, 0.0, 0.0));
+        assert_eq!(chosen.len(), MAX_POINT_LIGHTS);
+        // Standing past the far end, the 8 lights nearest the origin are the ones left out.
+        assert!(chosen.iter().all(|l| l.position.x >= 80.0));
+    }
+}

@@ -223,6 +223,26 @@ Pinheiros, árvores mortas e rochas geradas já vêm com um LOD de mesmo contorn
 cargo run --release -p sandbox -- --scene assets/scenes/bench_forest.ron --no-vsync --frames 600 --screenshot screenshots/bench.png
 ```
 
+### Streaming: mundo em células e regiões
+
+Com `streaming` na cena, só o que está perto da câmera existe de fato (desenhado, iluminado e sólido):
+
+```ron
+streaming: (cell_size: 32.0, load_distance: 150.0),
+regions: [
+    (path: "regions/shrine.ron", center: (-55.0, 0.0, -60.0), radius: 10.0),
+],
+```
+
+- **Células:** os objetos do `scatter` são distribuídos numa grade de `cell_size` metros. As células a menos de `load_distance` da câmera entram no mundo (até 8 por quadro, as mais próximas primeiro) e saem um pouco mais longe do que entraram, para não piscarem na borda. Objetos de `objects` ficam sempre carregados.
+- **Regiões:** pedaços da cena em arquivos `.ron` próprios ([regions/shrine.ron](assets/scenes/regions/shrine.ron) no sandbox), com `objects`, `scatter`, luzes e sons. Quando a câmera chega a `load_distance` do círculo (`center`, `radius`), o arquivo é lido e montado numa thread separada e entra no mundo sem travar o quadro; ao se afastar, sai com colisores, luzes e sons. As malhas de uma região voltam a ser usadas se ela carregar de novo. Um arquivo com erro aparece uma vez no log e é ignorado até a cena recarregar.
+- **Terreno:** é cortado em blocos de 32×32 quadrados, cada um com seu colisor, para o culling descartar o que está fora da tela.
+- **Luzes:** o renderizador usa as 32 luzes pontuais mais próximas da câmera, então um mundo grande pode ter quantas quiser.
+- Deixe `load_distance` além do ponto em que a névoa apaga tudo (cerca de `4 / fog.density`), senão a borda do mundo carregado aparece em vistas aéreas.
+- No código: `World::all_objects()` percorre objetos fixos e carregados; `World::streaming_stats()` diz quanto está carregado; `World::load_around(ponto, physics)` carrega tudo de uma vez (útil em testes e teletransportes).
+
+Em [bench_forest.ron](assets/scenes/bench_forest.ron) (`load_distance: 450`, mesma máquina da tabela acima), o quadro na visão do jogador cai de 2,3 ms para 1,35 ms, com 188 de 315 células carregadas. A carga inicial das células leva ~2 ms.
+
 ## Visão
 
 O objetivo inicial é dar suporte a um jogo de mundo aberto com visual low poly dark fantasy estilizado, priorizando iluminação, atmosfera e identidade em vez de realismo.
@@ -250,9 +270,9 @@ Diretrizes:
 - [x] Áudio com `kira`: efeitos, loops de ambiente e emissores 3D na cena, passos do personagem
 
 - [x] Culling por frustum (câmera e sombra), descarte de objetos minúsculos e LOD por tamanho na tela
+- [x] Mundo em células e regiões com carregamento por streaming (regiões montadas em segundo plano)
 
 **Próximos passos**
-- [ ] Mundo em regiões com carregamento por streaming
 - [ ] Salvamento de jogo
 - [ ] Cascaded shadow maps para sombras nítidas a grandes distâncias
 - [ ] ECS (avaliar `hecs` ou `bevy_ecs` quando a quantidade de sistemas justificar)
