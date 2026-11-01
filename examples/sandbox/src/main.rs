@@ -30,6 +30,7 @@ struct Sandbox {
     lantern_light: usize,
     /// The "heart" crystal and its resting position.
     heart: Option<(usize, Vec3)>,
+    steps: Footsteps,
 }
 
 impl Sandbox {
@@ -42,6 +43,7 @@ impl Sandbox {
             lantern: 0,
             lantern_light: 0,
             heart: None,
+            steps: Footsteps::default(),
         }
     }
 
@@ -117,6 +119,9 @@ impl Game for Sandbox {
         }
 
         let Some(player) = self.player.as_ref() else { return };
+        if self.mode == Mode::Play {
+            self.steps.update(&mut ctx.audio, player, dt);
+        }
         let body = player.transform();
         ctx.world.objects[self.avatar].transform = body;
 
@@ -136,6 +141,44 @@ impl Game for Sandbox {
             let heart = &mut ctx.world.objects[index];
             heart.transform.position = rest + Vec3::Y * (0.25 + 0.15 * (t * 1.3).sin());
             heart.transform.rotation = Quat::from_rotation_y(t * 0.4);
+        }
+    }
+}
+
+/// Plays a footstep every stride while the wanderer is on the ground, and one on landing.
+#[derive(Default)]
+struct Footsteps {
+    walked: f32,
+    count: usize,
+    /// Seconds off the ground; only real jumps and falls thump on landing.
+    air_time: f32,
+}
+
+impl Footsteps {
+    const SOUNDS: [&str; 2] = [
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/sounds/step_1.wav"),
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/sounds/step_2.wav"),
+    ];
+
+    fn update(&mut self, audio: &mut Audio, player: &ThirdPersonController, dt: f32) {
+        let v = player.velocity();
+        let speed = Vec2::new(v.x, v.z).length();
+        let grounded = player.body.grounded;
+        let landed = grounded && self.air_time > 0.25;
+        self.air_time = if grounded { 0.0 } else { self.air_time + dt };
+        // Longer strides when running; the first step comes soon after starting.
+        let stride = 0.7 + speed * 0.06;
+        if !grounded || speed < 0.4 {
+            self.walked = stride * 0.6;
+        } else {
+            self.walked += speed * dt;
+        }
+        if landed || (grounded && self.walked >= stride) {
+            self.walked = (self.walked - stride).max(0.0);
+            self.count += 1;
+            let pitch = [1.0, 0.94, 1.05, 0.97][self.count % 4];
+            let volume = if landed { 0.7 } else { (0.3 + speed * 0.04).min(0.6) };
+            audio.play_pitched(Self::SOUNDS[self.count % 2], volume, pitch);
         }
     }
 }

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context as _, Result};
+use grimora_audio::Audio;
 use grimora_core::{Camera, Input, KeyCode, Time, Vec2};
 use grimora_physics::Physics;
 use grimora_render::{DrawItem, Frame, FrameStats, MeshHandle, Renderer, RendererSettings};
@@ -29,6 +30,9 @@ pub struct Context {
     /// Collision world built from the scene's colliders; stepped before `update`,
     /// after which dynamic bodies' poses are copied into `world`.
     pub physics: Physics,
+    /// Sound. Scene loops are replaced on every (re)load; loops the game starts
+    /// stay until it stops them. The listener follows `camera` after `update`.
+    pub audio: Audio,
     config: EngineConfig,
     exit: bool,
     cursor_grab: bool,
@@ -83,6 +87,7 @@ pub fn run(config: EngineConfig, game: impl Game) -> Result<()> {
             camera: Camera::default(),
             world: World::default(),
             physics: Physics::new(),
+            audio: start_audio(&config),
             config,
             exit: false,
             cursor_grab: false,
@@ -106,6 +111,18 @@ pub fn run(config: EngineConfig, game: impl Game) -> Result<()> {
     }
     app.report();
     Ok(())
+}
+
+/// Screenshot runs mix without a device, so automated captures stay silent.
+fn start_audio(config: &EngineConfig) -> Audio {
+    if !config.audio {
+        Audio::silent()
+    } else if config.screenshot.is_some() {
+        log::info!("Audio: headless (screenshot run)");
+        Audio::headless()
+    } else {
+        Audio::new()
+    }
 }
 
 fn init_logging() {
@@ -177,6 +194,7 @@ impl<G: Game> App<G> {
             self.ctx.physics.collider_count(),
             started.elapsed().as_secs_f64() * 1000.0
         );
+        self.ctx.audio.set_scene_sounds(&scene.sounds);
         self.ctx.world = World::from_scene(scene);
         if let Some(renderer) = &mut self.renderer {
             renderer.clear_meshes();
@@ -228,6 +246,8 @@ impl<G: Game> App<G> {
         self.ctx.physics.step(self.ctx.time.delta());
         self.ctx.world.sync_bodies(&self.ctx.physics);
         self.game.update(&mut self.ctx);
+        self.ctx.audio.follow_camera(&self.ctx.camera);
+        self.ctx.audio.update();
         self.apply_cursor_grab();
 
         let frame_number = self.ctx.time.frame();

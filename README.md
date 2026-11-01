@@ -50,6 +50,7 @@ cargo run --release -p sandbox -- --frames 600 --no-vsync
 | `--camera x,y,z` / `--look-at x,y,z` | Posiciona a câmera (Y absoluto; no sandbox, ativa o modo voo) |
 | `--size LxA` | Tamanho da janela |
 | `--no-vsync`, `--no-msaa`, `--no-hot-reload` | Benchmark e depuração |
+| `--no-audio` | Sem som (com `--screenshot` o áudio já roda mudo, sem abrir o dispositivo) |
 
 Ao fechar, o motor imprime uma linha de métricas fácil de ler por scripts:
 
@@ -65,11 +66,13 @@ crates/
   grimora_render/  renderizador wgpu: sombras, HDR + MSAA 4x, materiais PBR, névoa de altura, bloom, tonemapping
   grimora_scene/   formato de cena RON, importação glTF, terreno procedural, geradores low poly, espalhamento, colisores
   grimora_physics/ física com Rapier: mundo estático da cena, corpos dinâmicos, raycasts, corpo de personagem (cápsula)
+  grimora_audio/   som com kira: efeitos, loops de ambiente e emissores 3D que seguem a câmera
   grimora/         janela (winit), laço principal, trait Game, World, FlyCamera, ThirdPersonController, CLI, hot-reload
 examples/
   sandbox/         cena de teste do motor
 assets/scenes/     cenas .ron
 assets/models/     modelos glTF (com a licença de cada um)
+assets/sounds/     sons WAV/OGG (os do sandbox são gerados por tools/gen_sounds.py)
 ```
 
 Quadro a quadro: mapa de sombra do sol → passe HDR (céu + malhas iluminadas, MSAA) → cadeia de bloom → tonemap ACES, contraste, saturação, vinheta e granulado na tela. Objetos com a mesma malha são desenhados numa única chamada instanciada.
@@ -82,6 +85,7 @@ Quadro a quadro: mapa de sombra do sol → passe HDR (céu + malhas iluminadas, 
 | Física e colisão | `rapier3d` 0.36 |
 | Cenas | `ron` + `serde` |
 | Modelos | `gltf` 1.4 |
+| Áudio | `kira` 0.12 (WAV e OGG) |
 
 ### Criando um jogo
 
@@ -139,6 +143,36 @@ Exporte do Blender como glTF 2.0 (`.gltf` + `.bin` + texturas, ou `.glb`) para `
 - Ainda não suportados: animação, skinning, mistura de transparência ordenada e um segundo conjunto de UVs.
 - O estandarte do sandbox é gerado por [tools/gen_banner.py](tools/gen_banner.py) (Python puro), um exemplo de como criar um glTF por código.
 
+### Áudio
+
+Sons em loop fazem parte da cena. Sem `position`, o som é ambiente (igual em todo lugar); com `position`, ele vira um emissor 3D: volume cheio até `min_distance`, cai pela distância (-6 dB a cada vez que ela dobra) e some em `max_distance`, com o pan acompanhando a câmera. Com terreno, `y` é medido a partir do chão. Objetos também carregam um som, como carregam uma luz; aí `position` é um deslocamento a partir do objeto:
+
+```ron
+sounds: [
+    (path: "../sounds/wind.wav", volume: 0.35),
+    (path: "../sounds/hum.wav", position: (0.0, 1.6, 0.0), volume: 0.4, min_distance: 2.0, max_distance: 14.0),
+],
+objects: [
+    (mesh: Cone(segments: 5), position: (4.5, 1.7, 6.0), sound: (path: "../sounds/fire.wav", position: (0.0, 0.3, 0.0))),
+],
+```
+
+No jogo, use `ctx.audio` (volumes são ganhos lineares, 1 = como gravado):
+
+```rust
+ctx.audio.play("assets/sounds/step_1.wav", 0.5);                       // efeito único
+ctx.audio.play_at("assets/sounds/fire.wav", 1.0, Emitter::at(posicao)); // efeito único no mundo
+let vento = ctx.audio.play_loop("assets/sounds/wind.wav", 0.3);         // loop ambiente
+let tocha = ctx.audio.play_loop_at("assets/sounds/fire.wav", 0.8, Emitter::at(posicao));
+if let Some(id) = tocha { ctx.audio.set_position(id, nova_posicao); }   // e ctx.audio.stop(id)
+ctx.audio.set_volume(Category::Ambient, 0.5);                           // e set_master_volume
+```
+
+- Arquivos ficam em cache pelo caminho; se o arquivo mudar no disco, é lido de novo no próximo uso.
+- A cada (re)carga da cena, os loops da cena são trocados: os que não mudaram continuam tocando sem reiniciar, os removidos somem com fade. Loops iniciados pelo jogo ficam até `stop(id)`.
+- Sem dispositivo de áudio, o motor avisa no log e segue mudo. Capturas (`--screenshot`) carregam e mixam tudo, mas não tocam nada.
+- Os sons do sandbox (vento, fogo, zumbido do cristal e passos) são sintetizados por [tools/gen_sounds.py](tools/gen_sounds.py) (Python puro, sementes fixas): `python -I tools/gen_sounds.py`.
+
 ## Visão
 
 O objetivo inicial é dar suporte a um jogo de mundo aberto com visual low poly dark fantasy estilizado, priorizando iluminação, atmosfera e identidade em vez de realismo.
@@ -162,11 +196,11 @@ Diretrizes:
 - [x] Importação de modelos glTF com materiais PBR (texturas de cor, normal, metal/rugosidade e oclusão, com mipmaps)
 - [x] Transparência recortada (`alphaMode: Mask`) com alpha-to-coverage e sombras recortadas; mapas de emissão
 - [x] Corpos dinâmicos: objetos que caem, rolam e são empurrados pelo personagem
+- [x] Áudio com `kira`: efeitos, loops de ambiente e emissores 3D na cena, passos do personagem
 
 **Próximos passos**
 - [ ] Culling por frustum e LOD
 - [ ] Animação esquelética
-- [ ] Áudio (avaliar `kira`)
 - [ ] Mundo em regiões com carregamento por streaming
 - [ ] Salvamento de jogo
 - [ ] Cascaded shadow maps para sombras nítidas a grandes distâncias

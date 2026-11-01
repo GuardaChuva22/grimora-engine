@@ -118,16 +118,20 @@ SceneDesc(
         // ---- torches: a wooden post and a glowing flame with a flickering light
         (mesh: Cylinder(segments: 5), position: ( 4.5, 0.0, 6.0), scale: (0.14, 1.7, 0.14), color: (0.3, 0.22, 0.16)),
         (mesh: Cone(segments: 5), position: ( 4.5, 1.7, 6.0), scale: (0.3, 0.5, 0.3), color: (1.0, 0.55, 0.2), emissive: 6.0,
-         light: (position: (0.0, 0.4, 0.0), color: (1.0, 0.55, 0.25), intensity: 16.0, radius: 12.0, flicker: 1.0)),
+         light: (position: (0.0, 0.4, 0.0), color: (1.0, 0.55, 0.25), intensity: 16.0, radius: 12.0, flicker: 1.0),
+         sound: (path: "../sounds/fire.wav", position: (0.0, 0.3, 0.0), volume: 0.8, min_distance: 1.5, max_distance: 16.0)),
         (mesh: Cylinder(segments: 5), position: (-4.5, 0.0, 6.0), scale: (0.14, 1.7, 0.14), color: (0.3, 0.22, 0.16)),
         (mesh: Cone(segments: 5), position: (-4.5, 1.7, 6.0), scale: (0.3, 0.5, 0.3), color: (1.0, 0.55, 0.2), emissive: 6.0,
-         light: (position: (0.0, 0.4, 0.0), color: (1.0, 0.55, 0.25), intensity: 16.0, radius: 12.0, flicker: 1.0)),
+         light: (position: (0.0, 0.4, 0.0), color: (1.0, 0.55, 0.25), intensity: 16.0, radius: 12.0, flicker: 1.0),
+         sound: (path: "../sounds/fire.wav", position: (0.0, 0.3, 0.0), volume: 0.8, min_distance: 1.5, max_distance: 16.0)),
         (mesh: Cylinder(segments: 5), position: ( 4.5, 0.0, -6.0), scale: (0.14, 1.7, 0.14), color: (0.3, 0.22, 0.16)),
         (mesh: Cone(segments: 5), position: ( 4.5, 1.7, -6.0), scale: (0.3, 0.5, 0.3), color: (1.0, 0.55, 0.2), emissive: 6.0,
-         light: (position: (0.0, 0.4, 0.0), color: (1.0, 0.55, 0.25), intensity: 16.0, radius: 12.0, flicker: 1.0)),
+         light: (position: (0.0, 0.4, 0.0), color: (1.0, 0.55, 0.25), intensity: 16.0, radius: 12.0, flicker: 1.0),
+         sound: (path: "../sounds/fire.wav", position: (0.0, 0.3, 0.0), volume: 0.8, min_distance: 1.5, max_distance: 16.0)),
         (mesh: Cylinder(segments: 5), position: (-4.5, 0.0, -6.0), scale: (0.14, 1.7, 0.14), color: (0.3, 0.22, 0.16)),
         (mesh: Cone(segments: 5), position: (-4.5, 1.7, -6.0), scale: (0.3, 0.5, 0.3), color: (1.0, 0.55, 0.2), emissive: 6.0,
-         light: (position: (0.0, 0.4, 0.0), color: (1.0, 0.55, 0.25), intensity: 16.0, radius: 12.0, flicker: 1.0)),
+         light: (position: (0.0, 0.4, 0.0), color: (1.0, 0.55, 0.25), intensity: 16.0, radius: 12.0, flicker: 1.0),
+         sound: (path: "../sounds/fire.wav", position: (0.0, 0.3, 0.0), volume: 0.8, min_distance: 1.5, max_distance: 16.0)),
     ],
 
     // Random placement; the same seed always gives the same layout.
@@ -145,5 +149,17 @@ SceneDesc(
         (mesh: Crystal(), variants: 3, count: 7, radius: 30.0, min_radius: 14.0, scale: (0.3, 0.55),
          color: (0.4, 0.78, 1.0), emissive: 2.5, tilt: 15.0, seed: 21,
          light: (position: (0.0, 0.6, 0.0), color: (0.4, 0.75, 1.0), intensity: 3.0, radius: 6.0, flicker: 0.1)),
+    ],
+
+    // Looping sounds (WAV or OGG, paths relative to this file; made by tools/gen_sounds.py).
+    // Without `position` a sound is ambience, the same everywhere. With it, the sound
+    // pans with the camera and fades with distance: full volume up to `min_distance`,
+    // silent past `max_distance` (meters; y is measured from the ground). `volume` is a
+    // linear gain. Objects can carry one too, like the torches above (`sound: (...)`,
+    // position is then an offset from the object).
+    sounds: [
+        (path: "../sounds/wind.wav", volume: 0.35),
+        // the heart crystal hums softly
+        (path: "../sounds/hum.wav", position: (0.0, 1.6, 0.0), volume: 0.4, min_distance: 2.0, max_distance: 14.0),
     ],
 )
