@@ -1,12 +1,15 @@
 //! CPU mirrors of the shader uniform/instance layouts, and how to fill them.
 
 use bytemuck::{Pod, Zeroable};
+use grimora_core::environment::Shadows;
 use grimora_core::environment::srgb_to_linear_vec;
 use grimora_core::glam::camera::rh::{proj::directx, view};
 use grimora_core::{Camera, Environment, Mat4, PointLight, Transform, Vec3, Vec4};
 
 /// Must match `MAX_POINT_LIGHTS` in scene.wgsl.
 pub const MAX_POINT_LIGHTS: usize = 32;
+/// Must match `MAX_CASCADES` in scene.wgsl.
+pub const MAX_CASCADES: usize = 4;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
@@ -22,8 +25,13 @@ pub struct GpuPointLight {
 pub struct Globals {
     view_proj: [[f32; 4]; 4],
     inv_view_proj: [[f32; 4]; 4],
-    light_view_proj: [[f32; 4]; 4],
+    cascade_view_proj: [[[f32; 4]; 4]; MAX_CASCADES],
+    /// View depth where each cascade ends.
+    cascade_splits: [f32; 4],
+    /// World size of one shadow texel in each cascade.
+    cascade_texels: [f32; 4],
     camera_pos: [f32; 4],
+    camera_forward: [f32; 4],
     sun_dir: [f32; 4],
     sun_color: [f32; 4],
     ambient_sky: [f32; 4],
@@ -97,24 +105,71 @@ pub fn vertex_layout() -> wgpu::VertexBufferLayout<'static> {
     }
 }
 
-/// Light-space matrix of a shadow map that covers `distance` units around the
-/// camera. The center is snapped to whole shadow texels so shadow edges do not
-/// shimmer as the camera moves. Returns the matrix and one texel's world size.
-pub fn sun_view_proj(camera: &Camera, sun_dir: Vec3, distance: f32, map_size: u32) -> (Mat4, f32) {
+/// The sun's shadow maps for one frame, nearest the camera first.
+#[derive(Debug, Clone, Copy)]
+pub struct Cascades {
+    pub count: usize,
+    pub view_proj: [Mat4; MAX_CASCADES],
+    /// View depth where each cascade ends.
+    pub splits: [f32; MAX_CASCADES],
+    /// World size of one shadow texel in each cascade.
+    pub texels: [f32; MAX_CASCADES],
+}
+
+/// How far up-sun of a cascade's area shadow casters are still drawn, so tall
+/// things outside the view still shade it under a low sun.
+const CASTER_REACH: f32 = 100.0;
+
+/// Where `count` cascades end between `near` and `far`: mostly logarithmic
+/// (detail where it's needed, close to the camera), blended with even steps so
+/// the first cascade isn't uselessly tiny.
+fn cascade_splits(near: f32, far: f32, count: usize) -> [f32; MAX_CASCADES] {
+    const LOG_WEIGHT: f32 = 0.75;
+    let mut splits = [far; MAX_CASCADES];
+    for (i, split) in splits.iter_mut().enumerate().take(count) {
+        let t = (i + 1) as f32 / count as f32;
+        let log = near * (far / near).powf(t);
+        let even = near + (far - near) * t;
+        *split = LOG_WEIGHT * log + (1.0 - LOG_WEIGHT) * even;
+    }
+    splits
+}
+
+/// Fits one shadow map per cascade around the part of the view from the
+/// camera out to that cascade's split. Each fits a bounding sphere, whose
+/// size depends only on the field of view, and is snapped to whole texels, so
+/// shadow edges do not shimmer as the camera turns or moves.
+pub fn shadow_cascades(camera: &Camera, aspect: f32, sun_dir: Vec3, shadows: &Shadows, map_size: u32) -> Cascades {
     let dir = sun_dir.normalize_or(Vec3::Y);
     let up = if dir.y.abs() > 0.99 { Vec3::Z } else { Vec3::Y };
-    let texel = 2.0 * distance / map_size as f32;
-
     let rotation = view::look_to_mat4(Vec3::ZERO, -dir, up);
-    let mut center = rotation.transform_point3(camera.position + camera.forward() * distance * 0.5);
-    center.x = (center.x / texel).floor() * texel;
-    center.y = (center.y / texel).floor() * texel;
-    let center = rotation.inverse().transform_point3(center);
+    let count = (shadows.cascades as usize).clamp(1, MAX_CASCADES);
+    let near = camera.near.max(0.01);
+    let splits = cascade_splits(near, shadows.distance.max(near * 2.0), count);
+    // Squared tangent from the view axis to the slice's corners.
+    let k2 = (camera.fov_y * 0.5).tan().powi(2) * (1.0 + aspect * aspect);
 
-    let depth = distance * 4.0;
-    let view = view::look_to_mat4(center + dir * depth * 0.5, -dir, up);
-    let proj = directx::orthographic(-distance, distance, -distance, distance, 0.0, depth);
-    (proj * view, texel)
+    let mut cascades =
+        Cascades { count, view_proj: [Mat4::IDENTITY; MAX_CASCADES], splits, texels: [0.0; MAX_CASCADES] };
+    for (i, &end) in splits.iter().enumerate().take(count) {
+        let start = near;
+        // The sphere through the slice's near and far corners, centered on the view axis.
+        let along = ((start + end) * 0.5 * (1.0 + k2)).min(end);
+        let radius = ((end - along).powi(2) + end * end * k2).sqrt();
+        let texel = 2.0 * radius / map_size as f32;
+
+        let mut center = rotation.transform_point3(camera.position + camera.forward() * along);
+        center.x = (center.x / texel).floor() * texel;
+        center.y = (center.y / texel).floor() * texel;
+        let center = rotation.inverse().transform_point3(center);
+
+        let back = radius + CASTER_REACH;
+        let view = view::look_to_mat4(center + dir * back, -dir, up);
+        let proj = directx::orthographic(-radius, radius, -radius, radius, 0.0, back + radius);
+        cascades.view_proj[i] = proj * view;
+        cascades.texels[i] = texel;
+    }
+    cascades
 }
 
 /// The lights to upload: all of them, or when there are more than the shader
@@ -140,10 +195,10 @@ pub fn globals(
     lights: &[PointLight],
     time: f32,
     shadow_map_size: u32,
-) -> (Globals, Mat4) {
+) -> (Globals, Cascades) {
     let view_proj = camera.view_projection(aspect);
     let sun_dir = env.sun.direction.normalize_or(Vec3::Y);
-    let (light_view_proj, world_texel) = sun_view_proj(camera, sun_dir, env.shadows.distance.max(1.0), shadow_map_size);
+    let cascades = shadow_cascades(camera, aspect, sun_dir, &env.shadows, shadow_map_size);
 
     let mut point_lights = [GpuPointLight::zeroed(); MAX_POINT_LIGHTS];
     let count = lights.len().min(MAX_POINT_LIGHTS);
@@ -160,22 +215,25 @@ pub fn globals(
     let globals = Globals {
         view_proj: view_proj.to_cols_array_2d(),
         inv_view_proj: view_proj.inverse().to_cols_array_2d(),
-        light_view_proj: light_view_proj.to_cols_array_2d(),
+        cascade_view_proj: cascades.view_proj.map(|m| m.to_cols_array_2d()),
+        cascade_splits: cascades.splits,
+        cascade_texels: cascades.texels,
         camera_pos: camera.position.extend(time).into(),
+        camera_forward: camera.forward().extend(0.0).into(),
         sun_dir: sun_dir.extend(1.0 / shadow_map_size as f32).into(),
         sun_color: sun_color.extend(env.shadows.strength.clamp(0.0, 1.0)).into(),
         ambient_sky: (lin(env.ambient.sky) * ambient).into(),
         ambient_ground: (lin(env.ambient.ground) * ambient).into(),
         fog_color: srgb_to_linear_vec(env.fog.color).extend(env.fog.density.max(0.0)).into(),
-        fog_params: [env.fog.height_falloff.max(0.0), env.fog.base_height, env.fog.sun_scatter, world_texel],
+        fog_params: [env.fog.height_falloff.max(0.0), env.fog.base_height, env.fog.sun_scatter, 0.0],
         sky_zenith: lin(env.sky.zenith).into(),
         sky_horizon: lin(env.sky.horizon).into(),
         sky_ground: lin(env.sky.ground).into(),
         sun_disc: [env.sky.sun_size.to_radians().cos(), env.sky.sun_glow, 0.0, 0.0],
-        counts: [count as u32, u32::from(env.shadows.enabled), 0, 0],
+        counts: [count as u32, u32::from(env.shadows.enabled), cascades.count as u32, 0],
         point_lights,
     };
-    (globals, light_view_proj)
+    (globals, cascades)
 }
 
 pub fn post_params(env: &Environment, time: f32, bloom_mips: u32) -> PostParams {
@@ -194,6 +252,34 @@ const _: () = assert!(size_of::<InstanceRaw>() == 128);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cascades_grow_and_cover_the_view() {
+        let shadows = Shadows { distance: 120.0, cascades: 4, ..Default::default() };
+        let mut camera = Camera::new(Vec3::new(3.0, 2.0, 5.0), 0.7, -0.2);
+        let c = shadow_cascades(&camera, 16.0 / 9.0, Vec3::new(-0.6, 0.3, -0.5), &shadows, 2048);
+        assert_eq!(c.count, 4);
+        assert!(c.splits.windows(2).all(|w| w[0] < w[1]) && c.splits[3] == 120.0, "{:?}", c.splits);
+        assert!(c.splits[0] > 3.0 && c.splits[0] < 15.0, "{:?}", c.splits);
+        assert!(c.texels.windows(2).all(|w| w[0] < w[1]), "{:?}", c.texels);
+        // Every point of the view up to a cascade's split lands inside its map.
+        for i in 0..4 {
+            let frustum = grimora_core::Frustum::from_view_projection(c.view_proj[i]);
+            for (x, y) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0), (0.0, 0.0)] {
+                let corner = camera.position
+                    + (camera.forward()
+                        + camera.right() * x * 0.577 * 16.0 / 9.0
+                        + camera.forward().cross(camera.right()).normalize() * -y * 0.577)
+                        * c.splits[i];
+                let sphere = grimora_core::BoundingSphere { center: corner, radius: 0.0 };
+                assert!(frustum.intersects_sphere(sphere), "cascade {i} misses {corner}");
+            }
+        }
+        // Turning in place only moves the maps by whole texels: same size, no shimmer.
+        camera.yaw += 0.3;
+        let turned = shadow_cascades(&camera, 16.0 / 9.0, Vec3::new(-0.6, 0.3, -0.5), &shadows, 2048);
+        assert_eq!(c.texels, turned.texels);
+    }
 
     #[test]
     fn keeps_the_lights_nearest_the_eye() {

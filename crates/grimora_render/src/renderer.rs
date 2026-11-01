@@ -5,7 +5,7 @@ use wgpu::util::DeviceExt as _;
 
 use crate::bloom::Bloom;
 use crate::material::{GpuMaterial, MaterialCache};
-use crate::uniforms::{self, Globals, InstanceRaw, PostParams};
+use crate::uniforms::{self, Cascades, Globals, InstanceRaw, MAX_CASCADES, PostParams};
 use crate::{DEPTH_FORMAT, HDR_FORMAT};
 
 /// Startup options for the renderer.
@@ -68,7 +68,7 @@ pub struct FrameStats {
     pub triangles: u64,
     /// Objects skipped by the main pass: off screen or too small.
     pub culled: u32,
-    /// Objects drawn into the shadow map.
+    /// Objects drawn into the shadow maps, counted once per cascade.
     pub shadow_casters: u32,
 }
 
@@ -114,8 +114,14 @@ pub struct Renderer {
     /// Skinning matrices for this frame (storage buffer in the globals group).
     joint_buffer: wgpu::Buffer,
     joint_capacity: usize,
-    shadow_view: wgpu::TextureView,
+    /// One depth layer per shadow cascade, as render targets.
+    shadow_layers: Vec<wgpu::TextureView>,
+    /// All layers, for sampling in the main pass.
     shadow_group: wgpu::BindGroup,
+    /// Each cascade's light matrix, `cascade_stride` bytes apart (dynamic offset).
+    cascade_buffer: wgpu::Buffer,
+    cascade_group: wgpu::BindGroup,
+    cascade_stride: u64,
     post_buffer: wgpu::Buffer,
     post_layout: wgpu::BindGroupLayout,
     post_group: wgpu::BindGroup,
@@ -139,9 +145,9 @@ pub struct Renderer {
     instances: Vec<InstanceRaw>,
     /// `(mesh, draw)` pairs that survived culling, per pass; kept to reuse their memory.
     visible: Vec<(usize, usize)>,
-    casters: Vec<(usize, usize)>,
+    casters: [Vec<(usize, usize)>; MAX_CASCADES],
     batches: Vec<Batch>,
-    shadow_batches: Vec<Batch>,
+    shadow_batches: [Vec<Batch>; MAX_CASCADES],
     stats: FrameStats,
 }
 
@@ -223,9 +229,33 @@ impl Renderer {
         let shadow_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("shadow"),
             entries: &[
-                texture_entry(0, wgpu::TextureSampleType::Depth),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
                 sampler_entry(1, wgpu::SamplerBindingType::Comparison),
             ],
+        });
+        // Same group number as `shadow_layout`, which shadow passes don't use: the
+        // shadow map is their render target.
+        let cascade_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("shadow cascade"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: true,
+                    min_binding_size: wgpu::BufferSize::new(size_of::<Mat4>() as u64),
+                },
+                count: None,
+            }],
         });
         let post_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("post"),
@@ -258,18 +288,54 @@ impl Renderer {
         let globals_group = create_globals_group(&device, &globals_layout, &globals_buffer, &joint_buffer);
 
         let shadow_map_size = settings.shadow_map_size.clamp(256, 8192);
-        let shadow_view = device
-            .create_texture(&wgpu::TextureDescriptor {
-                label: Some("shadow map"),
-                size: wgpu::Extent3d { width: shadow_map_size, height: shadow_map_size, depth_or_array_layers: 1 },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: DEPTH_FORMAT,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
+        let shadow_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("shadow cascades"),
+            size: wgpu::Extent3d {
+                width: shadow_map_size,
+                height: shadow_map_size,
+                depth_or_array_layers: MAX_CASCADES as u32,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: DEPTH_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let shadow_view = shadow_texture.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        let shadow_layers = (0..MAX_CASCADES as u32)
+            .map(|layer| {
+                shadow_texture.create_view(&wgpu::TextureViewDescriptor {
+                    dimension: Some(wgpu::TextureViewDimension::D2),
+                    base_array_layer: layer,
+                    array_layer_count: Some(1),
+                    ..Default::default()
+                })
             })
-            .create_view(&Default::default());
+            .collect();
+        let cascade_stride =
+            (size_of::<Mat4>() as u64).next_multiple_of(u64::from(device.limits().min_uniform_buffer_offset_alignment));
+        let cascade_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("shadow cascades"),
+            size: cascade_stride * MAX_CASCADES as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let cascade_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("shadow cascade"),
+            layout: &cascade_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &cascade_buffer,
+                    offset: 0,
+                    size: wgpu::BufferSize::new(size_of::<Mat4>() as u64),
+                }),
+            }],
+        });
         let shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("shadow"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -322,13 +388,12 @@ impl Renderer {
         });
         let shadow_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("shadow"),
-            bind_group_layouts: &[Some(&globals_layout)],
+            bind_group_layouts: &[Some(&globals_layout), Some(&cascade_layout)],
             immediate_size: 0,
         });
-        // Group 1 (the shadow map itself) is left out: it is the render target here.
         let shadow_masked_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("shadow masked"),
-            bind_group_layouts: &[Some(&globals_layout), None, Some(&material_cache.layout)],
+            bind_group_layouts: &[Some(&globals_layout), Some(&cascade_layout), Some(&material_cache.layout)],
             immediate_size: 0,
         });
         let post_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -483,8 +548,11 @@ impl Renderer {
             globals_group,
             joint_buffer,
             joint_capacity,
-            shadow_view,
+            shadow_layers,
             shadow_group,
+            cascade_buffer,
+            cascade_group,
+            cascade_stride,
             post_buffer,
             post_layout,
             post_group,
@@ -503,9 +571,9 @@ impl Renderer {
             instance_capacity,
             instances: Vec::new(),
             visible: Vec::new(),
-            casters: Vec::new(),
+            casters: Default::default(),
             batches: Vec::new(),
-            shadow_batches: Vec::new(),
+            shadow_batches: Default::default(),
             stats: FrameStats::default(),
         })
     }
@@ -609,7 +677,7 @@ impl Renderer {
         };
         let surface_view = surface_texture.texture.create_view(&Default::default());
 
-        let (globals, light_view_proj) = uniforms::globals(
+        let (globals, cascades) = uniforms::globals(
             frame.camera,
             self.aspect(),
             frame.environment,
@@ -620,23 +688,29 @@ impl Renderer {
         self.queue.write_buffer(&self.globals_buffer, 0, bytemuck::bytes_of(&globals));
         let post = uniforms::post_params(frame.environment, frame.time, self.bloom.mip_count());
         self.queue.write_buffer(&self.post_buffer, 0, bytemuck::bytes_of(&post));
-        self.prepare_instances(frame, frame.environment.shadows.enabled.then_some(light_view_proj));
+        let cascades = frame.environment.shadows.enabled.then_some(cascades);
+        for (i, view_proj) in cascades.iter().flat_map(|c| &c.view_proj[..c.count]).enumerate() {
+            let offset = i as u64 * self.cascade_stride;
+            self.queue.write_buffer(&self.cascade_buffer, offset, bytemuck::bytes_of(&view_proj.to_cols_array_2d()));
+        }
+        self.prepare_instances(frame, cascades.as_ref());
         self.upload_joints(frame.joint_matrices);
 
         let mut encoder = self.device.create_command_encoder(&Default::default());
 
-        if frame.environment.shadows.enabled {
+        for i in 0..cascades.map_or(0, |c| c.count) {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("shadow"),
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.shadow_view,
+                    view: &self.shadow_layers[i],
                     depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
                     stencil_ops: None,
                 }),
                 ..Default::default()
             });
             pass.set_bind_group(0, &self.globals_group, &[]);
-            self.draw_batches(&mut pass, &self.shadow_batches, false);
+            pass.set_bind_group(1, &self.cascade_group, &[(i as u64 * self.cascade_stride) as u32]);
+            self.draw_batches(&mut pass, &self.shadow_batches[i], false);
         }
 
         {
@@ -756,17 +830,24 @@ impl Renderer {
         RgbaImage::from_raw(width, height, pixels).context("building capture image")
     }
 
-    /// Culls the draws against the camera and, with shadows on, against the
-    /// sun's volume (`light_view_proj`); drops objects too small to see; picks
-    /// each one's LOD; then groups them by mesh so each mesh is one instanced
-    /// draw call per pass.
-    fn prepare_instances(&mut self, frame: &Frame<'_>, light_view_proj: Option<Mat4>) {
+    /// Culls the draws against the camera and, with shadows on, against each
+    /// shadow cascade's volume; drops objects too small to see (or, for a
+    /// cascade, smaller than its texels); picks each one's LOD; then groups
+    /// them by mesh so each mesh is one instanced draw call per pass.
+    fn prepare_instances(&mut self, frame: &Frame<'_>, cascades: Option<&Cascades>) {
         let camera = frame.camera;
         let view = Frustum::from_view_projection(camera.view_projection(self.aspect()));
-        let light = light_view_proj.map(Frustum::from_view_projection);
+        let mut light = [None; MAX_CASCADES];
+        if let Some(c) = cascades {
+            for (slot, (view_proj, texel)) in light.iter_mut().zip(c.view_proj.iter().zip(c.texels)).take(c.count) {
+                *slot = Some((Frustum::from_view_projection(*view_proj), texel));
+            }
+        }
 
         self.visible.clear();
-        self.casters.clear();
+        for casters in &mut self.casters {
+            casters.clear();
+        }
         let mut culled = 0;
         for (i, draw) in frame.draws.iter().enumerate() {
             let Some(mesh) = self.meshes.get(draw.mesh.0 as usize) else { continue };
@@ -782,16 +863,23 @@ impl Renderer {
             } else {
                 culled += 1;
             }
-            if light.is_some_and(|light| light.intersects_sphere(sphere)) {
-                self.casters.push((level, i));
+            for (casters, (frustum, texel)) in self.casters.iter_mut().zip(light.iter().map_while(|l| l.as_ref())) {
+                let diameter = sphere.radius * 2.0;
+                if diameter >= *texel && frustum.intersects_sphere(sphere) {
+                    // The LOD that fits its size in this shadow map, as it would on screen.
+                    let map_size = diameter / (texel * self.shadow_map_size as f32);
+                    casters.push((pick_lod(&mesh.lods, map_size).unwrap_or(draw.mesh.0 as usize), i));
+                }
             }
         }
         self.visible.sort_unstable();
-        self.casters.sort_unstable();
 
         self.instances.clear();
         group(&self.visible, frame.draws, &mut self.instances, &mut self.batches);
-        group(&self.casters, frame.draws, &mut self.instances, &mut self.shadow_batches);
+        for (casters, batches) in self.casters.iter_mut().zip(&mut self.shadow_batches) {
+            casters.sort_unstable();
+            group(casters, frame.draws, &mut self.instances, batches);
+        }
 
         if self.instances.len() > self.instance_capacity {
             self.instance_capacity = self.instances.len().next_power_of_two();
@@ -808,7 +896,7 @@ impl Renderer {
                 .map(|b| u64::from(self.meshes[b.mesh].index_count / 3) * u64::from(b.instances.len() as u32))
                 .sum(),
             culled,
-            shadow_casters: self.casters.len() as u32,
+            shadow_casters: self.casters.iter().map(|c| c.len() as u32).sum(),
         };
     }
 

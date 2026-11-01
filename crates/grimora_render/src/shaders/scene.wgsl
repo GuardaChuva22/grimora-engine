@@ -2,6 +2,7 @@
 // Everything here outputs linear HDR color; tonemapping happens in post.wgsl.
 
 const MAX_POINT_LIGHTS: u32 = 32u;
+const MAX_CASCADES: u32 = 4u;
 
 struct PointLight {
     position_radius: vec4<f32>,   // xyz position, w radius
@@ -12,19 +13,22 @@ struct PointLight {
 struct Globals {
     view_proj: mat4x4<f32>,
     inv_view_proj: mat4x4<f32>,
-    light_view_proj: mat4x4<f32>,
+    cascade_view_proj: array<mat4x4<f32>, MAX_CASCADES>,
+    cascade_splits: vec4<f32>,    // view depth where each shadow cascade ends
+    cascade_texels: vec4<f32>,    // world size of a shadow texel in each cascade
     camera_pos: vec4<f32>,        // xyz, w = time in seconds
+    camera_forward: vec4<f32>,
     sun_dir: vec4<f32>,           // xyz towards the sun, w = shadow texel size in uv
     sun_color: vec4<f32>,         // rgb * intensity, w = shadow strength
     ambient_sky: vec4<f32>,
     ambient_ground: vec4<f32>,
     fog_color: vec4<f32>,         // w = density
-    fog_params: vec4<f32>,        // x height falloff, y base height, z sun scatter, w shadow texel in world units
+    fog_params: vec4<f32>,        // x height falloff, y base height, z sun scatter
     sky_zenith: vec4<f32>,
     sky_horizon: vec4<f32>,
     sky_ground: vec4<f32>,
     sun_disc: vec4<f32>,          // x cos(sun radius), y glow strength
-    counts: vec4<u32>,            // x point light count, y shadows enabled
+    counts: vec4<u32>,            // x point light count, y shadows enabled, z shadow cascades
     point_lights: array<PointLight, MAX_POINT_LIGHTS>,
 }
 
@@ -38,8 +42,10 @@ struct MaterialParams {
 @group(0) @binding(0) var<uniform> g: Globals;
 // Skinning matrices of every animated instance this frame (see InstanceIn.normal_0.w).
 @group(0) @binding(1) var<storage, read> joint_matrices: array<mat4x4<f32>>;
-@group(1) @binding(0) var shadow_map: texture_depth_2d;
+@group(1) @binding(0) var shadow_map: texture_depth_2d_array;
 @group(1) @binding(1) var shadow_sampler: sampler_comparison;
+// Shadow passes only: the cascade being drawn (bound with a dynamic offset).
+@group(1) @binding(2) var<uniform> cascade_view_proj: mat4x4<f32>;
 @group(2) @binding(0) var<uniform> material: MaterialParams;
 @group(2) @binding(1) var base_color_tex: texture_2d<f32>;
 @group(2) @binding(2) var normal_tex: texture_2d<f32>;
@@ -126,7 +132,7 @@ fn vs_main(v: VertexIn, i: InstanceIn) -> VsOut {
 
 @vertex
 fn vs_shadow(v: VertexIn, i: InstanceIn) -> @builtin(position) vec4<f32> {
-    return g.light_view_proj * instance_model(i) * skin_matrix(v, i) * vec4<f32>(v.position, 1.0);
+    return cascade_view_proj * instance_model(i) * skin_matrix(v, i) * vec4<f32>(v.position, 1.0);
 }
 
 struct ShadowMaskedOut {
@@ -137,7 +143,7 @@ struct ShadowMaskedOut {
 @vertex
 fn vs_shadow_masked(v: VertexIn, i: InstanceIn) -> ShadowMaskedOut {
     var out: ShadowMaskedOut;
-    out.clip = g.light_view_proj * instance_model(i) * skin_matrix(v, i) * vec4<f32>(v.position, 1.0);
+    out.clip = cascade_view_proj * instance_model(i) * skin_matrix(v, i) * vec4<f32>(v.position, 1.0);
     out.uv = v.uv;
     return out;
 }
@@ -192,13 +198,11 @@ fn coverage(alpha: f32, width: f32, pixel: vec2<f32>) -> f32 {
     return 1.0;
 }
 
-fn shadow_factor(world_pos: vec3<f32>, n: vec3<f32>) -> f32 {
-    if g.counts.y == 0u {
-        return 1.0;
-    }
+// Lit fraction (0..1) from cascade `i`, 1 outside its map.
+fn sample_cascade(i: u32, world_pos: vec3<f32>, n: vec3<f32>) -> f32 {
     // Normal offset pushes the lookup out of the surface to avoid shadow acne.
-    let offset_pos = world_pos + n * g.fog_params.w * 1.5;
-    let lp = g.light_view_proj * vec4<f32>(offset_pos, 1.0);
+    let offset_pos = world_pos + n * g.cascade_texels[i] * 1.5;
+    let lp = g.cascade_view_proj[i] * vec4<f32>(offset_pos, 1.0);
     let ndc = lp.xyz / lp.w;
     let uv = ndc.xy * vec2<f32>(0.5, -0.5) + 0.5;
     let texel = g.sun_dir.w;
@@ -207,16 +211,39 @@ fn shadow_factor(world_pos: vec3<f32>, n: vec3<f32>) -> f32 {
     for (var y = -1; y <= 1; y++) {
         for (var x = -1; x <= 1; x++) {
             let o = vec2<f32>(f32(x), f32(y)) * texel;
-            sum += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + o, ndc.z);
+            sum += textureSampleCompareLevel(shadow_map, shadow_sampler, uv + o, i, ndc.z);
         }
     }
-    var lit = sum / 9.0;
+    let inside = max(abs(ndc.x), abs(ndc.y)) <= 1.0 && ndc.z <= 1.0 && ndc.z >= 0.0;
+    return select(1.0, sum / 9.0, inside);
+}
 
-    // Fade out near the edge of the shadowed area instead of cutting off hard.
-    let edge = max(abs(ndc.x), abs(ndc.y));
-    lit = mix(lit, 1.0, smoothstep(0.85, 1.0, edge));
-    let inside = edge <= 1.0 && ndc.z <= 1.0 && ndc.z >= 0.0;
-    lit = select(1.0, lit, inside);
+fn shadow_factor(world_pos: vec3<f32>, n: vec3<f32>) -> f32 {
+    if g.counts.y == 0u {
+        return 1.0;
+    }
+    // The nearest cascade that reaches this far: each covers the view from the
+    // camera out to its split.
+    let count = g.counts.z;
+    let depth = dot(world_pos - g.camera_pos.xyz, g.camera_forward.xyz);
+    var i = 0u;
+    while i + 1u < count && depth > g.cascade_splits[i] {
+        i++;
+    }
+    var lit = sample_cascade(i, world_pos, n);
+
+    // Cross-fade into the next cascade over the end of this one so the seam
+    // doesn't show; the last one fades out to unshadowed.
+    let start = select(0.0, g.cascade_splits[max(i, 1u) - 1u], i > 0u);
+    let end = g.cascade_splits[i];
+    let fade = smoothstep(mix(start, end, 0.85), end, depth);
+    if fade > 0.0 {
+        var next = 1.0;
+        if i + 1u < count {
+            next = sample_cascade(i + 1u, world_pos, n);
+        }
+        lit = mix(lit, next, fade);
+    }
     return mix(1.0, lit, g.sun_color.w);
 }
 

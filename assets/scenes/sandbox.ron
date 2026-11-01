@@ -33,7 +33,9 @@ SceneDesc(
             sun_size: 1.6,
             sun_glow: 0.8,
         ),
-        shadows: (enabled: true, distance: 60.0, strength: 0.85),
+        // Shadows reach `distance` meters from the camera, split into `cascades`
+        // shadow maps (1-4): more cascades keep nearby shadows sharp.
+        shadows: (enabled: true, distance: 120.0, strength: 0.85, cascades: 4),
         post: (
             exposure: 1.25,
             contrast: 1.08,

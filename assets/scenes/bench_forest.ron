@@ -7,7 +7,7 @@ SceneDesc(
         ambient: (sky: (0.36, 0.38, 0.56), ground: (0.22, 0.17, 0.16), intensity: 0.6),
         fog: (color: (0.33, 0.31, 0.42), density: 0.009, height_falloff: 0.05, sun_scatter: 1.0),
         sky: (zenith: (0.09, 0.09, 0.2), horizon: (0.64, 0.43, 0.42), ground: (0.15, 0.13, 0.17)),
-        shadows: (enabled: true, distance: 60.0, strength: 0.85),
+        shadows: (enabled: true, distance: 120.0, strength: 0.85, cascades: 4),
         post: (exposure: 1.25, contrast: 1.08, saturation: 0.92, vignette: 0.38, grain: 0.035, bloom: 0.14),
     ),
     player: (position: (0.0, 0.0, 0.0), yaw: 0.0),

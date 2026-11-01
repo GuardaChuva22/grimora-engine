@@ -61,10 +61,13 @@ pub struct Sky {
 #[serde(default)]
 pub struct Shadows {
     pub enabled: bool,
-    /// Half-size, in world units, of the area around the camera that receives shadows.
+    /// How far from the camera, in world units, shadows reach.
     pub distance: f32,
     /// 0 = no darkening, 1 = full shadow.
     pub strength: f32,
+    /// Shadow maps covering ever larger slices of the view (1 to 4): the first
+    /// one, close to the camera, is the sharpest.
+    pub cascades: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -128,7 +131,7 @@ impl Default for Sky {
 
 impl Default for Shadows {
     fn default() -> Self {
-        Self { enabled: true, distance: 60.0, strength: 0.85 }
+        Self { enabled: true, distance: 120.0, strength: 0.85, cascades: 4 }
     }
 }
 

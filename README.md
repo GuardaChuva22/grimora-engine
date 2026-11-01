@@ -223,6 +223,22 @@ Pinheiros, árvores mortas e rochas geradas já vêm com um LOD de mesmo contorn
 cargo run --release -p sandbox -- --scene assets/scenes/bench_forest.ron --no-vsync --frames 600 --screenshot screenshots/bench.png
 ```
 
+### Sombras em cascata
+
+A sombra do sol usa até 4 mapas de 2048², cada um cobrindo da câmera até uma distância maior (por padrão ~8, 18, 38 e 120 m). Perto do personagem um texel de sombra mede pouco mais de 1 cm; longe, ~14 cm. Nas emendas, uma cascata se mistura com a próxima, e a última some aos poucos no fim de `distance`.
+
+```ron
+shadows: (enabled: true, distance: 120.0, strength: 0.85, cascades: 4),
+```
+
+- Cada mapa envolve uma esfera, cujo tamanho não muda quando a câmera gira, e se move em passos de um texel: as bordas das sombras não tremem.
+- Cada cascata desenha só os objetos dentro do seu volume (incluindo até 100 m na direção do sol, para árvores fora da tela que ainda fazem sombra), pula os menores que um texel e escolhe o LOD pelo tamanho do objeto no mapa.
+- `shadow_casters` nas métricas conta um objeto uma vez por cascata em que aparece.
+
+![Antes e depois das cascatas](docs/shadows.png)
+
+No `bench_forest.ron`, as 4 cascatas custam cerca de 0,5 ms a mais que o mapa único antigo, que chegava só a ~60 m e era bem mais borrado.
+
 ### Streaming: mundo em células e regiões
 
 Com `streaming` na cena, só o que está perto da câmera existe de fato (desenhado, iluminado e sólido):
@@ -241,7 +257,7 @@ regions: [
 - Deixe `load_distance` além do ponto em que a névoa apaga tudo (cerca de `4 / fog.density`), senão a borda do mundo carregado aparece em vistas aéreas.
 - No código: `World::all_objects()` percorre objetos fixos e carregados; `World::streaming_stats()` diz quanto está carregado; `World::load_around(ponto, physics)` carrega tudo de uma vez (útil em testes e teletransportes).
 
-Em [bench_forest.ron](assets/scenes/bench_forest.ron) (`load_distance: 450`, mesma máquina da tabela acima), o quadro na visão do jogador cai de 2,3 ms para 1,35 ms, com 188 de 315 células carregadas. A carga inicial das células leva ~2 ms.
+Em [bench_forest.ron](assets/scenes/bench_forest.ron) (`load_distance: 450`, mesma máquina da tabela acima), o quadro na visão do jogador cai de 2,3 ms para 1,35 ms (medido antes das sombras em cascata), com 188 de 315 células carregadas. A carga inicial das células leva ~2 ms.
 
 ## Visão
 
@@ -258,7 +274,7 @@ Diretrizes:
 ## Roteiro
 
 **Feito (v0.1)**
-- [x] Renderizador wgpu: HDR, MSAA 4x, sombra direcional com PCF e estabilização, névoa de altura com dispersão do sol, céu procedural, até 32 luzes pontuais com cintilação, materiais emissivos, bloom, tonemapping ACES e gradação de cor
+- [x] Renderizador wgpu: HDR, MSAA 4x, sombra direcional com PCF e estabilização (4 cascatas), névoa de altura com dispersão do sol, céu procedural, até 32 luzes pontuais com cintilação, materiais emissivos, bloom, tonemapping ACES e gradação de cor
 - [x] Cenas RON com hot-reload, terreno procedural e geradores de props low poly
 - [x] Capturas, posicionamento de câmera e métricas por linha de comando
 - [x] Colisão com Rapier: terreno, props e colisores declarados na cena
@@ -274,7 +290,6 @@ Diretrizes:
 
 **Próximos passos**
 - [ ] Salvamento de jogo
-- [ ] Cascaded shadow maps para sombras nítidas a grandes distâncias
 - [ ] ECS (avaliar `hecs` ou `bevy_ecs` quando a quantidade de sistemas justificar)
 
 ## Em aberto
