@@ -33,6 +33,7 @@ pub use runner::{Context, run};
 pub use third_person::ThirdPersonController;
 pub use world::{MeshId, Object, World};
 
+pub use grimora_audio as audio;
 pub use grimora_core as core;
 pub use grimora_physics as physics;
 pub use grimora_render as render;
@@ -53,6 +54,7 @@ pub trait Game: 'static {
 
 pub mod prelude {
     pub use crate::{Context, EngineConfig, FlyCamera, Game, MeshId, Object, ThirdPersonController, World};
+    pub use grimora_audio::{Audio, Category, Emitter, SoundId};
     pub use grimora_core::{
         Animator, Camera, Environment, EulerRot, Input, KeyCode, Mat4, MeshData, MouseButton, PointLight, Quat, Time,
         Transform, Vec2, Vec3, Vec4,

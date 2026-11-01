@@ -29,11 +29,20 @@ struct Sandbox {
     lantern_light: usize,
     /// The "heart" crystal and its resting position.
     heart: Option<(usize, Vec3)>,
+    steps: Footsteps,
 }
 
 impl Sandbox {
     fn new() -> Self {
-        Self { mode: Mode::Play, fly: FlyCamera::default(), player: None, avatar: 0, lantern_light: 0, heart: None }
+        Self {
+            mode: Mode::Play,
+            fly: FlyCamera::default(),
+            player: None,
+            avatar: 0,
+            lantern_light: 0,
+            heart: None,
+            steps: Footsteps::default(),
+        }
     }
 
     fn spawn_player(&mut self, ctx: &Context) {
@@ -118,6 +127,9 @@ impl Game for Sandbox {
         avatar.transform = player.transform();
         if let Some(animator) = avatar.animator.as_mut() {
             animate(animator, player);
+            if self.mode == Mode::Play {
+                self.steps.update(&mut ctx.audio, animator, player, dt);
+            }
         }
 
         // The light hangs from the lantern joint, so it swings with the walk.
@@ -153,6 +165,55 @@ fn animate(animator: &mut Animator, player: &ThirdPersonController) {
     };
     animator.play(clip, 0.2);
     animator.speed = rate;
+}
+
+/// Plays a footstep whenever the walk or run cycle plants a foot, and one on landing.
+#[derive(Default)]
+struct Footsteps {
+    /// Clip index and cycle position (0..1) last frame, while walking or running.
+    cycle: Option<(usize, f32)>,
+    count: usize,
+    /// Seconds off the ground; only real jumps and falls thump on landing.
+    air_time: f32,
+}
+
+impl Footsteps {
+    const SOUNDS: [&str; 2] = [
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/sounds/step_1.wav"),
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/sounds/step_2.wav"),
+    ];
+    /// Where tools/gen_wanderer.py's walk and run cycles plant the left and right foot.
+    const PLANTS: [f32; 2] = [0.25, 0.75];
+
+    fn update(&mut self, audio: &mut Audio, animator: &Animator, player: &ThirdPersonController, dt: f32) {
+        let grounded = player.body.grounded;
+        let landed = grounded && self.air_time > 0.25;
+        self.air_time = if grounded { 0.0 } else { self.air_time + dt };
+
+        let skeleton = animator.skeleton();
+        let cycle = animator.current().filter(|name| matches!(*name, "walk" | "run")).and_then(|name| {
+            let clip = skeleton.clip(name)?;
+            Some((clip, animator.time() / skeleton.clips[clip].duration))
+        });
+        // A foot planted if its mark lies between last frame's position and this one
+        // (same clip only: a crossfade restarts the cycle).
+        let planted = match (self.cycle, cycle) {
+            (Some((a, from)), Some((b, to))) if a == b => Self::PLANTS
+                .iter()
+                .any(|&mark| if to >= from { from < mark && mark <= to } else { from < mark || mark <= to }),
+            _ => false,
+        };
+        self.cycle = cycle;
+
+        if landed || (grounded && planted) {
+            self.count += 1;
+            let v = player.velocity();
+            let speed = Vec2::new(v.x, v.z).length();
+            let pitch = [1.0, 0.94, 1.05, 0.97][self.count % 4];
+            let volume = if landed { 0.7 } else { (0.3 + speed * 0.04).min(0.6) };
+            audio.play_pitched(Self::SOUNDS[self.count % 2], volume, pitch);
+        }
+    }
 }
 
 fn main() -> anyhow::Result<()> {

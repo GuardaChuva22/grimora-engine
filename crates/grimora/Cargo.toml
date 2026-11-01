@@ -9,6 +9,7 @@ grimora_core.workspace = true
 grimora_render.workspace = true
 grimora_scene.workspace = true
 grimora_physics.workspace = true
+grimora_audio.workspace = true
 winit.workspace = true
 glam.workspace = true
 pollster.workspace = true

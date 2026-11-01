@@ -24,6 +24,8 @@ pub struct EngineConfig {
     pub look_at: Option<Vec3>,
     /// Watch the scene file and reload it on change.
     pub hot_reload: bool,
+    /// Play sound (screenshot runs mix without opening a device).
+    pub audio: bool,
 }
 
 impl Default for EngineConfig {
@@ -40,6 +42,7 @@ impl Default for EngineConfig {
             camera_position: None,
             look_at: None,
             hot_reload: true,
+            audio: true,
         }
     }
 }
@@ -55,6 +58,7 @@ Options:
   --no-vsync                Uncapped frame rate (for benchmarking)
   --no-msaa                 Disable anti-aliasing
   --no-hot-reload           Do not watch the scene file
+  --no-audio                No sound (screenshots are always silent)
   --help                    Show this message
 
 Controls: hold right mouse + move to look, WASD move, E/Q up/down,
@@ -81,6 +85,7 @@ impl EngineConfig {
                 "--no-vsync" => self.vsync = false,
                 "--no-msaa" => self.msaa = 1,
                 "--no-hot-reload" => self.hot_reload = false,
+                "--no-audio" => self.audio = false,
                 "--help" | "-h" => {
                     println!("{USAGE}");
                     std::process::exit(0);

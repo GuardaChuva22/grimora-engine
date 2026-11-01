@@ -1,0 +1,14 @@
+[package]
+name = "grimora_audio"
+description = "Sound for Grimora: one-shots, ambient loops and 3D emitters, built on kira."
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+grimora_core.workspace = true
+grimora_scene.workspace = true
+kira.workspace = true
+log.workspace = true
+
+[lints]
+workspace = true

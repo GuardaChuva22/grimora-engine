@@ -8,6 +8,7 @@ mod collider;
 mod model;
 mod rng;
 mod shapes;
+mod sound;
 mod terrain;
 
 use std::collections::HashMap;
@@ -21,6 +22,7 @@ pub use collider::{BodyDesc, ColliderDesc, ColliderShape};
 pub use model::{DEFAULT_MAX_TEXTURE_SIZE, load_model};
 pub use rng::{Rng, fbm, value_noise};
 pub use shapes::{MeshDesc, blob, cube, tube};
+pub use sound::{SceneSound, SoundDesc};
 pub use terrain::{Terrain, TerrainDesc};
 
 /// The on-disk scene format.
@@ -35,6 +37,8 @@ pub struct SceneDesc {
     pub lights: Vec<PointLight>,
     /// Where the player character starts, if the game has one.
     pub player: Option<PlayerDesc>,
+    /// Looping ambience and positional emitters.
+    pub sounds: Vec<SoundDesc>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -97,6 +101,9 @@ pub struct ObjectDesc {
     pub body: BodyDesc,
     /// Animated models: the clip looped from the start (e.g. `"idle"`).
     pub animation: Option<String>,
+    /// Optional looping sound attached to the object; its position is an offset
+    /// rotated with the object, like `light`.
+    pub sound: Option<SoundDesc>,
 }
 
 impl Default for ObjectDesc {
@@ -114,6 +121,7 @@ impl Default for ObjectDesc {
             collider: ColliderDesc::Auto,
             body: BodyDesc::Static,
             animation: None,
+            sound: None,
         }
     }
 }
@@ -195,6 +203,8 @@ pub struct Scene {
     pub objects: Vec<SceneObject>,
     pub terrain: Option<Terrain>,
     pub player: Option<PlayerSpawn>,
+    /// Looping sounds, positions in world space and paths resolved from the scene directory.
+    pub sounds: Vec<SceneSound>,
 }
 
 impl SceneDesc {
@@ -247,6 +257,7 @@ impl Scene {
         let ground = |x: f32, z: f32| terrain.as_ref().map_or(0.0, |t| t.height_at(x, z));
 
         let mut lights = desc.lights.clone();
+        let mut sounds: Vec<SceneSound> = desc.sounds.iter().map(|s| s.resolve(dir, ground)).collect();
         for obj in &desc.objects {
             let mut position = obj.position;
             if obj.snap_to_ground {
@@ -267,6 +278,9 @@ impl Scene {
             });
             if let Some(light) = &obj.light {
                 lights.push(attached_light(light, &transform));
+            }
+            if let Some(sound) = &obj.sound {
+                sounds.push(sound.attached(dir, &transform));
             }
         }
 
@@ -326,6 +340,7 @@ impl Scene {
             objects: builder.objects,
             terrain,
             player,
+            sounds,
         }
     }
 
@@ -424,6 +439,31 @@ mod tests {
             BodyDesc::Dynamic { density: 1000.0, mass: None, friction: 0.6, restitution: 0.0, angular_damping: 0.5 }
         );
         assert!(matches!(bodies[2], BodyDesc::Dynamic { mass: Some(40.0), .. }));
+    }
+
+    #[test]
+    fn parses_sounds() {
+        let desc = SceneDesc::parse(
+            r#"(
+                terrain: (size: 64.0, resolution: 16),
+                sounds: [(path: "wind.wav"), (path: "hum.ogg", position: (2.0, 1.0, 3.0), max_distance: 9.0)],
+                objects: [(mesh: Cube, position: (4.0, 0.0, 0.0), rotation: (0.0, 90.0, 0.0),
+                           sound: (path: "fire.wav", position: (1.0, 0.5, 0.0)))],
+            )"#,
+        )
+        .unwrap();
+        assert_eq!(desc.sounds[0], SoundDesc { path: "wind.wav".into(), ..Default::default() });
+        let scene = Scene::build_in(&desc, Path::new("scenes"));
+        let [wind, hum, fire] = &scene.sounds[..] else { panic!("expected 3 sounds, got {:?}", scene.sounds) };
+        assert_eq!(wind.path, Path::new("scenes").join("wind.wav"));
+        assert_eq!((wind.position, wind.volume, wind.min_distance, wind.max_distance), (None, 1.0, 1.0, 25.0));
+        // Free-standing sounds sit relative to the ground; attached ones follow their object.
+        let hum_pos = hum.position.unwrap();
+        assert!((hum_pos.y - 1.0 - scene.ground_height(2.0, 3.0)).abs() < 1e-4);
+        assert_eq!(hum.max_distance, 9.0);
+        let cube = scene.objects.iter().find(|o| o.transform.position.x == 4.0).unwrap();
+        let expected = cube.transform.position + Vec3::new(0.0, 0.5, -1.0);
+        assert!(fire.position.unwrap().distance(expected) < 1e-4, "{:?} vs {expected}", fire.position);
     }
 
     #[test]
