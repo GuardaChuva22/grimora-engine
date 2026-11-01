@@ -318,7 +318,8 @@ Diretrizes:
 - [x] Salvamento de jogo: slots em RON com gravação atômica, estado do jogo + objetos e corpos da cena
 
 **Próximos passos**
-- [ ] ECS (avaliar `hecs` ou `bevy_ecs` quando a quantidade de sistemas justificar)
+- [x] Avaliação de ECS: `hecs` recomendado, `bevy_ecs` descartado ([docs/ecs.md](docs/ecs.md))
+- [ ] Migrar o `World` para `hecs`: entidades estáveis, `despawn`, componentes do jogo e luzes presas a objetos
 
 ## Em aberto
 
