@@ -64,7 +64,7 @@ crates/
   grimora_core/    tempo, entrada, Transform, Camera, MeshData, Material, Environment (luz/névoa/céu/pós)
   grimora_render/  renderizador wgpu: sombras, HDR + MSAA 4x, materiais PBR, névoa de altura, bloom, tonemapping
   grimora_scene/   formato de cena RON, importação glTF, terreno procedural, geradores low poly, espalhamento, colisores
-  grimora_physics/ colisão com Rapier: mundo estático da cena, raycasts, corpo de personagem (cápsula)
+  grimora_physics/ física com Rapier: mundo estático da cena, corpos dinâmicos, raycasts, corpo de personagem (cápsula)
   grimora/         janela (winit), laço principal, trait Game, World, FlyCamera, ThirdPersonController, CLI, hot-reload
 examples/
   sandbox/         cena de teste do motor
@@ -100,7 +100,7 @@ impl Game for MeuJogo {
     fn update(&mut self, ctx: &mut Context) {
         let Some(jogador) = &mut self.jogador else { return };
         // Anda, pula e colide com a cena; a câmera segue sem atravessar paredes.
-        jogador.update(&ctx.input, &ctx.physics, &mut ctx.camera, ctx.time.delta());
+        jogador.update(&ctx.input, &mut ctx.physics, &mut ctx.camera, ctx.time.delta());
         ctx.set_cursor_grab(true);
         if let Some(obj) = ctx.world.find_mut("altar") {
             obj.transform.rotation = Quat::from_rotation_y(ctx.time.elapsed());
@@ -116,7 +116,7 @@ fn main() -> anyhow::Result<()> {
 
 ### Formato de cena
 
-Tudo é dado: ambiente (sol, luz ambiente, névoa, céu, sombras, pós-processamento), câmera, ponto de início do jogador, terreno, objetos, espalhamento aleatório com semente e luzes pontuais. Todo objeto colide automaticamente com uma forma adequada (tronco para árvores, casco convexo para rochas e pilares, malha exata para o terreno); use `collider: None` para decoração ou escolha `Box(...)`, `Cylinder(...)`, `Ball(...)`, `Hull` ou `Mesh`. Cores em sRGB 0..1, ângulos em graus, distâncias em metros. Malhas disponíveis: `Cube`, `Plane`, `Cylinder`, `Cone`, `Sphere`, `Pine`, `DeadTree`, `Rock`, `Crystal`, `Pillar`, `Wanderer` e `Model(path: "...")`. Veja o exemplo comentado em [sandbox.ron](assets/scenes/sandbox.ron).
+Tudo é dado: ambiente (sol, luz ambiente, névoa, céu, sombras, pós-processamento), câmera, ponto de início do jogador, terreno, objetos, espalhamento aleatório com semente e luzes pontuais. Todo objeto colide automaticamente com uma forma adequada (tronco para árvores, casco convexo para rochas e pilares, malha exata para o terreno); use `collider: None` para decoração ou escolha `Box(...)`, `Cylinder(...)`, `Ball(...)`, `Hull` ou `Mesh`. Com `body: Dynamic(...)` o objeto entra na simulação: cai, rola e é empurrado pelo personagem; campos opcionais `density` (kg/m³, padrão 1000) ou `mass` (kg), `friction` (0.6), `restitution` (0) e `angular_damping` (0.5). Malhas exatas viram casco convexo em corpos dinâmicos. Cores em sRGB 0..1, ângulos em graus, distâncias em metros. Malhas disponíveis: `Cube`, `Plane`, `Cylinder`, `Cone`, `Sphere`, `Pine`, `DeadTree`, `Rock`, `Crystal`, `Pillar`, `Wanderer` e `Model(path: "...")`. Veja o exemplo comentado em [sandbox.ron](assets/scenes/sandbox.ron).
 
 ### Modelos glTF
 
@@ -155,10 +155,10 @@ Diretrizes:
 - [x] Colisão com Rapier: terreno, props e colisores declarados na cena
 - [x] Personagem em terceira pessoa: andar, correr, pular, degraus e rampas; câmera orbital que não atravessa paredes
 - [x] Importação de modelos glTF com materiais PBR (texturas de cor, normal, metal/rugosidade e oclusão, com mipmaps)
+- [x] Corpos dinâmicos: objetos que caem, rolam e são empurrados pelo personagem
 
 **Próximos passos**
 - [ ] Transparência recortada (`alphaMode: Mask`) para folhagem e tecidos
-- [ ] Corpos dinâmicos (objetos que caem, rolam e podem ser empurrados)
 - [ ] Culling por frustum e LOD
 - [ ] Animação esquelética
 - [ ] Áudio (avaliar `kira`)

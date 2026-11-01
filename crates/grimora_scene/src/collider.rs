@@ -1,4 +1,4 @@
-//! Collision shapes as plain data. `grimora_physics` turns them into Rapier colliders.
+//! Collision shapes and body types as plain data. `grimora_physics` turns them into Rapier colliders and bodies.
 
 use grimora_core::{MeshData, Transform, Vec3};
 use serde::{Deserialize, Serialize};
@@ -30,6 +30,49 @@ pub enum ColliderDesc {
         #[serde(default)]
         center: Vec3,
     },
+}
+
+/// How an object moves, as written in scene files.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub enum BodyDesc {
+    /// Never moves.
+    #[default]
+    Static,
+    /// Falls, tumbles and gets pushed around by the simulation and the player.
+    Dynamic {
+        /// kg/m³; mass is density × collider volume (water is 1000, wood ~500, stone ~2500).
+        #[serde(default = "default_density")]
+        density: f32,
+        /// Total mass in kg; overrides `density` when set.
+        #[serde(default)]
+        mass: Option<f32>,
+        #[serde(default = "default_friction")]
+        friction: f32,
+        /// Bounciness, 0..1.
+        #[serde(default)]
+        restitution: f32,
+        /// Slows spinning and rolling down; at 0 a ball rolls forever on flat ground.
+        #[serde(default = "default_angular_damping")]
+        angular_damping: f32,
+    },
+}
+
+fn default_density() -> f32 {
+    1000.0
+}
+
+fn default_friction() -> f32 {
+    0.6
+}
+
+fn default_angular_damping() -> f32 {
+    0.5
+}
+
+impl BodyDesc {
+    pub fn is_dynamic(&self) -> bool {
+        matches!(self, Self::Dynamic { .. })
+    }
 }
 
 /// A resolved collision shape in the object's local space (before its transform).
