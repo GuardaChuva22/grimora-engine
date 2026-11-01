@@ -7,9 +7,12 @@
 //!
 //! Passing `--camera` starts in fly mode, so screenshots can frame any view.
 //! F6 saves the game to the "quick" slot and F9 loads it; `--load <slot>`
-//! loads a slot at startup.
+//! loads a slot at startup. F3 shows frame time and world counters.
+
+mod hud;
 
 use grimora::prelude::*;
+use hud::Hud;
 use serde::{Deserialize, Serialize};
 
 const DEFAULT_SCENE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/scenes/sandbox.ron");
@@ -44,6 +47,7 @@ struct Sandbox {
     /// The "heart" crystal and its resting position.
     heart: Option<(Entity, Vec3)>,
     steps: Footsteps,
+    hud: Hud,
 }
 
 impl Sandbox {
@@ -56,6 +60,7 @@ impl Sandbox {
             lantern: Entity::DANGLING,
             heart: None,
             steps: Footsteps::default(),
+            hud: Hud::default(),
         }
     }
 
@@ -71,11 +76,17 @@ impl Sandbox {
         self.player = Some(ThirdPersonController::new(position + Vec3::Y * 0.1, yaw));
     }
 
-    fn save(&self, ctx: &Context, slot: &str) {
+    fn save(&mut self, ctx: &Context, slot: &str) {
         let Some(player) = &self.player else { return };
         match ctx.save_game(slot, &SandboxSave { player: player.state(), mode: self.mode }) {
-            Ok(path) => println!("[sandbox] saved to {}", path.display()),
-            Err(err) => eprintln!("[sandbox] save failed: {err:#}"),
+            Ok(path) => {
+                println!("[sandbox] saved to {}", path.display());
+                self.hud.notify(ctx, "Jogo salvo", true);
+            }
+            Err(err) => {
+                eprintln!("[sandbox] save failed: {err:#}");
+                self.hud.notify(ctx, "Não foi possível salvar", false);
+            }
         }
     }
 
@@ -87,8 +98,12 @@ impl Sandbox {
                 }
                 self.mode = save.mode;
                 println!("[sandbox] loaded {slot:?}");
+                self.hud.notify(ctx, "Jogo carregado", true);
             }
-            Err(err) => eprintln!("[sandbox] load failed: {err:#}"),
+            Err(err) => {
+                eprintln!("[sandbox] load failed: {err:#}");
+                self.hud.notify(ctx, "Nenhum jogo salvo para carregar", false);
+            }
         }
     }
 }
@@ -139,6 +154,7 @@ impl Game for Sandbox {
         if ctx.input.just_pressed(KeyCode::F9) {
             self.load(ctx, QUICK_SLOT);
         }
+        self.hud.draw(ctx, self.mode == Mode::Fly);
         let dt = ctx.time.delta();
         let automated = ctx.config().screenshot.is_some();
 

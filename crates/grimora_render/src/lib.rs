@@ -1,15 +1,19 @@
 //! Grimora's wgpu renderer.
 //!
 //! Frame pipeline: shadow map → HDR main pass (sky + lit meshes, MSAA) →
-//! bloom mip chain → tonemap/grade onto the window surface.
+//! bloom mip chain → tonemap/grade onto the window surface → HUD ([`Ui`]) on top.
 
 mod bloom;
+mod font;
 mod material;
 mod renderer;
+mod ui;
+mod ui_pass;
 mod uniforms;
 
 pub use image::RgbaImage;
 pub use renderer::{DrawItem, Frame, FrameStats, MeshHandle, Renderer, RendererSettings};
+pub use ui::{Anchor, Rect, TextStyle, Ui};
 pub use uniforms::MAX_POINT_LIGHTS;
 pub use wgpu;
 

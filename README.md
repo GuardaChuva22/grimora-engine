@@ -51,6 +51,7 @@ cargo run --release -p sandbox -- --frames 600 --no-vsync
 | `--size LxA` | Tamanho da janela |
 | `--no-vsync`, `--no-msaa`, `--no-hot-reload` | Benchmark e depuração |
 | `--no-audio` | Sem som (com `--screenshot` o áudio já roda mudo, sem abrir o dispositivo) |
+| `--no-ui` | Esconde o HUD do jogo (capturas só da cena) |
 | `--save-dir <pasta>` | Pasta dos saves (padrão: `%APPDATA%\<título do jogo>\saves`) |
 | `--load <slot>` | Pede ao jogo para carregar esse save ao abrir (o sandbox atende) |
 
@@ -67,7 +68,7 @@ Ao fechar, o motor imprime uma linha de métricas fácil de ler por scripts:
 ```
 crates/
   grimora_core/    tempo, entrada, Transform, Camera, MeshData, Material, Environment (luz/névoa/céu/pós)
-  grimora_render/  renderizador wgpu: sombras, HDR + MSAA 4x, materiais PBR, névoa de altura, bloom, tonemapping
+  grimora_render/  renderizador wgpu: sombras, HDR + MSAA 4x, materiais PBR, névoa de altura, bloom, tonemapping, HUD
   grimora_scene/   formato de cena RON, importação glTF, terreno procedural, geradores low poly, espalhamento, colisores
   grimora_physics/ física com Rapier: mundo estático da cena, corpos dinâmicos, raycasts, corpo de personagem (cápsula)
   grimora_audio/   som com kira: efeitos, loops de ambiente e emissores 3D que seguem a câmera
@@ -79,7 +80,7 @@ assets/models/     modelos glTF (com a licença de cada um)
 assets/sounds/     sons WAV/OGG (os do sandbox são gerados por tools/gen_sounds.py)
 ```
 
-Quadro a quadro: mapa de sombra do sol → passe HDR (céu + malhas iluminadas, MSAA) → cadeia de bloom → tonemap ACES, contraste, saturação, vinheta e granulado na tela. Objetos com a mesma malha são desenhados numa única chamada instanciada.
+Quadro a quadro: mapa de sombra do sol → passe HDR (céu + malhas iluminadas, MSAA) → cadeia de bloom → tonemap ACES, contraste, saturação, vinheta e granulado na tela → HUD por cima. Objetos com a mesma malha são desenhados numa única chamada instanciada.
 
 | Componente | Escolha |
 | --- | --- |
@@ -91,6 +92,7 @@ Quadro a quadro: mapa de sombra do sol → passe HDR (céu + malhas iluminadas, 
 | Cenas | `ron` + `serde` |
 | Modelos | `gltf` 1.4 |
 | Áudio | `kira` 0.12 (WAV e OGG) |
+| Fonte do HUD | glifos 8x8 do `font8x8` (domínio público) |
 
 ### Criando um jogo
 
@@ -214,6 +216,45 @@ if let Some(mao) = ctx.world.joint_transform(avatar, "hand.L")
 - Usa a primeira skin do arquivo. Malhas filhas de um osso (uma espada na mão, por exemplo) seguem o osso sem precisar de pesos. Interpolação step, linear e cubic spline (esta aproximada por linear).
 - Exporte do Blender com "Animation" ligado e cada ação como um clipe (NLA ou "Actions"); os nomes dos clipes são os das ações. Animação de nós que não são ossos é ignorada.
 - O andarilho do sandbox vem de [tools/gen_wanderer.py](tools/gen_wanderer.py): 17 ossos (o último segura a lanterna) e os clipes `idle`, `walk`, `run` e `jump`, todos no lugar (o movimento vem do controlador).
+
+### HUD e texto
+
+`ctx.ui` desenha texto, painéis e barras por cima da imagem final. É modo imediato: o motor limpa tudo antes de cada `update`, e o jogo desenha de novo a cada quadro, na ordem das chamadas.
+
+![HUD do sandbox: métricas no F3, aviso e dica de controles](docs/hud.png)
+
+```rust
+let ui = &mut ctx.ui;
+// Texto: o `anchor` diz qual ponto da caixa do texto fica na posição dada.
+let topo = ui.at(Anchor::Top, Vec2::new(0.0, 40.0));
+ui.text(topo, "O santuário desperta", &TextStyle::new(24.0).anchor(Anchor::Top).color(dourado));
+
+// Barra de vida no canto inferior esquerdo.
+let barra = Rect::anchored(ui.at(Anchor::BottomLeft, Vec2::new(16.0, -16.0)), Vec2::new(200.0, 12.0), Anchor::BottomLeft);
+ui.bar(barra, vida / vida_max, vermelho, Vec4::new(0.0, 0.0, 0.0, 0.6));
+
+// Painel com borda atrás de um texto que quebra linha.
+let estilo = TextStyle::new(16.0).wrap(320.0);
+let caixa = Rect::new(Vec2::new(20.0, 20.0), ui.measure(dialogo, &estilo)).expand(10.0);
+ui.panel(caixa, Vec4::new(0.05, 0.04, 0.06, 0.8), Vec4::new(0.55, 0.43, 0.28, 1.0));
+ui.text(Vec2::new(20.0, 20.0), dialogo, &estilo);
+```
+
+- **Coordenadas:** pixels lógicos a partir do canto superior esquerdo da janela (`ui.size()`). Em telas de alta densidade o motor multiplica por `ui.scale()`.
+- **Cores:** sRGB 0..1 com alfa.
+- **Fonte:** bitmap 8x8 embutida, proporcional, com ASCII e Latin-1, então acentos e `ç` funcionam. Caracteres fora disso aparecem como `?`.
+  - Tamanhos múltiplos de 8 ficam mais nítidos, mas qualquer tamanho fica com pixels limpos.
+  - Cada glifo tem contorno de um pixel (`TextStyle::outline`; alfa 0 desliga), que mantém o texto legível sobre a cena escura.
+- **Layout:**
+  - `\n` quebra linha.
+  - `TextStyle::wrap(largura)` quebra nos espaços.
+  - `ui.measure` dá o tamanho antes de desenhar.
+  - O mesmo `anchor` alinha as linhas à esquerda, ao centro ou à direita.
+- **Sandbox:**
+  - Dica de controles embaixo.
+  - Avisos de save/load no topo.
+  - Painel de métricas no F3 (quadro, desenhos, entidades, células).
+  - Código em [hud.rs](examples/sandbox/src/hud.rs).
 
 ### Áudio
 
@@ -357,6 +398,7 @@ Diretrizes:
 - [x] Culling por frustum (câmera e sombra), descarte de objetos minúsculos e LOD por tamanho na tela
 - [x] Mundo em células e regiões com carregamento por streaming (regiões montadas em segundo plano)
 - [x] Salvamento de jogo: slots em RON com gravação atômica, estado do jogo + objetos e corpos da cena
+- [x] HUD: texto com fonte bitmap embutida (com acentos), contorno, painéis e barras
 
 **Próximos passos**
 - [x] Avaliação de ECS: `hecs` recomendado, `bevy_ecs` descartado ([docs/ecs.md](docs/ecs.md))

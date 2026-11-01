@@ -5,6 +5,8 @@ use wgpu::util::DeviceExt as _;
 
 use crate::bloom::Bloom;
 use crate::material::{GpuMaterial, MaterialCache};
+use crate::ui::Ui;
+use crate::ui_pass::UiPass;
 use crate::uniforms::{self, Cascades, Globals, InstanceRaw, MAX_CASCADES, PostParams};
 use crate::{DEPTH_FORMAT, HDR_FORMAT};
 
@@ -55,6 +57,8 @@ pub struct Frame<'a> {
     pub joint_matrices: &'a [Mat4],
     /// Seconds since start; drives flicker and film grain.
     pub time: f32,
+    /// Drawn over the finished image.
+    pub ui: &'a Ui,
 }
 
 /// Counters from the last rendered frame.
@@ -134,6 +138,7 @@ pub struct Renderer {
     /// Shadow caster that cuts out alpha-tested texels.
     shadow_masked_pipeline: wgpu::RenderPipeline,
     tonemap_pipeline: wgpu::RenderPipeline,
+    ui: UiPass,
 
     targets: Targets,
     bloom: Bloom,
@@ -527,6 +532,8 @@ impl Renderer {
             cache: None,
         });
 
+        let ui = UiPass::new(&device, &queue, format, &linear_sampler);
+
         let targets = create_targets(&device, config.width, config.height, msaa);
         let bloom = Bloom::new(&device, &targets.hdr, config.width, config.height);
         let post_group = create_post_group(&device, &post_layout, &targets.hdr, &linear_sampler, &bloom, &post_buffer);
@@ -562,6 +569,7 @@ impl Renderer {
             shadow_pipeline,
             shadow_masked_pipeline,
             tonemap_pipeline,
+            ui,
             targets,
             bloom,
             meshes: Vec::new(),
@@ -695,6 +703,7 @@ impl Renderer {
         }
         self.prepare_instances(frame, cascades.as_ref());
         self.upload_joints(frame.joint_matrices);
+        self.ui.prepare(&self.device, &self.queue, frame.ui, self.config.width, self.config.height);
 
         let mut encoder = self.device.create_command_encoder(&Default::default());
 
@@ -766,9 +775,10 @@ impl Renderer {
         pass.set_pipeline(&self.tonemap_pipeline);
         pass.set_bind_group(0, &self.post_group, &[]);
         pass.draw(0..3, 0..1);
+        self.ui.draw(&mut pass);
     }
 
-    /// Re-runs the tonemap pass into an offscreen texture and reads it back.
+    /// Re-runs the tonemap pass (HUD included) into an offscreen texture and reads it back.
     fn capture(&self) -> Result<RgbaImage> {
         let (width, height) = self.size();
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {

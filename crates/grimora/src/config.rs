@@ -26,6 +26,8 @@ pub struct EngineConfig {
     pub hot_reload: bool,
     /// Play sound (screenshot runs mix without opening a device).
     pub audio: bool,
+    /// Draw [`crate::Context::ui`]; off for clean scene screenshots.
+    pub ui: bool,
     /// Folder for saved games; defaults to the user's data folder (see
     /// [`crate::SaveStore::for_game`], named after `title`).
     pub save_dir: Option<PathBuf>,
@@ -49,6 +51,7 @@ impl Default for EngineConfig {
             look_at: None,
             hot_reload: true,
             audio: true,
+            ui: true,
             save_dir: None,
             load: None,
         }
@@ -67,6 +70,7 @@ Options:
   --no-msaa                 Disable anti-aliasing
   --no-hot-reload           Do not watch the scene file
   --no-audio                No sound (screenshots are always silent)
+  --no-ui                   Hide the game's HUD
   --save-dir <folder>       Where saved games go
   --load <slot>             Ask the game to load this saved game at startup
   --help                    Show this message
@@ -95,6 +99,7 @@ impl EngineConfig {
                 "--no-vsync" => self.vsync = false,
                 "--no-msaa" => self.msaa = 1,
                 "--no-hot-reload" => self.hot_reload = false,
+                "--no-ui" => self.ui = false,
                 "--no-audio" => self.audio = false,
                 "--save-dir" => self.save_dir = Some(value()?.into()),
                 "--load" => self.load = Some(value()?),

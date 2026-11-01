@@ -69,5 +69,6 @@ pub mod prelude {
         Transform, Vec2, Vec3, Vec4,
     };
     pub use grimora_physics::{BodyHandle, CharacterBody, Physics, RayHit};
+    pub use grimora_render::{Anchor, Rect, TextStyle, Ui};
     pub use grimora_scene::{BodyDesc, MeshDesc};
 }

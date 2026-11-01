@@ -6,7 +6,7 @@ use anyhow::{Context as _, Result, bail};
 use grimora_audio::Audio;
 use grimora_core::{Animator, Camera, Input, KeyCode, Time, Transform, Vec2};
 use grimora_physics::Physics;
-use grimora_render::{DrawItem, Frame, FrameStats, MeshHandle, Renderer, RendererSettings};
+use grimora_render::{DrawItem, Frame, FrameStats, MeshHandle, Renderer, RendererSettings, Ui};
 use grimora_scene::Scene;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -38,6 +38,9 @@ pub struct Context {
     pub audio: Audio,
     /// Where [`Context::save_game`] and [`Context::load_game`] keep their slots.
     pub saves: SaveStore,
+    /// HUD and menus: text, panels and bars drawn over the frame. Cleared
+    /// before every `update`, so draw it each frame.
+    pub ui: Ui,
     config: EngineConfig,
     exit: bool,
     cursor_grab: bool,
@@ -126,6 +129,7 @@ pub fn run(config: EngineConfig, game: impl Game) -> Result<()> {
             physics: Physics::new(),
             audio: start_audio(&config),
             saves: config.save_dir.clone().map_or_else(|| SaveStore::for_game(&config.title), SaveStore::new),
+            ui: Ui::default(),
             config,
             exit: false,
             cursor_grab: false,
@@ -299,7 +303,19 @@ impl<G: Game> App<G> {
 
         self.ctx.physics.step(self.ctx.time.delta());
         self.ctx.world.sync_bodies(&self.ctx.physics);
+        let (size, scale) = match &self.window {
+            Some(window) => {
+                let scale = window.scale_factor() as f32;
+                let size = window.inner_size();
+                (Vec2::new(size.width as f32, size.height as f32) / scale, scale)
+            }
+            None => (self.ctx.ui.size(), self.ctx.ui.scale()),
+        };
+        self.ctx.ui.begin(size, scale);
         self.game.update(&mut self.ctx);
+        if !self.config.ui {
+            self.ctx.ui.begin(size, scale);
+        }
         self.ctx.world.update_animations(self.ctx.time.delta());
         if self.ctx.world.update_streaming(self.ctx.camera.position, &mut self.ctx.physics) {
             self.ctx.audio.set_scene_sounds(&self.ctx.world.active_sounds());
@@ -344,6 +360,7 @@ impl<G: Game> App<G> {
             draws: &draws,
             joint_matrices: &joint_matrices,
             time: self.ctx.time.elapsed(),
+            ui: &self.ctx.ui,
         };
         let capture = self.ctx.screenshot.take();
         if let Some(image) = renderer.render(&frame, capture.is_some())? {
