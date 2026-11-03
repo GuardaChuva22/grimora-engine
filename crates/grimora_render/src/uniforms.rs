@@ -42,6 +42,11 @@ pub struct Globals {
     sky_horizon: [f32; 4],
     sky_ground: [f32; 4],
     sun_disc: [f32; 4],
+    sky_sun: [f32; 4],
+    sky_moon: [f32; 4],
+    sky_glow: [f32; 4],
+    sky_params: [f32; 4],
+    wind: [f32; 4],
     counts: [u32; 4],
     point_lights: [GpuPointLight; MAX_POINT_LIGHTS],
 }
@@ -70,15 +75,17 @@ impl InstanceRaw {
         10 => Float32x4,
     ];
 
-    /// `joints` is the instance's first matrix in the joint buffer, for skinned meshes.
-    pub fn new(transform: &Transform, color: Vec3, emissive: f32, joints: Option<u32>) -> Self {
+    /// `joints` is the instance's first matrix in the joint buffer, for skinned
+    /// meshes; `wind` is the mesh's `MeshData::wind`.
+    pub fn new(transform: &Transform, color: Vec3, emissive: f32, joints: Option<u32>, wind: f32) -> Self {
         let n = transform.normal_matrix();
         // The normal matrix's spare w carries the joint offset (-1 = not skinned),
         // which saves a vertex attribute. f32 holds integers exactly up to 2^24.
         let joints = joints.map_or(-1.0, |j| j as f32);
         Self {
             model: transform.matrix().to_cols_array_2d(),
-            normal: [n.x_axis.extend(joints).into(), n.y_axis.extend(0.0).into(), n.z_axis.extend(0.0).into()],
+            // And the next one the mesh's wind, for the vertex shaders to move it.
+            normal: [n.x_axis.extend(joints).into(), n.y_axis.extend(wind).into(), n.z_axis.extend(0.0).into()],
             tint: color.extend(emissive).into(),
         }
     }
@@ -188,6 +195,18 @@ fn lin(c: Vec3) -> Vec4 {
     srgb_to_linear_vec(c).extend(0.0)
 }
 
+/// Which pictures the sky has to draw.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SkySprites {
+    pub sun: bool,
+    pub moon: bool,
+}
+
+/// How bright the pictures of the sun and moon are: the sun's reaches the bloom.
+const SUN_SPRITE_BRIGHTNESS: f32 = 1.8;
+const MOON_SPRITE_BRIGHTNESS: f32 = 1.5;
+
+#[allow(clippy::too_many_arguments)]
 pub fn globals(
     camera: &Camera,
     aspect: f32,
@@ -195,10 +214,13 @@ pub fn globals(
     lights: &[PointLight],
     time: f32,
     shadow_map_size: u32,
+    max_cascades: u32,
+    sprites: SkySprites,
 ) -> (Globals, Cascades) {
     let view_proj = camera.view_projection(aspect);
     let sun_dir = env.sun.direction.normalize_or(Vec3::Y);
-    let cascades = shadow_cascades(camera, aspect, sun_dir, &env.shadows, shadow_map_size);
+    let shadows = Shadows { cascades: env.shadows.cascades.min(max_cascades), ..env.shadows };
+    let cascades = shadow_cascades(camera, aspect, sun_dir, &shadows, shadow_map_size);
 
     let mut point_lights = [GpuPointLight::zeroed(); MAX_POINT_LIGHTS];
     let count = lights.len().min(MAX_POINT_LIGHTS);
@@ -211,6 +233,9 @@ pub fn globals(
     }
 
     let sun_color = srgb_to_linear_vec(env.sun.color) * env.sun.intensity;
+    let sun_at = env.sky.sun_position.unwrap_or(sun_dir).normalize_or(Vec3::Y);
+    let moon_at = env.sky.moon_position.unwrap_or(-sun_dir).normalize_or(Vec3::NEG_Y);
+    let wind_dir = env.wind.direction.normalize_or(grimora_core::Vec2::X);
     let ambient = env.ambient.intensity;
     let globals = Globals {
         view_proj: view_proj.to_cols_array_2d(),
@@ -230,6 +255,12 @@ pub fn globals(
         sky_horizon: lin(env.sky.horizon).into(),
         sky_ground: lin(env.sky.ground).into(),
         sun_disc: [env.sky.sun_size.to_radians().cos(), env.sky.sun_glow, 0.0, 0.0],
+        // The sprites' half width as a tangent; 0 means there is no picture to draw.
+        sky_sun: sun_at.extend(if sprites.sun { env.sky.sun_sprite_size.to_radians().tan() } else { 0.0 }).into(),
+        sky_moon: moon_at.extend(if sprites.moon { env.sky.moon_sprite_size.to_radians().tan() } else { 0.0 }).into(),
+        sky_glow: env.sky.light_position.unwrap_or(sun_dir).normalize_or(Vec3::Y).extend(0.0).into(),
+        sky_params: [env.sky.stars.clamp(0.0, 1.0), SUN_SPRITE_BRIGHTNESS, MOON_SPRITE_BRIGHTNESS, 0.0],
+        wind: [wind_dir.x, wind_dir.y, env.wind.strength.max(0.0), env.wind.speed],
         counts: [count as u32, u32::from(env.shadows.enabled), cascades.count as u32, 0],
         point_lights,
     };

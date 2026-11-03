@@ -200,3 +200,23 @@ fn slots_are_listed_newest_first_and_can_be_deleted() {
     assert!(format!("{err:#}").contains("broken.ron"), "{err:#}");
     std::fs::remove_dir_all(dir).ok();
 }
+
+#[test]
+fn a_saved_game_keeps_the_hour() {
+    let (mut physics, mut world) = sandbox();
+    let mut camera = Camera::default();
+    world.set_time_of_day(3.0);
+    let state = WorldState::capture(&world, &physics, &camera);
+    assert_eq!(state.time_of_day, Some(3.0));
+
+    world.set_time_of_day(15.0);
+    state.restore(&mut world, &mut physics, &mut camera);
+    assert_eq!(world.time_of_day(), Some(3.0));
+    assert!(world.is_night());
+
+    // A save from before the day cycle leaves the clock where it is.
+    let old = WorldState { time_of_day: None, ..state };
+    world.set_time_of_day(15.0);
+    old.restore(&mut world, &mut physics, &mut camera);
+    assert_eq!(world.time_of_day(), Some(15.0));
+}

@@ -1,8 +1,12 @@
 //! Lighting and atmosphere settings. All colors are sRGB in `0..=1`;
 //! the renderer converts them to linear space.
 
+use std::sync::Arc;
+
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
+
+use crate::mesh::TextureData;
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -13,6 +17,7 @@ pub struct Environment {
     pub sky: Sky,
     pub shadows: Shadows,
     pub post: Post,
+    pub wind: Wind,
 }
 
 /// Directional light. `direction` points from the ground towards the sun.
@@ -55,6 +60,43 @@ pub struct Sky {
     /// Angular radius of the sun disc, in degrees.
     pub sun_size: f32,
     pub sun_glow: f32,
+    /// Picture to draw instead of the plain sun disc, relative to the scene file.
+    pub sun_texture: Option<String>,
+    /// Picture of the moon, relative to the scene file.
+    pub moon_texture: Option<String>,
+    /// Half the width of the pictures, in degrees.
+    pub sun_sprite_size: f32,
+    pub moon_sprite_size: f32,
+    /// How visible the stars are, from 0 to 1.
+    pub stars: f32,
+    /// Where the sun appears, if not where the light comes from. The day cycle
+    /// sets these: the light stays above the horizon but the sun goes down.
+    #[serde(skip)]
+    pub sun_position: Option<Vec3>,
+    #[serde(skip)]
+    pub moon_position: Option<Vec3>,
+    /// Where the source of the light really is, which is where its glow goes.
+    #[serde(skip)]
+    pub light_position: Option<Vec3>,
+}
+
+/// The pictures named by [`Sky`], once loaded.
+#[derive(Debug, Clone, Default)]
+pub struct SkyTextures {
+    pub sun: Option<Arc<TextureData>>,
+    pub moon: Option<Arc<TextureData>>,
+}
+
+/// What moves vegetation (see `MeshData::wind`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Wind {
+    /// Which way it blows, on the ground: x and z.
+    pub direction: glam::Vec2,
+    /// 1 is a light breeze; 0 is still air.
+    pub strength: f32,
+    /// How fast the gusts come.
+    pub speed: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -91,6 +133,8 @@ pub struct PointLight {
     pub radius: f32,
     /// 0 = steady, 1 = strong fire-like flicker.
     pub flicker: f32,
+    /// Lit only at night, coming on at dusk. Needs a day cycle; without one it stays lit.
+    pub night_only: bool,
 }
 
 impl Default for Sun {
@@ -125,7 +169,21 @@ impl Default for Sky {
             ground: Vec3::new(0.3, 0.3, 0.32),
             sun_size: 1.2,
             sun_glow: 0.5,
+            sun_texture: None,
+            moon_texture: None,
+            sun_sprite_size: 7.0,
+            moon_sprite_size: 5.0,
+            stars: 0.0,
+            sun_position: None,
+            moon_position: None,
+            light_position: None,
         }
+    }
+}
+
+impl Default for Wind {
+    fn default() -> Self {
+        Self { direction: glam::Vec2::new(1.0, 0.3), strength: 1.0, speed: 1.6 }
     }
 }
 
@@ -143,7 +201,14 @@ impl Default for Post {
 
 impl Default for PointLight {
     fn default() -> Self {
-        Self { position: Vec3::ZERO, color: Vec3::new(1.0, 0.6, 0.3), intensity: 4.0, radius: 8.0, flicker: 0.0 }
+        Self {
+            position: Vec3::ZERO,
+            color: Vec3::new(1.0, 0.6, 0.3),
+            intensity: 4.0,
+            radius: 8.0,
+            flicker: 0.0,
+            night_only: false,
+        }
     }
 }
 

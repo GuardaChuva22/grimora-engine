@@ -189,6 +189,71 @@ def step(seed, weight):
     return normalize(out, 0.85)
 
 
+def swing():
+    """A heavy staff cutting the air: noise whose pitch and loudness rise and fall."""
+    rng = random.Random(21)
+    n = int(0.34 * RATE)
+    svf = Svf()
+    out = []
+    for i in range(n):
+        q = i / n
+        arc = math.sin(math.pi * q) ** 2
+        _, band, _ = svf.step(rng.uniform(-1, 1), 280 + 1100 * arc, 1.1)
+        out.append(band * arc)
+    return normalize(out, 0.7)
+
+
+def hit():
+    """Wood on something that gives: a falling thump under a short crack."""
+    rng = random.Random(22)
+    n = int(0.3 * RATE)
+    out = [0.0] * n
+    phase = 0.0
+    for i in range(n):
+        t = i / RATE
+        phase += TAU * (75 + 150 * math.exp(-t / 0.018)) / RATE
+        out[i] += math.sin(phase) * math.exp(-t / 0.06) * min(1.0, t / 0.001)
+    svf = Svf()
+    for i in range(int(0.05 * RATE)):
+        t = i / RATE
+        _, band, _ = svf.step(rng.uniform(-1, 1), 1900, 1.2)
+        out[i] += band * math.exp(-t / 0.011) * 1.6
+    fade = int(0.03 * RATE)
+    for i in range(fade):
+        out[n - 1 - i] *= i / fade
+    return normalize(out, 0.9)
+
+
+def clang():
+    """Steel on steel: a bright crack, then a few inharmonic partials ringing away."""
+    rng = random.Random(23)
+    n = int(0.8 * RATE)
+    out = [0.0] * n
+    # Hz, loudness, seconds to fall by e. Each is doubled a touch sharp, so that it shimmers.
+    for hz, loud, decay in [
+        (1870, 0.5, 0.17),
+        (2960, 1.0, 0.24),
+        (4310, 0.75, 0.14),
+        (5730, 0.5, 0.09),
+        (7480, 0.3, 0.06),
+        (9650, 0.18, 0.035),
+    ]:
+        for detune in (1.0, 1.0035):
+            phase = rng.uniform(0, TAU)
+            for i in range(n):
+                t = i / RATE
+                out[i] += math.sin(phase + TAU * hz * detune * t) * loud * math.exp(-t / decay) * min(1.0, t / 0.0004)
+    svf = Svf()
+    for i in range(int(0.03 * RATE)):
+        t = i / RATE
+        _, band, _ = svf.step(rng.uniform(-1, 1), 5200, 1.0)
+        out[i] += band * math.exp(-t / 0.005) * 5.0
+    fade = int(0.05 * RATE)
+    for i in range(fade):
+        out[n - 1 - i] *= i / fade
+    return normalize(out, 0.9)
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     write_wav("wind.wav", wind())
@@ -196,6 +261,9 @@ def main():
     write_wav("hum.wav", hum())
     write_wav("step_1.wav", step(seed=11, weight=1.0))
     write_wav("step_2.wav", step(seed=12, weight=0.9))
+    write_wav("swing.wav", swing())
+    write_wav("hit.wav", hit())
+    write_wav("clang.wav", clang())
 
 
 if __name__ == "__main__":

@@ -8,8 +8,9 @@ use std::path::Path;
 use grimora_core::{MeshData, Vec3};
 use serde::{Deserialize, Serialize};
 
-use crate::model::load_model;
+use crate::model::{add_events, load_model};
 use crate::rng::{Rng, value_noise};
+use crate::texture::{Picture, decal_mesh, sprite_mesh};
 
 /// Which mesh an object uses. Seeded shapes give a different variation per seed.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -74,6 +75,38 @@ pub enum MeshDesc {
         path: String,
         #[serde(default)]
         max_texture_size: u32,
+        /// Animation events to add, as (clip, seconds, name), for a file that has
+        /// none in its animations' `extras`.
+        #[serde(default)]
+        events: Vec<(String, f32, String)>,
+    },
+    /// Crossed upright pictures of a plant, with its base at the origin: grass, weeds...
+    /// With `planes: 1` and `sway: 0.0`, a still picture: a fence, a web, a banner.
+    /// It has no collider unless given one. Costs little, so scatter plenty of them.
+    Sprite {
+        /// Image file with a transparent background, relative to the scene file.
+        texture: String,
+        /// Height of the drawing itself in meters.
+        #[serde(default = "one")]
+        size: f32,
+        /// How many crossed pictures. 2 by default.
+        #[serde(default)]
+        planes: u32,
+        /// How far the wind moves its top, in meters; by default a fifth of `size`.
+        #[serde(default)]
+        sway: Option<f32>,
+        /// Casts a shadow, which costs far more than the plant itself.
+        #[serde(default)]
+        shadow: bool,
+    },
+    /// A picture lying flat on the ground, with no shadow or collider: blood, moss,
+    /// cracks. `size` is its width in meters. Keep it on level ground, or turn the
+    /// object to put it on a wall.
+    Decal {
+        /// Image file with a transparent background, relative to the scene file.
+        texture: String,
+        #[serde(default = "one")]
+        size: f32,
     },
 }
 
@@ -97,7 +130,9 @@ impl MeshDesc {
             | Self::Cylinder { .. }
             | Self::Cone { .. }
             | Self::Sphere { .. }
-            | Self::Model { .. } => {}
+            | Self::Model { .. }
+            | Self::Sprite { .. }
+            | Self::Decal { .. } => {}
         }
         d
     }
@@ -114,12 +149,32 @@ impl MeshDesc {
     pub fn build_in(&self, dir: &Path) -> MeshData {
         let white = Vec3::ONE;
         match *self {
-            Self::Model { ref path, max_texture_size } => {
-                load_model(&dir.join(path), max_texture_size).unwrap_or_else(|err| {
-                    log::error!("{err:#}");
-                    cube(Vec3::new(0.0, 0.5, 0.0), Vec3::ONE, Vec3::new(1.0, 0.0, 1.0))
-                })
+            Self::Model { ref path, max_texture_size, ref events } => {
+                match load_model(&dir.join(path), max_texture_size) {
+                    Ok(mut mesh) => {
+                        if !events.is_empty() {
+                            add_events(&mut mesh, events);
+                        }
+                        mesh
+                    }
+                    Err(err) => {
+                        log::error!("{err:#}");
+                        cube(Vec3::new(0.0, 0.5, 0.0), Vec3::ONE, Vec3::new(1.0, 0.0, 1.0))
+                    }
+                }
             }
+            Self::Sprite { ref texture, size, planes, sway, shadow } => {
+                let planes = if planes == 0 { 2 } else { planes };
+                let sway = sway.unwrap_or(size * 0.2);
+                match Picture::load(&dir.join(texture)) {
+                    Some(picture) => sprite_mesh(&picture, size, planes, sway, shadow),
+                    None => cube(Vec3::new(0.0, 0.5, 0.0), Vec3::ONE, Vec3::new(1.0, 0.0, 1.0)),
+                }
+            }
+            Self::Decal { ref texture, size } => match Picture::load(&dir.join(texture)) {
+                Some(picture) => decal_mesh(&picture, size),
+                None => cube(Vec3::new(0.0, 0.5, 0.0), Vec3::ONE, Vec3::new(1.0, 0.0, 1.0)),
+            },
             Self::Cube => cube(Vec3::new(0.0, 0.5, 0.0), Vec3::ONE, white),
             Self::Plane { size } => {
                 let h = size * 0.5;

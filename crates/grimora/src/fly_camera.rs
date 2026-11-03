@@ -1,7 +1,9 @@
 use grimora_core::{Camera, Input, KeyCode, MouseButton, Vec3};
 
 /// Free-flying debug camera: hold the right mouse button to look around,
-/// WASD to move, E/Q (or Space/Ctrl) for up/down, Shift to go fast.
+/// WASD to move, E/Q (or Space/Ctrl) for up/down, Shift to go fast. Its keys
+/// are fixed, since it is a tool for whoever is building the game, but the
+/// player's look sensitivity applies.
 #[derive(Debug, Clone)]
 pub struct FlyCamera {
     pub speed: f32,
@@ -21,7 +23,7 @@ impl FlyCamera {
     pub fn update(&mut self, camera: &mut Camera, input: &Input, dt: f32) -> bool {
         let looking = input.mouse_pressed(MouseButton::Right);
         if looking {
-            let d = input.mouse_delta() * self.sensitivity;
+            let d = input.look_delta(dt) * self.sensitivity;
             camera.yaw -= d.x;
             camera.pitch = (camera.pitch - d.y).clamp(-Camera::MAX_PITCH, Camera::MAX_PITCH);
         }

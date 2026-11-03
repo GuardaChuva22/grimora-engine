@@ -1,0 +1,17 @@
+// The pale smear behind a blade: a soft point that lives an instant, laid down
+// along the way as the emitter follows the blade. `sandbox` turns `emitting` on
+// while the blade hurts.
+[
+    (
+        // The tip moves over half a meter a frame: dense, or it reads as dots.
+        rate: 1100.0,
+        max_particles: 260,
+        lifetime: (0.07, 0.13),
+        speed: (0.0, 0.05),
+        sizes: [0.06, 0.0],
+        colors: [(0.92, 0.88, 0.78, 0.55), (0.55, 0.48, 0.4, 0.0)],
+        emissive: 1.4,
+        additive: 1.0,
+        shape: Soft,
+    ),
+]

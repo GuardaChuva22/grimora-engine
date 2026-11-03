@@ -1,0 +1,23 @@
+// The animator's stage: flat ground, even light, the character at the origin and a target
+// in front of it. Everything else in the tool is in examples/animator.
+SceneDesc(
+    environment: (
+        sun: (direction: (-0.5, 0.8, 0.4), color: (1.0, 0.96, 0.9), intensity: 2.2),
+        ambient: (sky: (0.55, 0.58, 0.68), ground: (0.3, 0.28, 0.27), intensity: 0.8),
+        fog: (color: (0.2, 0.21, 0.25), density: 0.0, height_falloff: 0.1, base_height: 0.0, sun_scatter: 0.0),
+        sky: (zenith: (0.16, 0.17, 0.21), horizon: (0.24, 0.25, 0.29), ground: (0.13, 0.13, 0.15), sun_size: 0.0, sun_glow: 0.0),
+        shadows: (enabled: true, distance: 30.0, strength: 0.7, cascades: 2),
+        post: (exposure: 1.1, contrast: 1.0, saturation: 1.0, vignette: 0.0, grain: 0.0, bloom: 0.05),
+    ),
+    camera: (position: (3.5, 1.5, 0.6), look_at: Some((0.0, 1.0, -0.3))),
+    objects: [
+        (name: "ground", mesh: Cube, position: (0.0, -0.1, 0.0), scale: (40.0, 0.1, 40.0), color: (0.3, 0.3, 0.32), collider: None),
+        // A line a meter long every meter, to judge how far a blow travels.
+        (mesh: Cube, position: (0.0, 0.0, -1.0), scale: (0.6, 0.004, 0.012), color: (0.55, 0.55, 0.58), collider: None),
+        (mesh: Cube, position: (0.0, 0.0, -2.0), scale: (0.6, 0.004, 0.012), color: (0.55, 0.55, 0.58), collider: None),
+        (mesh: Cube, position: (0.0, 0.0, -3.0), scale: (0.6, 0.004, 0.012), color: (0.55, 0.55, 0.58), collider: None),
+        (name: "avatar", mesh: Model(path: "../models/chartest/chartest.gltf"), collider: None),
+        (name: "target", mesh: Model(path: "../models/chartest/chartest.gltf"), position: (0.0, 0.0, -1.8),
+         rotation: (0.0, 180.0, 0.0), color: (0.75, 0.35, 0.32), animation: "sword_idle", collider: None),
+    ],
+)

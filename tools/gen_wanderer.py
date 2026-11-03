@@ -1,4 +1,9 @@
-"""Generates assets/models/wanderer: the hooded wanderer, rigged and animated.
+"""The clips of the wanderer, used by tools/blender/build_wanderer.py.
+
+The model itself now comes from that script. This file's own mesh and export are
+the old hooded figure, kept until new clips replace these.
+
+Generates assets/models/wanderer: the hooded wanderer, rigged and animated.
 
 A low-poly figure (1.85 m, facing -Z) with a 17-joint skeleton and four
 looping clips: idle, walk, run and jump. It carries a staff in the right hand
@@ -337,12 +342,145 @@ def jump(p):
     }
 
 
+def blended(q, keys):
+    """The pose at progress q (0..1) through (progress, pose) keys, eased between them."""
+    for (q0, a), (q1, b) in zip(keys, keys[1:]):
+        if q <= q1:
+            break
+    t = max(0.0, min(1.0, (q - q0) / (q1 - q0)))
+    t = t * t * (3 - 2 * t)
+    pose = {}
+    for joint in set(j for _, key in keys for j in key):
+        rest = (0, POS[joint][1], 0)
+        ja, jb = a.get(joint, {}), b.get(joint, {})
+        pose[joint] = {axis: ja.get(axis, 0) + (jb.get(axis, 0) - ja.get(axis, 0)) * t for axis in "xyz"}
+        if joint == "hips":
+            ta, tb = ja.get("t", rest), jb.get("t", rest)
+            pose[joint]["t"] = tuple(u + (v - u) * t for u, v in zip(ta, tb))
+    return pose
+
+
+STANCE = idle(0.0)
+
+
+def attack(p):
+    """Both hands' worth of staff: raised behind the head, brought down in front."""
+    raised = {
+        "hips": dict(y=-0.2, t=(0, 0.94, 0.04)),
+        "spine": dict(x=0.1),
+        "chest": dict(y=-0.4, x=0.06),
+        "head": dict(y=0.3, x=0.02),
+        "thigh.L": dict(x=0.16, z=-0.05),
+        "shin.L": dict(x=-0.2),
+        "thigh.R": dict(x=-0.12, z=0.05),
+        "shin.R": dict(x=-0.12),
+        "upper_arm.L": dict(x=0.1, z=-0.28),
+        "forearm.L": dict(x=0.3),
+        "lantern": dict(x=-0.35),
+        "upper_arm.R": dict(x=2.2, z=0.22),
+        "forearm.R": dict(x=0.5),
+        "hand.R": dict(x=-1.75),
+    }
+    struck = {
+        "hips": dict(y=0.26, t=(0, 0.87, -0.14)),
+        "spine": dict(x=-0.26),
+        "chest": dict(y=0.4, x=-0.12),
+        "head": dict(y=-0.3, x=0.26),
+        "thigh.L": dict(x=0.62, z=-0.05),
+        "shin.L": dict(x=-0.52),
+        "foot.L": dict(x=0.1),
+        "thigh.R": dict(x=-0.32, z=0.05),
+        "shin.R": dict(x=-0.28),
+        "foot.R": dict(x=0.3),
+        "upper_arm.L": dict(x=-0.3, z=-0.42),
+        "forearm.L": dict(x=0.25),
+        "lantern": dict(x=0.5),
+        "upper_arm.R": dict(x=1.08, z=0.05),
+        "forearm.R": dict(x=0.18),
+        "hand.R": dict(x=-2.72),
+    }
+    return blended(p / math.tau, [(0.0, STANCE), (0.34, raised), (0.47, struck), (0.62, struck), (1.0, STANCE)])
+
+
+def hurt(p):
+    """A flinch backwards that returns to the stance."""
+    hit = {
+        "hips": dict(t=(0, 0.91, 0.07), y=0.12),
+        "spine": dict(x=0.24),
+        "chest": dict(x=0.18, y=-0.18),
+        "head": dict(x=-0.28, y=0.2),
+        "thigh.L": dict(x=0.22, z=-0.06),
+        "shin.L": dict(x=-0.4),
+        "thigh.R": dict(x=-0.08, z=0.06),
+        "shin.R": dict(x=-0.28),
+        "upper_arm.L": dict(x=0.5, z=-0.42),
+        "forearm.L": dict(x=0.7),
+        "lantern": dict(x=-0.9),
+        "upper_arm.R": dict(x=0.32, z=0.34),
+        "forearm.R": dict(x=0.5),
+        "hand.R": dict(x=-0.8),
+    }
+    return blended(p / math.tau, [(0.0, STANCE), (0.22, hit), (1.0, STANCE)])
+
+
+def die(p):
+    """Staggers, falls on the back with the arms out, and stays there."""
+    stagger = {
+        "hips": dict(x=0.2, t=(0, 0.86, 0.1)),
+        "spine": dict(x=0.2),
+        "chest": dict(x=0.1, y=-0.2),
+        "head": dict(x=-0.3),
+        "thigh.L": dict(x=0.4),
+        "shin.L": dict(x=-0.75),
+        "thigh.R": dict(x=0.25),
+        "shin.R": dict(x=-0.55),
+        "upper_arm.L": dict(x=0.3, z=-0.5),
+        "forearm.L": dict(x=0.4),
+        "lantern": dict(x=-0.6),
+        "upper_arm.R": dict(x=0.2, z=0.5),
+        "forearm.R": dict(x=0.3),
+        "hand.R": dict(x=-0.6, z=-0.5),
+    }
+    down = {
+        "hips": dict(x=1.5, t=(0, 0.19, 0.72)),
+        "spine": dict(x=0.03),
+        "chest": dict(x=0.02, y=-0.1),
+        "head": dict(x=0.05, y=0.5),
+        "thigh.L": dict(x=0.32, z=-0.18),
+        "shin.L": dict(x=-0.42),
+        "foot.L": dict(x=-0.5),
+        "thigh.R": dict(x=0.06, z=0.14),
+        "shin.R": dict(x=-0.14),
+        "foot.R": dict(x=-0.6),
+        "upper_arm.L": dict(x=-0.05, z=-1.15),
+        "forearm.L": dict(x=0.12),
+        "lantern": dict(x=0.0, z=1.2),
+        "upper_arm.R": dict(x=-0.05, z=1.0),
+        "forearm.R": dict(x=0.1),
+        "hand.R": dict(x=0.0, z=-0.85),
+    }
+    bounce = dict(down)
+    bounce["hips"] = dict(x=1.42, t=(0, 0.24, 0.72))
+    return blended(p / math.tau, [(0.0, STANCE), (0.18, stagger), (0.62, down), (0.72, bounce), (0.86, down), (1.0, down)])
+
+
 CLIPS = [
     ("idle", 3.2, idle),
     ("walk", 0.8, walk),
     ("run", 0.58, lambda p: walk(p, run=True)),
     ("jump", 0.8, jump),
+    ("attack", 0.8, attack),
+    ("hurt", 0.45, hurt),
+    ("die", 1.3, die),
 ]
+# When things happen in each clip, as a fraction of its length. The feet are
+# planted at 25% and 75% of walk and run.
+EVENTS = {
+    "walk": [(0.25, "step"), (0.75, "step")],
+    "run": [(0.25, "step"), (0.75, "step")],
+    "attack": [(0.34, "swing"), (0.47, "hit")],
+    "die": [(0.62, "fall")],
+}
 KEYS = 24
 
 
@@ -423,7 +561,10 @@ def main():
                 samplers.append({"input": time_acc, "output": add_accessor("f", 5126, translations, "VEC3")})
                 channels.append(
                     {"sampler": len(samplers) - 1, "target": {"node": joint_node[joint], "path": "translation"}})
-        animations.append({"name": name, "samplers": samplers, "channels": channels})
+        animation = {"name": name, "samplers": samplers, "channels": channels}
+        if name in EVENTS:
+            animation["extras"] = {"events": [{"time": duration * at, "name": n} for at, n in EVENTS[name]]}
+        animations.append(animation)
 
     with open(os.path.join(OUT, "wanderer.bin"), "wb") as f:
         f.write(blob)
@@ -458,4 +599,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit("run tools/blender/build_wanderer.py instead: this would overwrite the model")

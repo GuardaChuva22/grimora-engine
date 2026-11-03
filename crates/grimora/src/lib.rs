@@ -21,23 +21,31 @@
 //! }
 //! ```
 
+mod combat;
 mod config;
 mod fly_camera;
+mod gamepad;
 mod interaction;
+mod lock_on;
+mod npc;
+mod options;
 mod runner;
 pub mod save;
 mod streaming;
 mod third_person;
 mod world;
 
+pub use combat::{CombatEvent, Fighter, Guard, Health, Stamina};
 pub use config::{EngineConfig, USAGE};
 pub use fly_camera::FlyCamera;
 pub use interaction::{Interaction, TriggerEvent, TriggerState};
+pub use npc::{Agent, AgentStatus, Brain, NpcEvent};
+pub use options::{Options, RESOLUTIONS, ShadowQuality, UI_SCALES};
 pub use runner::{Context, run};
 pub use save::SaveStore;
 pub use streaming::StreamingStats;
 pub use third_person::{CharacterState, ThirdPersonController};
-pub use world::{Body, Collider, Entity, Light, MeshId, Name, Renderable, SceneIndex, World};
+pub use world::{Attached, Body, Collider, Entity, Light, MeshId, Name, Renderable, SceneIndex, World};
 
 pub use grimora_audio as audio;
 pub use grimora_core as core;
@@ -62,15 +70,20 @@ pub trait Game: 'static {
 
 pub mod prelude {
     pub use crate::{
-        Body, CharacterState, Collider, Context, EngineConfig, Entity, FlyCamera, Game, Interaction, Light, MeshId,
-        Name, Renderable, SaveStore, ThirdPersonController, TriggerEvent, World,
+        Agent, AgentStatus, Body, Brain, CharacterState, Collider, CombatEvent, Context, EngineConfig, Entity, Fighter,
+        FlyCamera, Game, Guard, Health, Interaction, Light, MeshId, Name, NpcEvent, Options, Renderable, SaveStore,
+        ShadowQuality, Stamina, ThirdPersonController, TriggerEvent, World,
     };
     pub use grimora_audio::{Audio, Category, Emitter, SoundId};
     pub use grimora_core::{
-        Animator, Camera, Environment, EulerRot, Input, KeyCode, Mat4, MeshData, MouseButton, ParticleDesc,
-        ParticleEffect, ParticleShape, ParticleSystem, PointLight, Quat, Time, Transform, Vec2, Vec3, Vec4,
+        ActionMap, Animator, Binding, Camera, Environment, EulerRot, Input, KeyCode, Mat4, MeshData, MouseButton,
+        PadAxis, PadButton, ParticleDesc, ParticleEffect, ParticleShape, ParticleSystem, PointLight, Quat, Time,
+        Transform, Vec2, Vec3, Vec4, actions,
     };
-    pub use grimora_physics::{BodyHandle, CharacterBody, Physics, RayHit};
-    pub use grimora_render::{Anchor, Rect, TextStyle, Ui};
-    pub use grimora_scene::{BodyDesc, Interactable, MeshDesc, Trigger, TriggerShape, load_effect};
+    pub use grimora_physics::{BodyHandle, CharacterBody, NavPath, NavShape, Physics, RayHit};
+    pub use grimora_render::{Anchor, Rect, TextStyle, Theme, Ui, UiInput};
+    pub use grimora_scene::{
+        Behavior, Blade, BodyDesc, CombatDesc, Interactable, MeshDesc, Notice, Reaction, Trigger, TriggerShape, Weapon,
+        load_effect,
+    };
 }

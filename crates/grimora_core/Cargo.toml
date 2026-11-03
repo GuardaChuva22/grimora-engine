@@ -10,5 +10,8 @@ winit.workspace = true
 serde.workspace = true
 bytemuck.workspace = true
 
+[dev-dependencies]
+ron.workspace = true
+
 [lints]
 workspace = true

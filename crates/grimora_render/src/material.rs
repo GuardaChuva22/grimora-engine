@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
-use grimora_core::{AlphaMode, Material, TextureData};
+use grimora_core::{AlphaMode, Material, Shading, TextureData};
 use wgpu::util::DeviceExt as _;
 
 use crate::renderer::{sampler_entry, texture_entry};
@@ -18,21 +18,26 @@ struct MaterialParams {
     params: [f32; 4],
     /// rgb = emitted light, w = alpha cutoff
     emissive: [f32; 4],
-    /// x = has normal map, y = alpha mode (0 opaque, 1 mask, 2 blend), z = alpha to coverage
+    /// x = has normal map, y = alpha mode (0 opaque, 1 mask, 2 blend), z = alpha output
+    /// (to coverage or to blending), w = foliage
     flags: [u32; 4],
 }
 
 pub struct GpuMaterial {
     pub bind_group: wgpu::BindGroup,
     pub double_sided: bool,
-    /// Uses alpha (mask or blend): drawn with alpha-to-coverage and cut out of shadows.
+    /// Uses alpha (mask or blend): cut out of shadows, and masks get alpha-to-coverage.
     pub alpha: bool,
+    /// Really blended: drawn in the transparent part of the main pass.
+    pub blend: bool,
+    pub water: bool,
 }
 
 /// Uploads materials, sharing textures that several materials reference.
 pub struct MaterialCache {
     pub layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
+    pixel_sampler: wgpu::Sampler,
     white_srgb: wgpu::TextureView,
     white_linear: wgpu::TextureView,
     flat_normal: wgpu::TextureView,
@@ -77,12 +82,23 @@ impl MaterialCache {
             anisotropy_clamp: 8,
             ..Default::default()
         });
+        // Sharp texels up close; far away, mipmaps still keep them from shimmering.
+        let pixel_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("material pixelated"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            ..Default::default()
+        });
         let pixel = |name: &str, rgba: [u8; 4], srgb| {
             upload(device, queue, &TextureData { name: name.into(), width: 1, height: 1, rgba: rgba.into() }, srgb)
         };
         Self {
             layout,
             sampler,
+            pixel_sampler,
             white_srgb: pixel("white srgb", [255; 4], true),
             white_linear: pixel("white linear", [255; 4], false),
             flat_normal: pixel("flat normal", [128, 128, 255, 255], false),
@@ -106,7 +122,12 @@ impl MaterialCache {
                 if material.occlusion_texture.is_some() { material.occlusion_strength } else { 0.0 },
             ],
             emissive: material.emissive.max(glam::Vec3::ZERO).extend(cutoff).to_array(),
-            flags: [u32::from(material.normal_texture.is_some()), alpha_mode, u32::from(self.alpha_to_coverage), 0],
+            flags: [
+                u32::from(material.normal_texture.is_some()),
+                alpha_mode,
+                u32::from(self.alpha_to_coverage || alpha_mode == 2),
+                u32::from(material.shading == Shading::Foliage),
+            ],
         };
         let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("material params"),
@@ -119,6 +140,7 @@ impl MaterialCache {
         let mr = self.view(device, queue, &material.metallic_roughness_texture, false);
         let occlusion = self.view(device, queue, &material.occlusion_texture, false);
         let emissive = self.view(device, queue, &material.emissive_texture, true);
+        let sampler = if material.pixelated { &self.pixel_sampler } else { &self.sampler };
         let views = [
             base.unwrap_or_else(|| self.white_srgb.clone()),
             normal.unwrap_or_else(|| self.flat_normal.clone()),
@@ -135,11 +157,17 @@ impl MaterialCache {
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&views[1]) },
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&views[2]) },
                 wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&views[3]) },
-                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(sampler) },
                 wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&views[4]) },
             ],
         });
-        GpuMaterial { bind_group, double_sided: material.double_sided, alpha: alpha_mode != 0 }
+        GpuMaterial {
+            bind_group,
+            double_sided: material.double_sided,
+            alpha: alpha_mode != 0,
+            blend: alpha_mode == 2,
+            water: material.shading == Shading::Water,
+        }
     }
 
     fn view(
@@ -170,7 +198,7 @@ impl MaterialCache {
 }
 
 /// Uploads an image with a full CPU-generated mip chain.
-fn upload(device: &wgpu::Device, queue: &wgpu::Queue, image: &TextureData, srgb: bool) -> wgpu::TextureView {
+pub(crate) fn upload(device: &wgpu::Device, queue: &wgpu::Queue, image: &TextureData, srgb: bool) -> wgpu::TextureView {
     let (width, height) = (image.width, image.height);
     let mip_count = width.max(height).max(1).ilog2() + 1;
     let format = if srgb { wgpu::TextureFormat::Rgba8UnormSrgb } else { wgpu::TextureFormat::Rgba8Unorm };

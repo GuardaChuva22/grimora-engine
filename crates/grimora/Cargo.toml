@@ -19,6 +19,7 @@ anyhow.workspace = true
 hecs.workspace = true
 serde.workspace = true
 ron.workspace = true
+gilrs.workspace = true
 
 [lints]
 workspace = true

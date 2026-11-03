@@ -1,0 +1,124 @@
+{
+  "loss": 0.014254680421602703,
+  "radius_m": 0.023567293606698514,
+  "half_length_m": 0.07693953636288643,
+  "max_penetration_m": 0.002859288897789581,
+  "max_face_penetration_m": 0.0028495802332077743,
+  "face_samples": 632,
+  "penetration_vertices": 4,
+  "pad_rms_gap_m": [
+    0.00892820347708606,
+    0.006815439361582216,
+    0.003139084977456002
+  ],
+  "tip_padding_m": [
+    0.016,
+    0.007,
+    0.010239915285339017
+  ],
+  "center_offsets_m": [
+    0.04509999999999999,
+    0.0087,
+    -0.005
+  ],
+  "curls_degrees": [
+    0.0,
+    20.62647400069056,
+    73.18096625211977,
+    26.021365639098775,
+    32.243257725206846,
+    29.638123196706573,
+    28.499999999999996,
+    -7.499999999999999,
+    31.500000000000007,
+    -32.0
+  ],
+  "initial_loss": 0.22876060300837034,
+  "pad_vertices": [
+    21,
+    13,
+    7
+  ],
+  "mesh_correction_vertices": 37,
+  "mesh_correction_max_bind_m": 0.006000000000000044,
+  "mesh_correction_limit_m": 0.006,
+  "surface_clearance_target_m": 0.0004,
+  "surface_before_vertex_penetration_m": 0.0038592888977895083,
+  "surface_before_face_penetration_m": 0.0043932001364736205,
+  "surface_vertex_penetration_m": 0.0,
+  "surface_face_penetration_m": 0.0013077139017692828,
+  "surface_correction_iterations": 40,
+  "surface_worst_triangle_local": [
+    64,
+    61,
+    65
+  ],
+  "surface_worst_triangle_eligible": [
+    false,
+    true,
+    false
+  ],
+  "surface_worst_triangle_weights": [
+    [
+      0.9175637364387512,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.5806573629379272,
+      0.37410756945610046,
+      0.045235101133584976,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.8283365368843079,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ]
+  ],
+  "surface_worst_triangle_hand_weights": [
+    0.08243629336357117,
+    0.0,
+    0.17166343331336975
+  ],
+  "center_m": [
+    0.5743479132652283,
+    0.009652757085859776,
+    1.0156317949295044
+  ],
+  "weapon_axis": [
+    -0.3663178086280823,
+    0.9122275710105896,
+    0.18344582617282867
+  ],
+  "joints": [
+    "fingers.R",
+    "fingertips.R",
+    "fingers_03_r_035",
+    "index_01_r_030",
+    "index_02_r_031",
+    "index_03_r_032",
+    "thumb.R",
+    "thumb_02_r_028",
+    "thumb_03_r_029"
+  ],
+  "sword": "assets\\models\\weapons\\espada_reta.glb",
+  "wrist_blend_vertices": 27
+}

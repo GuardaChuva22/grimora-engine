@@ -1,16 +1,19 @@
 use anyhow::{Context as _, Result, anyhow};
+use std::sync::Arc;
+
 use grimora_core::{
-    BoundingSphere, Camera, Environment, Frustum, Mat4, MeshData, ParticleInstance, PointLight, Transform, Vec3,
+    BoundingSphere, Camera, Environment, Frustum, Mat4, MeshData, ParticleInstance, PointLight, SkyTextures,
+    TextureData, Transform, Vec3,
 };
 use image::RgbaImage;
 use wgpu::util::DeviceExt as _;
 
 use crate::bloom::Bloom;
-use crate::material::{GpuMaterial, MaterialCache};
+use crate::material::{self, GpuMaterial, MaterialCache};
 use crate::particle_pass::ParticlePass;
 use crate::ui::Ui;
 use crate::ui_pass::UiPass;
-use crate::uniforms::{self, Cascades, Globals, InstanceRaw, MAX_CASCADES, PostParams};
+use crate::uniforms::{self, Cascades, Globals, InstanceRaw, MAX_CASCADES, PostParams, SkySprites};
 use crate::{DEPTH_FORMAT, HDR_FORMAT};
 
 /// Startup options for the renderer.
@@ -53,6 +56,8 @@ pub struct DrawItem {
 pub struct Frame<'a> {
     pub camera: &'a Camera,
     pub environment: &'a Environment,
+    /// The pictures [`Environment::sky`] names.
+    pub sky_textures: &'a SkyTextures,
     pub lights: &'a [PointLight],
     pub draws: &'a [DrawItem],
     /// Skinning matrices of every animated draw, one block per draw
@@ -91,6 +96,11 @@ struct GpuMesh {
     submeshes: Vec<(std::ops::Range<u32>, usize)>,
     /// Some submesh uses alpha, so shadows are drawn per submesh.
     has_alpha: bool,
+    /// Some submesh is really blended, so it is also drawn among the transparent things.
+    has_blend: bool,
+    /// See `MeshData::wind` and `MeshData::shadowless`.
+    wind: f32,
+    shadowless: bool,
     /// In model space; shared by the mesh's LODs so they switch consistently.
     bounds: BoundingSphere,
     /// `(screen_size, index into Renderer::meshes)`, most detailed first.
@@ -109,6 +119,14 @@ struct Batch {
     instances: std::ops::Range<u32>,
 }
 
+/// Which submeshes a pass draws and how.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MeshPass {
+    Shadow,
+    Opaque,
+    Transparent,
+}
+
 pub struct Renderer {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -117,6 +135,8 @@ pub struct Renderer {
     adapter_info: wgpu::AdapterInfo,
     msaa: u32,
     shadow_map_size: u32,
+    /// The most shadow cascades drawn, whatever the scene asks for.
+    max_cascades: u32,
     min_screen_size: f32,
 
     globals_buffer: wgpu::Buffer,
@@ -129,6 +149,8 @@ pub struct Renderer {
     shadow_layers: Vec<wgpu::TextureView>,
     /// All layers, for sampling in the main pass.
     shadow_group: wgpu::BindGroup,
+    shadow_layout: wgpu::BindGroupLayout,
+    shadow_sampler: wgpu::Sampler,
     /// Each cascade's light matrix, `cascade_stride` bytes apart (dynamic offset).
     cascade_buffer: wgpu::Buffer,
     cascade_group: wgpu::BindGroup,
@@ -140,7 +162,15 @@ pub struct Renderer {
 
     /// Indexed by [`mesh_pipeline_index`]: culling x alpha-to-coverage.
     mesh_pipelines: [wgpu::RenderPipeline; 4],
+    /// Really blended surfaces: culling on and off.
+    blend_pipelines: [wgpu::RenderPipeline; 2],
+    water_pipeline: wgpu::RenderPipeline,
     sky_pipeline: wgpu::RenderPipeline,
+    sky_layout: wgpu::BindGroupLayout,
+    sky_sampler: wgpu::Sampler,
+    sky_group: wgpu::BindGroup,
+    /// The pictures `sky_group` shows, to notice when the scene changes them.
+    sky_sources: SkyTextures,
     shadow_pipeline: wgpu::RenderPipeline,
     /// Shadow caster that cuts out alpha-tested texels.
     shadow_masked_pipeline: wgpu::RenderPipeline,
@@ -159,7 +189,10 @@ pub struct Renderer {
     /// `(mesh, draw)` pairs that survived culling, per pass; kept to reuse their memory.
     visible: Vec<(usize, usize)>,
     casters: [Vec<(usize, usize)>; MAX_CASCADES],
+    /// `(mesh, draw)` pairs with blended surfaces, from the farthest to the nearest.
+    see_through: Vec<(usize, usize)>,
     batches: Vec<Batch>,
+    transparent_batches: Vec<Batch>,
     shadow_batches: [Vec<Batch>; MAX_CASCADES],
     stats: FrameStats,
 }
@@ -301,34 +334,6 @@ impl Renderer {
         let globals_group = create_globals_group(&device, &globals_layout, &globals_buffer, &joint_buffer);
 
         let shadow_map_size = settings.shadow_map_size.clamp(256, 8192);
-        let shadow_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("shadow cascades"),
-            size: wgpu::Extent3d {
-                width: shadow_map_size,
-                height: shadow_map_size,
-                depth_or_array_layers: MAX_CASCADES as u32,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: DEPTH_FORMAT,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let shadow_view = shadow_texture.create_view(&wgpu::TextureViewDescriptor {
-            dimension: Some(wgpu::TextureViewDimension::D2Array),
-            ..Default::default()
-        });
-        let shadow_layers = (0..MAX_CASCADES as u32)
-            .map(|layer| {
-                shadow_texture.create_view(&wgpu::TextureViewDescriptor {
-                    dimension: Some(wgpu::TextureViewDimension::D2),
-                    base_array_layer: layer,
-                    array_layer_count: Some(1),
-                    ..Default::default()
-                })
-            })
-            .collect();
         let cascade_stride =
             (size_of::<Mat4>() as u64).next_multiple_of(u64::from(device.limits().min_uniform_buffer_offset_alignment));
         let cascade_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -358,14 +363,8 @@ impl Renderer {
             compare: Some(wgpu::CompareFunction::LessEqual),
             ..Default::default()
         });
-        let shadow_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("shadow"),
-            layout: &shadow_layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&shadow_view) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&shadow_sampler) },
-            ],
-        });
+        let (shadow_layers, shadow_group) =
+            create_shadow_maps(&device, &shadow_layout, &shadow_sampler, shadow_map_size);
         let linear_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("linear"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -394,9 +393,25 @@ impl Renderer {
             bind_group_layouts: &[Some(&globals_layout), Some(&shadow_layout), Some(&material_cache.layout)],
             immediate_size: 0,
         });
+        let sky_textures_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("sky"),
+            entries: &[
+                texture_entry(7, wgpu::TextureSampleType::Float { filterable: true }),
+                texture_entry(8, wgpu::TextureSampleType::Float { filterable: true }),
+                sampler_entry(9, wgpu::SamplerBindingType::Filtering),
+            ],
+        });
+        let sky_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("sky"),
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let sky_sources = SkyTextures::default();
+        let sky_group = create_sky_group(&device, &queue, &sky_textures_layout, &sky_sampler, &sky_sources);
         let sky_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("sky"),
-            bind_group_layouts: &[Some(&globals_layout), Some(&shadow_layout)],
+            bind_group_layouts: &[Some(&globals_layout), Some(&shadow_layout), Some(&sky_textures_layout)],
             immediate_size: 0,
         });
         let shadow_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -452,6 +467,40 @@ impl Renderer {
             mesh_pipeline_with("mesh alpha", Some(wgpu::Face::Back), true),
             mesh_pipeline_with("mesh alpha double-sided", None, true),
         ];
+        // Over everything opaque, without hiding what comes after them.
+        let blended_target = [Some(wgpu::ColorTargetState {
+            format: HDR_FORMAT,
+            blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+            write_mask: wgpu::ColorWrites::ALL,
+        })];
+        let blended_pipeline_with = |label, vertex, fragment, cull_mode| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&scene_layout),
+                vertex: wgpu::VertexState {
+                    module: &scene_shader,
+                    entry_point: Some(vertex),
+                    compilation_options: Default::default(),
+                    buffers: &mesh_buffers,
+                },
+                primitive: wgpu::PrimitiveState { cull_mode, ..Default::default() },
+                depth_stencil: Some(depth_state(false, wgpu::CompareFunction::Less, Default::default())),
+                multisample,
+                fragment: Some(wgpu::FragmentState {
+                    module: &scene_shader,
+                    entry_point: Some(fragment),
+                    compilation_options: Default::default(),
+                    targets: &blended_target,
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let blend_pipelines = [
+            blended_pipeline_with("mesh blended", "vs_main", "fs_main", Some(wgpu::Face::Back)),
+            blended_pipeline_with("mesh blended double-sided", "vs_main", "fs_main", None),
+        ];
+        let water_pipeline = blended_pipeline_with("water", "vs_water", "fs_water", Some(wgpu::Face::Back));
         let sky_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("sky"),
             layout: Some(&sky_layout),
@@ -558,6 +607,7 @@ impl Renderer {
             adapter_info,
             msaa,
             shadow_map_size,
+            max_cascades: MAX_CASCADES as u32,
             min_screen_size: settings.min_screen_size.max(0.0),
             globals_buffer,
             globals_layout,
@@ -566,6 +616,8 @@ impl Renderer {
             joint_capacity,
             shadow_layers,
             shadow_group,
+            shadow_layout,
+            shadow_sampler,
             cascade_buffer,
             cascade_group,
             cascade_stride,
@@ -574,7 +626,13 @@ impl Renderer {
             post_group,
             linear_sampler,
             mesh_pipelines,
+            blend_pipelines,
+            water_pipeline,
             sky_pipeline,
+            sky_layout: sky_textures_layout,
+            sky_sampler,
+            sky_group,
+            sky_sources,
             shadow_pipeline,
             shadow_masked_pipeline,
             tonemap_pipeline,
@@ -590,7 +648,9 @@ impl Renderer {
             instances: Vec::new(),
             visible: Vec::new(),
             casters: Default::default(),
+            see_through: Vec::new(),
             batches: Vec::new(),
+            transparent_batches: Vec::new(),
             shadow_batches: Default::default(),
             stats: FrameStats::default(),
         })
@@ -631,6 +691,27 @@ impl Renderer {
         );
     }
 
+    /// Waits for the monitor or not. Does nothing if that is how it already is.
+    pub fn set_vsync(&mut self, vsync: bool) {
+        let mode = if vsync { wgpu::PresentMode::AutoVsync } else { wgpu::PresentMode::AutoNoVsync };
+        if self.config.present_mode != mode {
+            self.config.present_mode = mode;
+            self.surface.configure(&self.device, &self.config);
+        }
+    }
+
+    /// Shadow map size in pixels and the most cascades to draw. Does nothing if
+    /// that is how it already is; a new size rebuilds the maps.
+    pub fn set_shadow_quality(&mut self, map_size: u32, max_cascades: u32) {
+        self.max_cascades = max_cascades.clamp(1, MAX_CASCADES as u32);
+        let map_size = map_size.clamp(256, 8192);
+        if map_size != self.shadow_map_size {
+            self.shadow_map_size = map_size;
+            (self.shadow_layers, self.shadow_group) =
+                create_shadow_maps(&self.device, &self.shadow_layout, &self.shadow_sampler, map_size);
+        }
+    }
+
     /// Uploads a mesh and its [`MeshData::lods`]; the handle draws whichever
     /// level suits the object's size on screen.
     pub fn upload_mesh(&mut self, mesh: &MeshData) -> MeshHandle {
@@ -639,12 +720,22 @@ impl Renderer {
             // Animated poses reach past the bind pose; the margin keeps limbs from being culled.
             bounds.radius *= 1.5;
         }
-        let lods =
-            mesh.lods.iter().map(|lod| (lod.screen_size, self.upload_level(&lod.mesh, bounds, Vec::new()))).collect();
-        MeshHandle(self.upload_level(mesh, bounds, lods) as u32)
+        let lods = mesh
+            .lods
+            .iter()
+            .map(|lod| (lod.screen_size, self.upload_level(&lod.mesh, mesh, bounds, Vec::new())))
+            .collect();
+        MeshHandle(self.upload_level(mesh, mesh, bounds, lods) as u32)
     }
 
-    fn upload_level(&mut self, mesh: &MeshData, bounds: BoundingSphere, lods: Vec<(f32, usize)>) -> usize {
+    /// `whole` is the mesh this level belongs to, which says how it behaves.
+    fn upload_level(
+        &mut self,
+        mesh: &MeshData,
+        whole: &MeshData,
+        bounds: BoundingSphere,
+        lods: Vec<(f32, usize)>,
+    ) -> usize {
         let vertices = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("mesh vertices"),
             contents: bytemuck::cast_slice(&mesh.vertices),
@@ -665,8 +756,20 @@ impl Renderer {
             })
             .collect();
         let has_alpha = submeshes.iter().any(|(_, m)| self.materials[*m].alpha);
+        let has_blend = submeshes.iter().any(|(_, m)| self.materials[*m].blend);
         let index_count = mesh.indices.len() as u32;
-        self.meshes.push(GpuMesh { vertices, indices, index_count, submeshes, has_alpha, bounds, lods });
+        self.meshes.push(GpuMesh {
+            vertices,
+            indices,
+            index_count,
+            submeshes,
+            has_alpha,
+            has_blend,
+            wind: whole.wind,
+            shadowless: whole.shadowless,
+            bounds,
+            lods,
+        });
         self.meshes.len() - 1
     }
 
@@ -702,8 +805,11 @@ impl Renderer {
             frame.lights,
             frame.time,
             self.shadow_map_size,
+            self.max_cascades,
+            SkySprites { sun: frame.sky_textures.sun.is_some(), moon: frame.sky_textures.moon.is_some() },
         );
         self.queue.write_buffer(&self.globals_buffer, 0, bytemuck::bytes_of(&globals));
+        self.update_sky_textures(frame.sky_textures);
         let post = uniforms::post_params(frame.environment, frame.time, self.bloom.mip_count());
         self.queue.write_buffer(&self.post_buffer, 0, bytemuck::bytes_of(&post));
         let cascades = frame.environment.shadows.enabled.then_some(cascades);
@@ -734,7 +840,7 @@ impl Renderer {
             });
             pass.set_bind_group(0, &self.globals_group, &[]);
             pass.set_bind_group(1, &self.cascade_group, &[(i as u64 * self.cascade_stride) as u32]);
-            self.draw_batches(&mut pass, &self.shadow_batches[i], false);
+            self.draw_batches(&mut pass, &self.shadow_batches[i], MeshPass::Shadow);
         }
 
         {
@@ -763,8 +869,10 @@ impl Renderer {
             pass.set_bind_group(0, &self.globals_group, &[]);
             pass.set_bind_group(1, &self.shadow_group, &[]);
             pass.set_pipeline(&self.sky_pipeline);
+            pass.set_bind_group(2, &self.sky_group, &[]);
             pass.draw(0..3, 0..1);
-            self.draw_batches(&mut pass, &self.batches, true);
+            self.draw_batches(&mut pass, &self.batches, MeshPass::Opaque);
+            self.draw_batches(&mut pass, &self.transparent_batches, MeshPass::Transparent);
             self.particles.draw(&mut pass);
         }
 
@@ -775,6 +883,18 @@ impl Renderer {
         let image = if capture { Some(self.capture()?) } else { None };
         self.queue.present(surface_texture);
         Ok(image)
+    }
+
+    fn update_sky_textures(&mut self, textures: &SkyTextures) {
+        let same = |a: &Option<Arc<TextureData>>, b: &Option<Arc<TextureData>>| match (a, b) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        };
+        if !same(&self.sky_sources.sun, &textures.sun) || !same(&self.sky_sources.moon, &textures.moon) {
+            self.sky_sources = textures.clone();
+            self.sky_group = create_sky_group(&self.device, &self.queue, &self.sky_layout, &self.sky_sampler, textures);
+        }
     }
 
     fn tonemap(&self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
@@ -871,6 +991,7 @@ impl Renderer {
         }
 
         self.visible.clear();
+        self.see_through.clear();
         for casters in &mut self.casters {
             casters.clear();
         }
@@ -886,8 +1007,14 @@ impl Renderer {
             let level = pick_lod(&mesh.lods, screen_size).unwrap_or(draw.mesh.0 as usize);
             if view.intersects_sphere(sphere) {
                 self.visible.push((level, i));
+                if self.meshes[level].has_blend {
+                    self.see_through.push((level, i));
+                }
             } else {
                 culled += 1;
+            }
+            if mesh.shadowless {
+                continue;
             }
             for (casters, (frustum, texel)) in self.casters.iter_mut().zip(light.iter().map_while(|l| l.as_ref())) {
                 let diameter = sphere.radius * 2.0;
@@ -899,12 +1026,15 @@ impl Renderer {
             }
         }
         self.visible.sort_unstable();
+        let distance = |&(_, i): &(usize, usize)| frame.draws[i].transform.position.distance_squared(camera.position);
+        self.see_through.sort_by(|a, b| distance(b).total_cmp(&distance(a)));
 
         self.instances.clear();
-        group(&self.visible, frame.draws, &mut self.instances, &mut self.batches);
+        group(&self.visible, frame.draws, &self.meshes, &mut self.instances, &mut self.batches);
+        group(&self.see_through, frame.draws, &self.meshes, &mut self.instances, &mut self.transparent_batches);
         for (casters, batches) in self.casters.iter_mut().zip(&mut self.shadow_batches) {
             casters.sort_unstable();
-            group(casters, frame.draws, &mut self.instances, batches);
+            group(casters, frame.draws, &self.meshes, &mut self.instances, batches);
         }
 
         if self.instances.len() > self.instance_capacity {
@@ -914,7 +1044,7 @@ impl Renderer {
         self.queue.write_buffer(&self.instance_buffer, 0, bytemuck::cast_slice(&self.instances));
 
         self.stats = FrameStats {
-            draw_calls: self.batches.len() as u32,
+            draw_calls: (self.batches.len() + self.transparent_batches.len()) as u32,
             instances: self.visible.len() as u32,
             triangles: self
                 .batches
@@ -939,10 +1069,11 @@ impl Renderer {
         }
     }
 
-    /// Draws every batch. With `materials`, binds each submesh's material and
-    /// picks culling and alpha-to-coverage; without (the shadow pass), draws
-    /// whole meshes, splitting only those with alpha-tested submeshes.
-    fn draw_batches(&self, pass: &mut wgpu::RenderPass<'_>, batches: &[Batch], materials: bool) {
+    /// Draws every batch. In the main pass, binds each submesh's material and
+    /// picks its pipeline, drawing the blended ones or the rest depending on
+    /// `kind`. The shadow pass draws whole meshes, splitting only those with
+    /// alpha-tested submeshes.
+    fn draw_batches(&self, pass: &mut wgpu::RenderPass<'_>, batches: &[Batch], kind: MeshPass) {
         pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
         let mut current: Option<*const wgpu::RenderPipeline> = None;
         let mut use_pipeline = |pass: &mut wgpu::RenderPass<'_>, pipeline: &wgpu::RenderPipeline| {
@@ -955,21 +1086,27 @@ impl Renderer {
             let mesh = &self.meshes[batch.mesh];
             pass.set_vertex_buffer(0, mesh.vertices.slice(..));
             pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
-            if !materials && !mesh.has_alpha {
+            if kind == MeshPass::Shadow && !mesh.has_alpha {
                 use_pipeline(pass, &self.shadow_pipeline);
                 pass.draw_indexed(0..mesh.index_count, 0, batch.instances.clone());
                 continue;
             }
             for (range, material) in &mesh.submeshes {
                 let material = &self.materials[*material];
-                if materials {
-                    use_pipeline(pass, &self.mesh_pipelines[mesh_pipeline_index(material)]);
-                } else if material.alpha {
-                    use_pipeline(pass, &self.shadow_masked_pipeline);
-                } else {
-                    use_pipeline(pass, &self.shadow_pipeline);
-                    pass.draw_indexed(range.clone(), 0, batch.instances.clone());
-                    continue;
+                match kind {
+                    MeshPass::Opaque if material.blend => continue,
+                    MeshPass::Opaque => use_pipeline(pass, &self.mesh_pipelines[mesh_pipeline_index(material)]),
+                    MeshPass::Transparent if !material.blend => continue,
+                    MeshPass::Transparent if material.water => use_pipeline(pass, &self.water_pipeline),
+                    MeshPass::Transparent => {
+                        use_pipeline(pass, &self.blend_pipelines[usize::from(material.double_sided)]);
+                    }
+                    MeshPass::Shadow if material.alpha => use_pipeline(pass, &self.shadow_masked_pipeline),
+                    MeshPass::Shadow => {
+                        use_pipeline(pass, &self.shadow_pipeline);
+                        pass.draw_indexed(range.clone(), 0, batch.instances.clone());
+                        continue;
+                    }
                 }
                 pass.set_bind_group(2, &material.bind_group, &[]);
                 pass.draw_indexed(range.clone(), 0, batch.instances.clone());
@@ -984,13 +1121,19 @@ fn pick_lod(lods: &[(f32, usize)], screen_size: f32) -> Option<usize> {
     lods.iter().rev().find(|(threshold, _)| screen_size < *threshold).map(|&(_, mesh)| mesh)
 }
 
-/// Appends one instance per `(mesh, draw)` pair (sorted by mesh) and one batch per mesh.
-fn group(pairs: &[(usize, usize)], draws: &[DrawItem], instances: &mut Vec<InstanceRaw>, batches: &mut Vec<Batch>) {
+/// Appends one instance per `(mesh, draw)` pair and one batch per run of the same mesh.
+fn group(
+    pairs: &[(usize, usize)],
+    draws: &[DrawItem],
+    meshes: &[GpuMesh],
+    instances: &mut Vec<InstanceRaw>,
+    batches: &mut Vec<Batch>,
+) {
     batches.clear();
     for &(mesh, i) in pairs {
         let draw = &draws[i];
         let index = instances.len() as u32;
-        instances.push(InstanceRaw::new(&draw.transform, draw.color, draw.emissive, draw.joints));
+        instances.push(InstanceRaw::new(&draw.transform, draw.color, draw.emissive, draw.joints, meshes[mesh].wind));
         match batches.last_mut() {
             Some(batch) if batch.mesh == mesh => batch.instances.end = index + 1,
             _ => batches.push(Batch { mesh, instances: index..index + 1 }),
@@ -1036,6 +1179,75 @@ pub(crate) fn depth_state(
         stencil: wgpu::StencilState::default(),
         bias,
     }
+}
+
+/// The shadow map: one render target per cascade, and all of them to sample from.
+fn create_shadow_maps(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    sampler: &wgpu::Sampler,
+    size: u32,
+) -> (Vec<wgpu::TextureView>, wgpu::BindGroup) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("shadow cascades"),
+        size: wgpu::Extent3d { width: size, height: size, depth_or_array_layers: MAX_CASCADES as u32 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: DEPTH_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor {
+        dimension: Some(wgpu::TextureViewDimension::D2Array),
+        ..Default::default()
+    });
+    let layers = (0..MAX_CASCADES as u32)
+        .map(|layer| {
+            texture.create_view(&wgpu::TextureViewDescriptor {
+                dimension: Some(wgpu::TextureViewDimension::D2),
+                base_array_layer: layer,
+                array_layer_count: Some(1),
+                ..Default::default()
+            })
+        })
+        .collect();
+    let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("shadow"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(sampler) },
+        ],
+    });
+    (layers, group)
+}
+
+/// The sun and moon pictures for the sky; a missing one is a transparent pixel.
+fn create_sky_group(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    layout: &wgpu::BindGroupLayout,
+    sampler: &wgpu::Sampler,
+    textures: &SkyTextures,
+) -> wgpu::BindGroup {
+    let view = |texture: &Option<Arc<TextureData>>| match texture {
+        Some(texture) => material::upload(device, queue, texture, true),
+        None => {
+            let empty = TextureData { name: "no sky picture".into(), width: 1, height: 1, rgba: vec![0; 4] };
+            material::upload(device, queue, &empty, true)
+        }
+    };
+    let (sun, moon) = (view(&textures.sun), view(&textures.moon));
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("sky"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&sun) },
+            wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&moon) },
+            wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::Sampler(sampler) },
+        ],
+    })
 }
 
 fn create_targets(device: &wgpu::Device, width: u32, height: u32, msaa: u32) -> Targets {

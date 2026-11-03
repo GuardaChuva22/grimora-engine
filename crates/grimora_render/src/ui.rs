@@ -6,10 +6,18 @@
 //! Coordinates are logical pixels from the top-left corner of the window
 //! ([`Ui::size`]); on high-DPI screens they are scaled by [`Ui::scale`].
 //! Colors are sRGB 0..1 with alpha.
+//!
+//! Menus use the widgets ([`Ui::button`], [`Ui::slider`], [`Ui::toggle`],
+//! [`Ui::choice`]), which answer to [`UiInput`]. One widget holds the focus:
+//! arrows or W/S move it, the mouse takes it by moving over a widget. A widget
+//! is known by its label, so two on screen shouldn't share one.
+
+use std::ops::RangeInclusive;
 
 use bytemuck::{Pod, Zeroable};
 use glam::{Vec2, Vec4};
 use grimora_core::environment::srgb_to_linear_vec;
+use grimora_core::{Input, KeyCode, MouseButton, PadButton};
 
 use crate::font::{FONT, GLYPH, Glyph, LINE};
 
@@ -151,12 +159,130 @@ pub(crate) struct UiQuad {
     pub outline: [f32; 4],
 }
 
+/// What the widgets see of the mouse and keyboard this frame. The engine fills
+/// it from [`Input`]; a test can fill it by hand.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct UiInput {
+    /// Cursor in logical pixels; `None` while it is grabbed for mouse look.
+    pub cursor: Option<Vec2>,
+    pub mouse_down: bool,
+    pub mouse_pressed: bool,
+    pub mouse_released: bool,
+    /// Move the focus (arrows or W/S, repeating while held).
+    pub up: bool,
+    pub down: bool,
+    /// Change the focused slider, toggle or choice (arrows or A/D, repeating while held).
+    pub left: bool,
+    pub right: bool,
+    /// Use the focused widget (Enter or Space).
+    pub activate: bool,
+}
+
+impl UiInput {
+    /// Reads `input`, whose cursor is in physical pixels, for a UI at `scale`.
+    pub fn from_input(input: &Input, scale: f32) -> Self {
+        let tapped = |arrow, letter, pad| {
+            [arrow, letter].into_iter().any(|key| input.just_pressed(key) || input.just_repeated(key))
+                || input.pad_nav(pad)
+        };
+        Self {
+            cursor: Some(input.cursor() / scale.max(0.01)),
+            mouse_down: input.mouse_pressed(MouseButton::Left),
+            mouse_pressed: input.mouse_just_pressed(MouseButton::Left),
+            mouse_released: input.mouse_just_released(MouseButton::Left),
+            up: tapped(KeyCode::ArrowUp, KeyCode::KeyW, PadButton::DPadUp),
+            down: tapped(KeyCode::ArrowDown, KeyCode::KeyS, PadButton::DPadDown),
+            left: tapped(KeyCode::ArrowLeft, KeyCode::KeyA, PadButton::DPadLeft),
+            right: tapped(KeyCode::ArrowRight, KeyCode::KeyD, PadButton::DPadRight),
+            activate: [KeyCode::Enter, KeyCode::NumpadEnter, KeyCode::Space]
+                .into_iter()
+                .any(|key| input.just_pressed(key))
+                || input.pad_just_pressed(PadButton::South),
+        }
+    }
+}
+
+/// How widgets look; the defaults match the sandbox's HUD.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Theme {
+    /// Height of widget text in logical pixels.
+    pub text_size: f32,
+    pub text: Vec4,
+    /// Text and border of the focused widget, and the filled part of sliders and toggles.
+    pub accent: Vec4,
+    pub disabled: Vec4,
+    pub fill: Vec4,
+    /// Background under the cursor or with the focus.
+    pub hover: Vec4,
+    /// Background while the mouse holds the widget down.
+    pub pressed: Vec4,
+    pub border: Vec4,
+    /// Background of slider tracks and toggle boxes.
+    pub track: Vec4,
+}
+
+impl Default for Theme {
+    fn default() -> Self {
+        Self {
+            text_size: 24.0,
+            text: Vec4::new(0.95, 0.92, 0.86, 1.0),
+            accent: Vec4::new(1.0, 0.78, 0.42, 1.0),
+            disabled: Vec4::new(0.62, 0.59, 0.55, 0.6),
+            fill: Vec4::new(0.05, 0.04, 0.06, 0.82),
+            hover: Vec4::new(0.17, 0.13, 0.1, 0.92),
+            pressed: Vec4::new(0.3, 0.2, 0.1, 0.96),
+            border: Vec4::new(0.55, 0.43, 0.28, 0.9),
+            track: Vec4::new(0.0, 0.0, 0.0, 0.6),
+        }
+    }
+}
+
+/// What the widgets remember between frames.
+#[derive(Debug, Clone, Default)]
+struct WidgetState {
+    input: UiInput,
+    focus: Option<u64>,
+    /// False when `focus` names no usable widget: the next enabled one drawn takes it.
+    focus_settled: bool,
+    /// `focus` was just set by the game, for a screen that isn't drawn yet.
+    focus_requested: bool,
+    /// The widget the mouse went down on, until it comes up.
+    held: Option<u64>,
+    /// `held` is a slider grabbed by its track, so it follows the cursor.
+    dragging: bool,
+    cursor_moved: bool,
+    last_cursor: Option<Vec2>,
+    /// Id and enabled state of every widget drawn, this frame and the last. The
+    /// keyboard moves the focus through last frame's, since this frame's aren't known yet.
+    drawn: Vec<(u64, bool)>,
+    drawn_before: Vec<(u64, bool)>,
+}
+
+/// How a widget stands this frame.
+#[derive(Debug, Clone, Copy)]
+struct Response {
+    enabled: bool,
+    hovered: bool,
+    focused: bool,
+    /// The mouse holds it down, over it.
+    pressed: bool,
+    /// The mouse went down on it this frame.
+    grabbed: bool,
+    /// The mouse went down on it and came up over it, this frame.
+    clicked: bool,
+    /// Enter or Space with the focus.
+    keyed: bool,
+}
+
 /// This frame's HUD. See the module docs.
 #[derive(Debug, Clone)]
 pub struct Ui {
     size: Vec2,
     scale: f32,
     quads: Vec<UiQuad>,
+    /// How widgets are drawn; change it any time.
+    pub theme: Theme,
+    widgets: WidgetState,
 }
 
 impl Default for Ui {
@@ -168,15 +294,75 @@ impl Default for Ui {
 impl Ui {
     /// An empty UI for a window of `size` logical pixels at `scale` physical pixels each.
     pub fn new(size: Vec2, scale: f32) -> Self {
-        Self { size, scale: scale.max(0.01), quads: Vec::new() }
+        Self {
+            size,
+            scale: scale.max(0.01),
+            quads: Vec::new(),
+            theme: Theme::default(),
+            widgets: WidgetState::default(),
+        }
     }
 
     /// Clears last frame's drawing and adopts the current window size. The
-    /// engine calls this before `Game::update`.
+    /// engine calls this before `Game::update`, then [`Ui::set_input`].
     pub fn begin(&mut self, size: Vec2, scale: f32) {
         self.size = size;
         self.scale = scale.max(0.01);
         self.quads.clear();
+        let widgets = &mut self.widgets;
+        std::mem::swap(&mut widgets.drawn, &mut widgets.drawn_before);
+        widgets.drawn.clear();
+        widgets.input = UiInput::default();
+    }
+
+    /// Drops what was drawn this frame, and nothing else.
+    pub fn clear(&mut self) {
+        self.quads.clear();
+    }
+
+    /// Gives the widgets this frame's input and moves the focus for it.
+    pub fn set_input(&mut self, input: UiInput) {
+        let widgets = &mut self.widgets;
+        widgets.cursor_moved = matches!((widgets.last_cursor, input.cursor), (Some(a), Some(b)) if a != b);
+        widgets.last_cursor = input.cursor;
+        if !input.mouse_down && !input.mouse_released {
+            widgets.held = None;
+            widgets.dragging = false;
+        }
+        widgets.input = input;
+        if std::mem::take(&mut widgets.focus_requested) {
+            widgets.focus_settled = true;
+            return;
+        }
+        let enabled = || widgets.drawn_before.iter().filter(|(_, enabled)| *enabled).map(|(id, _)| *id);
+        let at = widgets.focus.and_then(|focus| enabled().position(|id| id == focus));
+        widgets.focus_settled = at.is_some();
+        if let Some(at) = at {
+            let count = enabled().count();
+            let step = usize::from(input.down) + (count - 1) * usize::from(input.up);
+            widgets.focus = enabled().nth((at + step) % count);
+        }
+    }
+
+    /// Whether the widget with this label has the focus.
+    pub fn is_focused(&self, label: &str) -> bool {
+        self.widgets.focus == Some(widget_id(label))
+    }
+
+    /// Gives the focus to the widget with this label, in this frame or the next
+    /// one (the screen you are about to switch to).
+    pub fn set_focus(&mut self, label: &str) {
+        self.widgets.focus = Some(widget_id(label));
+        self.widgets.focus_settled = true;
+        self.widgets.focus_requested = true;
+    }
+
+    /// Forgets the focus: the first enabled widget drawn next takes it. Call
+    /// when switching to another screen.
+    pub fn reset_focus(&mut self) {
+        self.widgets.focus = None;
+        self.widgets.focus_settled = false;
+        self.widgets.focus_requested = false;
     }
 
     /// Window size in logical pixels.
@@ -285,6 +471,242 @@ impl Ui {
             outline,
         });
     }
+
+    /// A push button. Returns true on the frame it is used: clicked, or Enter
+    /// or Space with the focus.
+    pub fn button(&mut self, rect: Rect, label: &str) -> bool {
+        self.button_if(true, rect, label)
+    }
+
+    /// A button that is greyed out and does nothing unless `enabled`.
+    pub fn button_if(&mut self, enabled: bool, rect: Rect, label: &str) -> bool {
+        let response = self.widget(rect, label, enabled);
+        let color = self.widget_frame(rect, &response);
+        let center = rect.point(Anchor::Center) + press_shift(&response);
+        self.text(center, label, &TextStyle::new(self.theme.text_size).color(color).anchor(Anchor::Center));
+        response.clicked || response.keyed
+    }
+
+    /// A row with `label` on the left and `value` on the right, used like a button.
+    /// The label alone identifies it, so the focus stays when the value changes.
+    pub fn button_row(&mut self, rect: Rect, label: &str, value: &str) -> bool {
+        let response = self.widget(rect, label, true);
+        let color = self.row_frame(rect, label, &response);
+        let area = value_area(rect, self.theme.text_size);
+        let at = Vec2::new(area.max().x, area.point(Anchor::Center).y) + press_shift(&response);
+        self.text(at, value, &TextStyle::new(self.theme.text_size).color(color).anchor(Anchor::Right));
+        response.clicked || response.keyed
+    }
+
+    /// A labelled slider stepping by `step` over `range`, showing how far along
+    /// it is as a percentage. Left and Right move it; so does dragging its track.
+    /// Returns true on the frames `value` changes.
+    pub fn slider(&mut self, rect: Rect, label: &str, value: &mut f32, range: RangeInclusive<f32>, step: f32) -> bool {
+        self.slider_showing(rect, label, value, range, step, None)
+    }
+
+    /// A [`Ui::slider`] that shows its value with this many decimals, not as a percentage.
+    pub fn number_slider(
+        &mut self,
+        rect: Rect,
+        label: &str,
+        value: &mut f32,
+        range: RangeInclusive<f32>,
+        step: f32,
+        decimals: usize,
+    ) -> bool {
+        self.slider_showing(rect, label, value, range, step, Some(decimals))
+    }
+
+    fn slider_showing(
+        &mut self,
+        rect: Rect,
+        label: &str,
+        value: &mut f32,
+        range: RangeInclusive<f32>,
+        step: f32,
+        decimals: Option<usize>,
+    ) -> bool {
+        let response = self.widget(rect, label, true);
+        let color = self.row_frame(rect, label, &response);
+        let (min, max) = (*range.start(), *range.end());
+        let span = (max - min).max(f32::EPSILON);
+        let style = TextStyle::new(self.theme.text_size).color(color).anchor(Anchor::Right);
+        let shown = |value: f32, fraction: f32| match decimals {
+            Some(decimals) => format!("{value:.decimals$}"),
+            None => format!("{:.0}%", fraction * 100.0),
+        };
+        let number = self.measure(&shown(max, 1.0), &style).x.max(self.measure(&shown(min, 1.0), &style).x);
+        let area = value_area(rect, self.theme.text_size);
+        let height = (self.theme.text_size * 0.4).round();
+        let track = Rect::anchored(
+            area.point(Anchor::Left),
+            Vec2::new(area.size.x - number - self.theme.text_size, height),
+            Anchor::Left,
+        );
+
+        let input = self.widgets.input;
+        let cursor = input.cursor.unwrap_or_default();
+        if response.grabbed {
+            self.widgets.dragging = cursor.x >= track.min.x - height && cursor.x <= track.max().x + height;
+        }
+        let mut next = None;
+        if self.widgets.dragging && input.mouse_down && self.widgets.held == Some(widget_id(label)) {
+            next = Some(min + span * ((cursor.x - track.min.x) / track.size.x.max(1.0)));
+        }
+        if response.focused && (input.left || input.right) {
+            next = Some(*value + step * (f32::from(u8::from(input.right)) - f32::from(u8::from(input.left))));
+        }
+        let before = *value;
+        if let Some(mut next) = next {
+            if step > 0.0 {
+                next = min + ((next - min) / step).round() * step;
+            }
+            *value = next.clamp(min, max);
+        }
+
+        let fraction = ((*value - min) / span).clamp(0.0, 1.0);
+        let fill = if response.focused { self.theme.accent } else { self.theme.border };
+        self.bar(track, fraction, fill, self.theme.track);
+        let handle = Vec2::new(track.min.x + track.size.x * fraction, track.point(Anchor::Center).y);
+        let handle_size = Vec2::new(height * 0.8, height * 2.0);
+        self.rect(Rect::anchored(handle, handle_size, Anchor::Center), color);
+        let right = Vec2::new(area.max().x, area.point(Anchor::Center).y) + press_shift(&response);
+        self.text(right, &shown(*value, fraction), &style);
+        *value != before
+    }
+
+    /// A labelled on/off box. Returns true on the frames `value` changes.
+    pub fn toggle(&mut self, rect: Rect, label: &str, value: &mut bool) -> bool {
+        let response = self.widget(rect, label, true);
+        let color = self.row_frame(rect, label, &response);
+        let input = self.widgets.input;
+        let flip = response.clicked || response.keyed || (response.focused && (input.left || input.right));
+        if flip {
+            *value = !*value;
+        }
+        let area = value_area(rect, self.theme.text_size);
+        let side = (self.theme.text_size * 0.9).round();
+        let right = Vec2::new(area.max().x, area.point(Anchor::Center).y) + press_shift(&response);
+        let check = Rect::anchored(right, Vec2::splat(side), Anchor::Right);
+        self.panel(check, self.theme.track, color);
+        if *value {
+            self.rect(check.expand(-(side * 0.2).round()), color);
+        }
+        flip
+    }
+
+    /// A labelled row that cycles through `options`, wrapping around: Left and
+    /// Right go back and forward, Enter, Space and clicks go forward (a click
+    /// on the left half of the value goes back). Returns true on the frames
+    /// `selected` changes.
+    pub fn choice(&mut self, rect: Rect, label: &str, options: &[&str], selected: &mut usize) -> bool {
+        let response = self.widget(rect, label, true);
+        let color = self.row_frame(rect, label, &response);
+        let input = self.widgets.input;
+        let area = value_area(rect, self.theme.text_size);
+        let center = area.point(Anchor::Center);
+        let clicked_left = response.clicked && input.cursor.is_some_and(|c| area.contains(c) && c.x < center.x);
+        let back = clicked_left || (response.focused && input.left);
+        let forward = (response.clicked && !clicked_left) || response.keyed || (response.focused && input.right);
+        let count = options.len();
+        let mut changed = false;
+        if count > 0 && back != forward {
+            *selected = (*selected + if back { count - 1 } else { 1 }) % count;
+            changed = true;
+        }
+
+        let shift = press_shift(&response);
+        let size = self.theme.text_size;
+        let at = |anchor| TextStyle::new(size).color(color).anchor(anchor);
+        self.text(area.point(Anchor::Left) + shift, "<", &at(Anchor::Left));
+        self.text(area.point(Anchor::Right) + shift, ">", &at(Anchor::Right));
+        if let Some(option) = options.get(*selected) {
+            self.text(center + shift, option, &at(Anchor::Center));
+        }
+        changed
+    }
+
+    /// Registers a widget for this frame and works out how it stands.
+    fn widget(&mut self, rect: Rect, label: &str, enabled: bool) -> Response {
+        let id = widget_id(label);
+        let widgets = &mut self.widgets;
+        if enabled && !widgets.focus_settled {
+            widgets.focus = Some(id);
+            widgets.focus_settled = true;
+        }
+        widgets.drawn.push((id, enabled));
+
+        let input = widgets.input;
+        let free = widgets.held.is_none_or(|held| held == id);
+        let hovered = enabled && free && input.cursor.is_some_and(|c| rect.contains(c));
+        let grabbed = hovered && input.mouse_pressed;
+        if hovered && (widgets.cursor_moved || grabbed) {
+            widgets.focus = Some(id);
+        }
+        if grabbed {
+            widgets.held = Some(id);
+        }
+        let held = widgets.held == Some(id);
+        let focused = enabled && widgets.focus == Some(id);
+        Response {
+            enabled,
+            hovered,
+            focused,
+            pressed: held && hovered && input.mouse_down,
+            grabbed,
+            clicked: held && hovered && input.mouse_released,
+            keyed: focused && input.activate,
+        }
+    }
+
+    /// The widget's background and border. Returns the color for what goes on it.
+    fn widget_frame(&mut self, rect: Rect, response: &Response) -> Vec4 {
+        let theme = self.theme;
+        let faded = |color: Vec4, alpha: f32| Vec4::new(color.x, color.y, color.z, color.w * alpha);
+        let (fill, border, color) = if !response.enabled {
+            (faded(theme.fill, 0.6), faded(theme.border, 0.35), theme.disabled)
+        } else if response.pressed {
+            (theme.pressed, theme.accent, theme.accent)
+        } else if response.focused {
+            (theme.hover, theme.accent, theme.accent)
+        } else if response.hovered {
+            (theme.hover, theme.border, theme.text)
+        } else {
+            (theme.fill, theme.border, theme.text)
+        };
+        self.panel(rect, fill, border);
+        if response.focused {
+            let marker = (theme.text_size / 6.0).round();
+            self.rect(Rect::new(rect.min, Vec2::new(marker, rect.size.y)), theme.accent);
+        }
+        color
+    }
+
+    /// The frame of a widget with its label on the left and its value on the right.
+    fn row_frame(&mut self, rect: Rect, label: &str, response: &Response) -> Vec4 {
+        let color = self.widget_frame(rect, response);
+        let size = self.theme.text_size;
+        let at = rect.point(Anchor::Left) + Vec2::X * size * 0.75 + press_shift(response);
+        self.text(at, label, &TextStyle::new(size).color(color).anchor(Anchor::Left));
+        color
+    }
+}
+
+/// A widget's value part: the right of its row, inside the padding. The rest is the label's.
+fn value_area(rect: Rect, text_size: f32) -> Rect {
+    let width = rect.size.x * 0.4 - text_size * 0.75;
+    Rect::anchored(rect.point(Anchor::Right) - Vec2::X * text_size * 0.75, Vec2::new(width, rect.size.y), Anchor::Right)
+}
+
+/// Content sinks a pixel while the mouse holds a widget down.
+fn press_shift(response: &Response) -> Vec2 {
+    if response.pressed { Vec2::Y } else { Vec2::ZERO }
+}
+
+/// FNV-1a of the label.
+fn widget_id(label: &str) -> u64 {
+    label.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3))
 }
 
 fn linear(color: Vec4) -> [f32; 4] {
@@ -337,6 +759,314 @@ mod tests {
 
     fn style() -> TextStyle {
         TextStyle::new(16.0)
+    }
+
+    const ROW: Vec2 = Vec2::new(400.0, 40.0);
+
+    fn row(n: u32) -> Rect {
+        Rect::new(Vec2::new(100.0, 100.0 + 50.0 * n as f32), ROW)
+    }
+
+    /// A point on row `n`, as a fraction of its width.
+    fn on_row(n: u32, x: f32) -> Option<Vec2> {
+        Some(row(n).min + ROW * Vec2::new(x, 0.5))
+    }
+
+    /// One frame: `input`, then `widgets`. Returns what they returned.
+    fn frame<T>(ui: &mut Ui, input: UiInput, widgets: impl FnOnce(&mut Ui) -> T) -> T {
+        ui.begin(Vec2::new(1280.0, 720.0), 1.0);
+        ui.set_input(input);
+        widgets(ui)
+    }
+
+    /// Three buttons, the second disabled unless `second`. Returns which were used.
+    fn three(ui: &mut Ui, input: UiInput, second: bool) -> [bool; 3] {
+        frame(ui, input, |ui| {
+            [ui.button(row(0), "um"), ui.button_if(second, row(1), "dois"), ui.button(row(2), "tres")]
+        })
+    }
+
+    /// The background color the widget got, the first thing it draws.
+    fn background(ui: &Ui) -> [f32; 4] {
+        ui.quads()[0].color
+    }
+
+    #[test]
+    fn the_first_enabled_widget_takes_the_focus() {
+        let mut ui = Ui::default();
+        frame(&mut ui, UiInput::default(), |ui| {
+            ui.button_if(false, row(0), "off");
+            ui.button(row(1), "on");
+        });
+        assert!(ui.is_focused("on") && !ui.is_focused("off"));
+    }
+
+    #[test]
+    fn hovering_moves_the_focus_and_each_state_has_its_look() {
+        let mut ui = Ui::default();
+        let away = UiInput { cursor: on_row(5, 0.5), ..Default::default() };
+        let over = UiInput { cursor: on_row(2, 0.5), ..Default::default() };
+        three(&mut ui, away, true);
+        assert!(ui.is_focused("um"));
+
+        // Plain: neither under the cursor nor focused.
+        frame(&mut ui, away, |ui| {
+            ui.button(row(2), "tres");
+        });
+        assert_eq!(background(&ui), linear(ui.theme.fill));
+
+        // Moving over a widget takes the focus.
+        three(&mut ui, away, true);
+        three(&mut ui, over, true);
+        assert!(ui.is_focused("tres"));
+        let quads_focused = frame(&mut ui, over, |ui| {
+            ui.button(row(2), "tres");
+            ui.quads().to_vec()
+        });
+        assert_eq!(quads_focused[0].color, linear(ui.theme.hover));
+        assert!(quads_focused.iter().any(|q| q.color == linear(ui.theme.accent)), "focus shows in the accent color");
+
+        // A cursor resting on a widget doesn't fight the keyboard, and the widget
+        // keeps its hover look without the accent.
+        three(&mut ui, over, true);
+        three(&mut ui, UiInput { up: true, ..over }, true);
+        assert!(ui.is_focused("dois"));
+        three(&mut ui, over, true);
+        assert!(ui.is_focused("dois"));
+        let quads_hovered = frame(&mut ui, over, |ui| {
+            ui.button(row(2), "tres");
+            ui.quads().to_vec()
+        });
+        assert_eq!(quads_hovered[0].color, linear(ui.theme.hover));
+        assert!(quads_hovered.iter().all(|q| q.color != linear(ui.theme.accent)));
+
+        // Disabled looks like neither, under the cursor or not.
+        frame(&mut ui, over, |ui| {
+            ui.button_if(false, row(2), "tres");
+        });
+        assert_ne!(background(&ui), linear(ui.theme.hover));
+        assert_ne!(background(&ui), linear(ui.theme.fill));
+
+        // While the cursor is grabbed the mouse isn't anywhere.
+        let mut ui = Ui::default();
+        three(&mut ui, away, true);
+        three(&mut ui, over, true);
+        let grabbed = UiInput { cursor: None, mouse_down: true, mouse_pressed: true, ..Default::default() };
+        three(&mut ui, grabbed, true);
+        assert!(ui.is_focused("tres"), "focus stays");
+        let released = UiInput { cursor: None, mouse_released: true, ..Default::default() };
+        assert_eq!(three(&mut ui, released, true), [false; 3]);
+    }
+
+    #[test]
+    fn a_click_needs_press_and_release_on_the_same_widget() {
+        let mut ui = Ui::default();
+        let over = |n| UiInput { cursor: on_row(n, 0.5), ..Default::default() };
+        three(&mut ui, over(5), true);
+        three(&mut ui, over(2), true);
+
+        let down = UiInput { mouse_down: true, mouse_pressed: true, ..over(2) };
+        assert_eq!(three(&mut ui, down, true), [false; 3], "nothing until the release");
+        assert!(ui.is_focused("tres"));
+        frame(&mut ui, UiInput { mouse_down: true, ..over(2) }, |ui| {
+            ui.button(row(2), "tres");
+        });
+        assert_eq!(background(&ui), linear(ui.theme.pressed), "held down looks pressed");
+        let up = UiInput { mouse_released: true, ..over(2) };
+        assert_eq!(three(&mut ui, up, true), [false, false, true]);
+        assert_eq!(three(&mut ui, over(2), true), [false; 3], "once");
+
+        // Dragged off before letting go: no click, and nothing else takes it.
+        three(&mut ui, UiInput { mouse_down: true, mouse_pressed: true, ..over(2) }, true);
+        three(&mut ui, UiInput { mouse_down: true, ..over(0) }, true);
+        assert!(ui.is_focused("tres"), "a held widget keeps the mouse");
+        assert_eq!(three(&mut ui, UiInput { mouse_released: true, ..over(0) }, true), [false; 3]);
+
+        // Pressed off the widget and released on it: no click either.
+        three(&mut ui, UiInput { mouse_down: true, mouse_pressed: true, ..over(5) }, true);
+        assert_eq!(three(&mut ui, UiInput { mouse_released: true, ..over(0) }, true), [false; 3]);
+
+        // A press and release between two frames still counts.
+        three(&mut ui, over(0), true);
+        let quick = UiInput { mouse_pressed: true, mouse_released: true, ..over(0) };
+        assert_eq!(three(&mut ui, quick, true), [true, false, false]);
+    }
+
+    #[test]
+    fn disabled_buttons_do_nothing() {
+        let mut ui = Ui::default();
+        let over = UiInput { cursor: on_row(1, 0.5), ..Default::default() };
+        three(&mut ui, over, false);
+        three(&mut ui, UiInput { cursor: on_row(1, 0.4), ..Default::default() }, false);
+        assert!(!ui.is_focused("dois"), "the mouse can't focus it");
+        three(&mut ui, UiInput { mouse_down: true, mouse_pressed: true, ..over }, false);
+        assert_eq!(three(&mut ui, UiInput { mouse_released: true, ..over }, false), [false; 3]);
+        assert_eq!(three(&mut ui, UiInput { activate: true, ..over }, false), [true, false, false], "Enter goes to um");
+
+        // The keyboard skips it, and it can take the focus again once enabled.
+        let mut ui = Ui::default();
+        three(&mut ui, UiInput::default(), false);
+        three(&mut ui, UiInput { down: true, ..Default::default() }, false);
+        assert!(ui.is_focused("tres"));
+        three(&mut ui, UiInput { down: true, ..Default::default() }, true);
+        assert!(ui.is_focused("um"));
+        three(&mut ui, UiInput { down: true, ..Default::default() }, true);
+        assert!(ui.is_focused("dois"), "enabled last frame, so the keyboard sees it");
+
+        // Disabled while focused: the focus moves on instead of getting lost.
+        three(&mut ui, UiInput::default(), false);
+        three(&mut ui, UiInput::default(), false);
+        assert!(ui.is_focused("um"));
+    }
+
+    #[test]
+    fn the_keyboard_moves_the_focus_and_activates() {
+        let mut ui = Ui::default();
+        let idle = UiInput::default();
+        three(&mut ui, idle, true);
+        assert!(ui.is_focused("um"));
+        three(&mut ui, UiInput { up: true, ..idle }, true);
+        assert!(ui.is_focused("tres"), "wraps upwards");
+        three(&mut ui, UiInput { down: true, ..idle }, true);
+        assert!(ui.is_focused("um"), "wraps downwards");
+        three(&mut ui, UiInput { down: true, ..idle }, true);
+        assert!(ui.is_focused("dois"));
+        three(&mut ui, UiInput { up: true, down: true, ..idle }, true);
+        assert!(ui.is_focused("dois"), "both cancel out");
+        assert_eq!(three(&mut ui, UiInput { activate: true, ..idle }, true), [false, true, false], "only the focused");
+    }
+
+    #[test]
+    fn input_comes_from_the_engines_input_in_logical_pixels() {
+        let mut input = Input::default();
+        input.set_cursor(Vec2::new(300.0, 200.0));
+        input.key_down(KeyCode::KeyS);
+        input.key_down(KeyCode::Enter);
+        input.button_down(MouseButton::Left);
+        let ui = UiInput::from_input(&input, 2.0);
+        assert_eq!(ui.cursor, Some(Vec2::new(150.0, 100.0)));
+        assert!(ui.down && ui.activate && ui.mouse_down && ui.mouse_pressed);
+        assert!(!ui.up && !ui.mouse_released);
+
+        input.end_frame();
+        let held = UiInput::from_input(&input, 2.0);
+        assert!(!held.down && !held.activate && !held.mouse_pressed, "held keys don't act again");
+        input.key_repeat(KeyCode::KeyS);
+        input.key_repeat(KeyCode::Enter);
+        let repeated = UiInput::from_input(&input, 2.0);
+        assert!(repeated.down, "holding a direction keeps moving");
+        assert!(!repeated.activate, "holding Enter doesn't keep activating");
+        input.button_up(MouseButton::Left);
+        assert!(UiInput::from_input(&input, 2.0).mouse_released);
+    }
+
+    #[test]
+    fn screens_change_the_focus() {
+        let mut ui = Ui::default();
+        three(&mut ui, UiInput::default(), true);
+        three(&mut ui, UiInput { down: true, ..Default::default() }, true);
+        assert!(ui.is_focused("dois"));
+
+        // Another screen: its first widget takes over at once.
+        ui.reset_focus();
+        frame(&mut ui, UiInput::default(), |ui| ui.button(row(0), "outra"));
+        assert!(ui.is_focused("outra"));
+
+        // Coming back, the game can say where.
+        ui.set_focus("tres");
+        three(&mut ui, UiInput::default(), true);
+        assert!(ui.is_focused("tres"));
+        three(&mut ui, UiInput::default(), true);
+        assert!(ui.is_focused("tres"));
+
+        // A focus nobody draws anymore heals itself.
+        ui.set_focus("nada");
+        three(&mut ui, UiInput::default(), true);
+        three(&mut ui, UiInput::default(), true);
+        assert!(ui.is_focused("um"));
+    }
+
+    #[test]
+    fn sliders_follow_the_keyboard_and_the_mouse() {
+        let mut ui = Ui::default();
+        let mut value = 0.5;
+        let idle = UiInput::default();
+        let mut slide = |ui: &mut Ui, input| {
+            frame(ui, input, |ui| {
+                let changed = ui.slider(row(0), "volume", &mut value, 0.0..=1.0, 0.25);
+                (changed, ui.button(row(1), "outro"), value)
+            })
+        };
+        assert_eq!(slide(&mut ui, idle), (false, false, 0.5));
+        assert_eq!(slide(&mut ui, UiInput { right: true, ..idle }), (true, false, 0.75));
+        assert_eq!(slide(&mut ui, UiInput { left: true, ..idle }), (true, false, 0.5));
+        assert_eq!(slide(&mut ui, UiInput { left: true, right: true, ..idle }).2, 0.5);
+        assert_eq!(slide(&mut ui, UiInput { right: true, ..idle }).2, 0.75);
+        assert_eq!(slide(&mut ui, UiInput { right: true, ..idle }).2, 1.0);
+        assert_eq!(slide(&mut ui, UiInput { right: true, ..idle }), (false, false, 1.0), "stops at the end");
+
+        // Not focused: arrows leave it alone.
+        slide(&mut ui, UiInput { down: true, ..idle });
+        assert_eq!(slide(&mut ui, UiInput { left: true, ..idle }), (false, false, 1.0));
+
+        // The track starts where the value part of the row does.
+        let track_start = value_area(row(0), ui.theme.text_size).min.x;
+        let at = |x: f32| Some(Vec2::new(x, row(0).point(Anchor::Center).y));
+        // Pressing on the label doesn't jump, even though it takes the focus.
+        slide(&mut ui, UiInput { cursor: at(120.0), ..idle });
+        let press = UiInput { cursor: at(120.0), mouse_down: true, mouse_pressed: true, ..idle };
+        assert_eq!(slide(&mut ui, press), (false, false, 1.0));
+        assert_eq!(slide(&mut ui, UiInput { cursor: at(120.0), mouse_released: true, ..idle }).2, 1.0);
+        assert!(ui.is_focused("volume"));
+
+        // Pressing on the track grabs it; it follows the cursor anywhere, in steps, until released.
+        slide(&mut ui, UiInput { cursor: at(track_start), ..idle });
+        let press = UiInput { cursor: at(track_start), mouse_down: true, mouse_pressed: true, ..idle };
+        assert_eq!(slide(&mut ui, press), (true, false, 0.0));
+        let drag = |x, y: f32| UiInput { cursor: Some(Vec2::new(x, y)), mouse_down: true, ..idle };
+        assert_eq!(slide(&mut ui, drag(1000.0, 400.0)).2, 1.0, "past the end, away from the row");
+        assert_eq!(slide(&mut ui, drag(0.0, 400.0)).2, 0.0);
+        let (_, other, _) = slide(&mut ui, drag(300.0, row(1).point(Anchor::Center).y));
+        assert!(!other, "other widgets ignore the mouse meanwhile");
+        let released = UiInput { cursor: at(track_start), mouse_released: true, ..idle };
+        let value_there = slide(&mut ui, released).2;
+        assert_eq!(slide(&mut ui, UiInput { cursor: at(1000.0), ..idle }).2, value_there, "let go");
+    }
+
+    #[test]
+    fn toggles_and_choices_answer_both_ways() {
+        let mut ui = Ui::default();
+        let idle = UiInput::default();
+        let mut on = false;
+        let mut toggle = |ui: &mut Ui, input| frame(ui, input, |ui| ui.toggle(row(0), "cheia", &mut on));
+        assert!(!toggle(&mut ui, idle));
+        assert!(toggle(&mut ui, UiInput { activate: true, ..idle }));
+        assert!(toggle(&mut ui, UiInput { right: true, ..idle }));
+        let over = UiInput { cursor: on_row(0, 0.5), ..idle };
+        toggle(&mut ui, over);
+        assert!(!toggle(&mut ui, UiInput { mouse_down: true, mouse_pressed: true, ..over }));
+        assert!(toggle(&mut ui, UiInput { mouse_released: true, ..over }));
+        assert!(on, "flipped three times from off");
+
+        let mut ui = Ui::default();
+        let options = ["a", "b", "c"];
+        let mut selected = 0;
+        let mut choose = |ui: &mut Ui, input| {
+            frame(ui, input, |ui| (ui.choice(row(0), "escala", &options, &mut selected), selected))
+        };
+        assert_eq!(choose(&mut ui, idle), (false, 0));
+        assert_eq!(choose(&mut ui, UiInput { left: true, ..idle }), (true, 2), "wraps");
+        assert_eq!(choose(&mut ui, UiInput { right: true, ..idle }), (true, 0));
+        assert_eq!(choose(&mut ui, UiInput { activate: true, ..idle }), (true, 1));
+        // The left part of the value goes back, the rest forward.
+        let left = UiInput { cursor: on_row(0, 0.65), ..idle };
+        choose(&mut ui, left);
+        choose(&mut ui, UiInput { mouse_down: true, mouse_pressed: true, ..left });
+        assert_eq!(choose(&mut ui, UiInput { mouse_released: true, ..left }), (true, 0));
+        let right = UiInput { cursor: on_row(0, 0.9), ..idle };
+        choose(&mut ui, right);
+        choose(&mut ui, UiInput { mouse_down: true, mouse_pressed: true, ..right });
+        assert_eq!(choose(&mut ui, UiInput { mouse_released: true, ..right }), (true, 1));
     }
 
     #[test]

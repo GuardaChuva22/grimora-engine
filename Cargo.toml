@@ -16,7 +16,7 @@ grimora_physics = { path = "crates/grimora_physics" }
 grimora_audio = { path = "crates/grimora_audio" }
 
 wgpu = "30"
-winit = "0.30"
+winit = { version = "0.30", features = ["serde"] }
 glam = { version = "0.34", features = ["bytemuck", "serde"] }
 bytemuck = { version = "1", features = ["derive"] }
 pollster = "1"
@@ -30,7 +30,8 @@ font8x8 = { version = "0.3", default-features = false }
 rapier3d = "0.36"
 kira = { version = "0.12", default-features = false, features = ["cpal", "wav", "pcm", "ogg", "vorbis"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
-gltf = { version = "1.4", default-features = false, features = ["import", "utils", "names", "KHR_materials_emissive_strength"] }
+gilrs = "0.11"
+gltf = { version = "1.4", default-features = false, features = ["import", "utils", "names", "extras", "KHR_materials_emissive_strength"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

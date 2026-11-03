@@ -1,4 +1,4 @@
-use grimora_core::{MeshData, Vec3};
+use grimora_core::{Material, MeshData, Submesh, Vec3};
 use serde::{Deserialize, Serialize};
 
 use crate::rng::{Rng, fbm};
@@ -23,6 +23,51 @@ pub struct TerrainDesc {
     pub grass_color: Vec3,
     pub dirt_color: Vec3,
     pub rock_color: Vec3,
+    /// Pictures for the ground instead of plain colors.
+    pub textures: Option<TerrainTextures>,
+    /// Holes in the ground to fill with `water`. Scattered things stay out of them.
+    pub ponds: Vec<Pond>,
+}
+
+/// One picture per kind of ground, relative to the scene file; the slope and
+/// height of each face choose it, as they choose the colors.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TerrainTextures {
+    pub grass: String,
+    pub dirt: String,
+    pub rock: String,
+    /// Meters one repeat of a picture covers.
+    pub tile: f32,
+}
+
+impl Default for TerrainTextures {
+    fn default() -> Self {
+        Self { grass: String::new(), dirt: String::new(), rock: String::new(), tile: 4.0 }
+    }
+}
+
+/// A round dip in the terrain.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Pond {
+    pub x: f32,
+    pub z: f32,
+    pub radius: f32,
+    /// How far down the middle goes.
+    pub depth: f32,
+}
+
+impl Default for Pond {
+    fn default() -> Self {
+        Self { x: 0.0, z: 0.0, radius: 8.0, depth: 1.5 }
+    }
+}
+
+impl Pond {
+    fn contains(&self, x: f32, z: f32) -> bool {
+        (x - self.x).hypot(z - self.z) < self.radius
+    }
 }
 
 impl Default for TerrainDesc {
@@ -38,6 +83,8 @@ impl Default for TerrainDesc {
             grass_color: Vec3::new(0.22, 0.26, 0.16),
             dirt_color: Vec3::new(0.28, 0.22, 0.17),
             rock_color: Vec3::new(0.32, 0.31, 0.33),
+            textures: None,
+            ponds: Vec::new(),
         }
     }
 }
@@ -130,6 +177,56 @@ impl Terrain {
         chunks
     }
 
+    /// [`Terrain::chunk_meshes`] with `materials` (grass, dirt, rock) instead of
+    /// colors, whose pictures repeat every `tile` meters. Vertices stay in the
+    /// same order; each chunk draws one group of faces per material.
+    pub fn textured_chunks(&self, quads: usize, materials: [Material; 3], tile: f32) -> Vec<MeshData> {
+        let tile = tile.max(0.01);
+        let mut rng = Rng::new(u64::from(self.desc.seed) + 78);
+        let mut chunks = self.chunk_meshes(quads);
+        for chunk in &mut chunks {
+            let mut layers: [Vec<u32>; 3] = Default::default();
+            for (face, vertices) in chunk.vertices.as_chunks_mut::<3>().0.iter_mut().enumerate() {
+                let [a, b, c] = [0, 1, 2].map(|i| Vec3::from(vertices[i].position));
+                let brightness = 1.0 + rng.jitter(0.07);
+                for vertex in vertices.iter_mut() {
+                    vertex.uv = [vertex.position[0] / tile, vertex.position[2] / tile];
+                    vertex.color = [brightness; 3];
+                }
+                let first = face as u32 * 3;
+                layers[self.face_layer(a, b, c)].extend(first..first + 3);
+            }
+            chunk.materials = materials.to_vec();
+            chunk.indices.clear();
+            chunk.submeshes.clear();
+            for (material, layer) in layers.iter().enumerate().filter(|(_, layer)| !layer.is_empty()) {
+                let start = chunk.indices.len() as u32;
+                chunk.indices.extend_from_slice(layer);
+                chunk.submeshes.push(Submesh { indices: start..chunk.indices.len() as u32, material });
+            }
+        }
+        chunks
+    }
+
+    /// Whether `(x, z)` is inside a pond.
+    pub fn in_pond(&self, x: f32, z: f32) -> bool {
+        self.desc.ponds.iter().any(|pond| pond.contains(x, z))
+    }
+
+    /// Which picture a face gets: 0 grass, 1 dirt, 2 rock.
+    fn face_layer(&self, a: Vec3, b: Vec3, c: Vec3) -> usize {
+        let normal = (b - a).cross(c - a).normalize_or(Vec3::Y);
+        let slope = 1.0 - normal.y;
+        let height = (a.y + b.y + c.y) / 3.0;
+        if slope > 0.2 || height > self.desc.height + 13.0 {
+            2
+        } else if slope > 0.08 {
+            1
+        } else {
+            0
+        }
+    }
+
     fn face_color(&self, a: Vec3, b: Vec3, c: Vec3, rng: &mut Rng) -> Vec3 {
         let normal = (b - a).cross(c - a).normalize_or(Vec3::Y);
         let slope = 1.0 - normal.y;
@@ -159,7 +256,13 @@ fn sample_height(desc: &TerrainDesc, x: f32, z: f32) -> f32 {
     let r = (x * x + z * z).sqrt();
     let flat_h = fbm(0.0, 0.0, desc.seed, 5) * desc.height;
     let t = smooth(desc.flat_radius, desc.flat_radius * 2.0, r);
-    flat_h + (h - flat_h) * t
+    let mut ground = flat_h + (h - flat_h) * t;
+
+    for pond in &desc.ponds {
+        let d = (x - pond.x).hypot(z - pond.z);
+        ground -= pond.depth * (1.0 - smooth(pond.radius * 0.45, pond.radius, d));
+    }
+    ground
 }
 
 #[cfg(test)]
@@ -195,5 +298,42 @@ mod tests {
         // Chunk (1, 0) covers x in 16..32 of the -20..20 grid, z in -20..-4.
         let bounds = chunks[1].bounding_sphere();
         assert!(bounds.center.x > -4.0 && bounds.center.x < 12.0 && bounds.center.z < -4.0, "{bounds:?}");
+    }
+
+    #[test]
+    fn textured_chunks_keep_the_shape_and_group_faces_by_picture() {
+        let material = || Material { pixelated: true, ..Default::default() };
+        let desc = TerrainDesc { resolution: 10, size: 40.0, height: 30.0, ..Default::default() };
+        let terrain = Terrain::new(desc);
+        let chunks = terrain.textured_chunks(4, [material(), material(), material()], 2.0);
+        let plain = terrain.chunk_meshes(4);
+        let mut layers_used = [false; 3];
+        for (textured, plain) in chunks.iter().zip(&plain) {
+            assert_eq!(textured.vertices.len(), plain.vertices.len());
+            assert_eq!(textured.indices.len(), plain.indices.len());
+            for (a, b) in textured.vertices.iter().zip(&plain.vertices) {
+                assert_eq!(a.position, b.position, "the collider and the ground stay the same");
+                assert_eq!(a.uv, [a.position[0] / 2.0, a.position[2] / 2.0]);
+            }
+            assert_eq!(textured.materials.len(), 3);
+            let drawn: u32 = textured.submeshes.iter().map(|s| s.indices.len() as u32).sum();
+            assert_eq!(drawn as usize, textured.indices.len());
+            for sub in &textured.submeshes {
+                layers_used[sub.material] = true;
+                assert!(textured.material(sub.material).pixelated);
+            }
+        }
+        assert_eq!(layers_used, [true, true, true], "this much relief has all three");
+    }
+
+    #[test]
+    fn ponds_dig_into_the_ground() {
+        let base = TerrainDesc { resolution: 64, size: 64.0, flat_radius: 30.0, edge_rise: 0.0, ..Default::default() };
+        let pond = Pond { x: 8.0, z: -4.0, radius: 6.0, depth: 2.0 };
+        let dug = Terrain::new(TerrainDesc { ponds: vec![pond], ..base.clone() });
+        let flat = Terrain::new(base);
+        assert!((flat.height_at(8.0, -4.0) - dug.height_at(8.0, -4.0) - 2.0).abs() < 1e-3);
+        assert!((flat.height_at(-20.0, 10.0) - dug.height_at(-20.0, 10.0)).abs() < 1e-3, "away from it, nothing");
+        assert!(dug.in_pond(10.0, -4.0) && !dug.in_pond(15.0, -4.0));
     }
 }

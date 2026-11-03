@@ -5,14 +5,20 @@
 //! that walks, slides along walls, climbs steps and slopes, snaps to the ground
 //! and pushes dynamic bodies out of its way.
 
+mod nav;
+
 use grimora_core::{Quat, Transform, Vec3};
 use grimora_scene::{BodyDesc, ColliderShape, Scene};
 use rapier3d::control::{CharacterAutostep, CharacterCollision, CharacterLength, KinematicCharacterController};
 use rapier3d::math::{Pose, Rotation, Vector};
 use rapier3d::parry::query::Ray;
 use rapier3d::parry::shape::Capsule;
-use rapier3d::prelude::{ColliderBuilder, PhysicsWorld, QueryFilter, RigidBodyBuilder, RigidBodyHandle};
+use rapier3d::prelude::{
+    ColliderBuilder, Group, InteractionGroups, InteractionTestMode, PhysicsWorld, QueryFilter, RigidBodyBuilder,
+    RigidBodyHandle,
+};
 
+pub use nav::{NavPath, NavShape};
 pub use rapier3d;
 pub use rapier3d::prelude::ColliderHandle;
 
@@ -54,6 +60,15 @@ fn from_rapier(v: Vector) -> Vec3 {
 
 fn rotation(q: Quat) -> Rotation {
     Rotation::from_xyzw(q.x, q.y, q.z, q.w)
+}
+
+/// The collision group of agents' capsules.
+const AGENTS: Group = Group::GROUP_32;
+
+/// What path searches and sight lines look at: everything but agents.
+fn scenery() -> QueryFilter<'static> {
+    let groups = InteractionGroups::new(Group::ALL, Group::ALL.difference(AGENTS), InteractionTestMode::And);
+    QueryFilter::default().groups(groups)
 }
 
 /// A ray hit.
@@ -163,6 +178,28 @@ impl Physics {
         Some(BodyHandle(handle))
     }
 
+    /// Adds a capsule that walks under the game's control, feet at `position`:
+    /// solid to characters and dynamic bodies, but ignored by [`Physics::find_path`]
+    /// and [`Physics::raycast_scenery`].
+    pub fn add_agent(&mut self, position: Vec3, radius: f32, height: f32) -> ColliderHandle {
+        // Not a kinematic body: the character controller glues characters to those,
+        // as it does on a moving platform, so walking past one would stick.
+        let half_segment = (height * 0.5 - radius).max(0.01);
+        let center = position + Vec3::Y * height * 0.5;
+        let groups = InteractionGroups::new(AGENTS, Group::ALL, InteractionTestMode::And);
+        let collider =
+            ColliderBuilder::capsule_y(half_segment, radius).translation(to_rapier(center)).collision_groups(groups);
+        self.world.insert_collider(collider, None)
+    }
+
+    /// Moves a capsule from [`Physics::add_agent`], with its middle at `center`.
+    /// Queries see it after the next step.
+    pub fn move_agent(&mut self, agent: ColliderHandle, center: Vec3) {
+        if let Some(collider) = self.world.colliders.get_mut(agent) {
+            collider.set_translation(to_rapier(center));
+        }
+    }
+
     /// Position and rotation of a dynamic body's origin (its object's origin).
     pub fn body_pose(&self, body: BodyHandle) -> Option<(Vec3, Quat)> {
         let pose = self.world.bodies.get(body.0)?.position();
@@ -205,6 +242,14 @@ impl Physics {
         self.world.remove_collider(collider);
     }
 
+    /// Turns a collider on or off: while off, nothing bumps into it or sees it.
+    /// Queries notice after the next step.
+    pub fn set_enabled(&mut self, collider: ColliderHandle, enabled: bool) {
+        if let Some(collider) = self.world.colliders.get_mut(collider) {
+            collider.set_enabled(enabled);
+        }
+    }
+
     /// Advances the simulation by `dt` seconds in fixed steps.
     pub fn step(&mut self, dt: f32) {
         self.accumulator = (self.accumulator + dt).min(Self::FIXED_DT * Self::MAX_STEPS_PER_FRAME as f32);
@@ -221,12 +266,22 @@ impl Physics {
 
     /// First hit along `direction` (need not be normalized) within `max_distance`.
     pub fn raycast(&self, origin: Vec3, direction: Vec3, max_distance: f32) -> Option<RayHit> {
+        self.cast(origin, direction, max_distance, QueryFilter::default())
+    }
+
+    /// Like [`Physics::raycast`], seeing through agents: for sight lines and
+    /// cameras, which shouldn't jump whenever somebody walks past.
+    pub fn raycast_scenery(&self, origin: Vec3, direction: Vec3, max_distance: f32) -> Option<RayHit> {
+        self.cast(origin, direction, max_distance, scenery())
+    }
+
+    fn cast(&self, origin: Vec3, direction: Vec3, max_distance: f32, filter: QueryFilter) -> Option<RayHit> {
         let direction = direction.normalize_or_zero();
         if direction == Vec3::ZERO {
             return None;
         }
         let ray = Ray::new(to_rapier(origin), to_rapier(direction));
-        let (collider, hit) = self.world.cast_ray_and_get_normal(&ray, max_distance, true, QueryFilter::default())?;
+        let (collider, hit) = self.world.cast_ray_and_get_normal(&ray, max_distance, true, filter)?;
         Some(RayHit {
             collider,
             distance: hit.time_of_impact,
@@ -271,6 +326,8 @@ pub struct CharacterBody {
     pub grounded: bool,
     /// Kilograms; decides how hard the character shoves dynamic bodies. 0 never pushes.
     pub mass: f32,
+    /// A collider it passes through: its own capsule, if it has one.
+    pub ignore: Option<ColliderHandle>,
     pub controller: KinematicCharacterController,
 }
 
@@ -288,7 +345,7 @@ impl CharacterBody {
             snap_to_ground: Some(CharacterLength::Absolute(0.3)),
             ..Default::default()
         };
-        Self { position, radius, height, grounded: false, mass: 80.0, controller }
+        Self { position, radius, height, grounded: false, mass: 80.0, ignore: None, controller }
     }
 
     /// World position of the capsule's center.
@@ -301,9 +358,13 @@ impl CharacterBody {
     pub fn move_and_slide(&mut self, physics: &mut Physics, translation: Vec3, dt: f32) -> Vec3 {
         let shape = Capsule::new_y((self.height * 0.5 - self.radius).max(0.01), self.radius);
         let mut pushes = Vec::new();
+        let filter = match self.ignore {
+            Some(collider) => QueryFilter::default().exclude_collider(collider),
+            None => QueryFilter::default(),
+        };
         let movement = self.controller.move_shape(
             dt,
-            &physics.world.query_pipeline(),
+            &physics.world.query_pipeline_with_filter(filter),
             &shape,
             &Pose::from_translation(to_rapier(self.center())),
             to_rapier(translation),

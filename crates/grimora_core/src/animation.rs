@@ -62,6 +62,9 @@ pub struct Skeleton {
     pub clips: Vec<AnimationClip>,
     /// Joint indices with parents before children.
     order: Vec<usize>,
+    /// The joint called `root`, whose travel moves the character instead of its
+    /// pose: see [`Animator::root_delta`].
+    motion: Option<usize>,
 }
 
 impl Skeleton {
@@ -92,7 +95,8 @@ impl Skeleton {
                 order.push(i);
             }
         }
-        Self { joints, root, clips, order }
+        let motion = joints.iter().position(|j| j.name == "root");
+        Self { joints, root, clips, order, motion }
     }
 
     pub fn joint(&self, name: &str) -> Option<usize> {
@@ -105,6 +109,11 @@ impl Skeleton {
             .iter()
             .position(|c| c.name == name)
             .or_else(|| self.clips.iter().position(|c| c.name.eq_ignore_ascii_case(name)))
+    }
+
+    /// Joint indices with parents before children.
+    pub fn order(&self) -> &[usize] {
+        &self.order
     }
 
     pub fn rest_pose(&self) -> Vec<JointTransform> {
@@ -150,12 +159,21 @@ pub struct Channel {
     pub keys: Keyframes,
 }
 
+/// A named moment in a clip: a foot landing, a blow connecting. See [`Animator::events`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClipEvent {
+    /// Seconds from the start of the clip.
+    pub time: f32,
+    pub name: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct AnimationClip {
     pub name: String,
     /// Seconds.
     pub duration: f32,
     pub channels: Vec<Channel>,
+    pub events: Vec<ClipEvent>,
 }
 
 impl AnimationClip {
@@ -171,6 +189,15 @@ impl AnimationClip {
                 Keyframes::Scale(v) => target.scale = v[a].lerp(v[b], t),
             }
         }
+    }
+
+    /// The translation it gives `joint` at `time`, if it animates that.
+    fn translation_at(&self, joint: usize, time: f32) -> Option<Vec3> {
+        self.channels.iter().filter(|c| c.joint == joint).find_map(|channel| {
+            let Keyframes::Translation(v) = &channel.keys else { return None };
+            let (a, b, t) = channel.keys_at(time)?;
+            Some(v[a].lerp(v[b], t))
+        })
     }
 }
 
@@ -210,9 +237,53 @@ struct Track {
     clip: usize,
     time: f32,
     looping: bool,
+    /// Another clip mixed in, kept at the same point of its cycle, and how much of it shows.
+    mix: Option<(usize, f32)>,
 }
 
-/// Plays a skeleton's clips: looping or once, with crossfades between them.
+impl Track {
+    fn new(clip: usize, time: f32, looping: bool) -> Self {
+        Self { clip, time, looping, mix: None }
+    }
+}
+
+/// A clip on its way out, under the one that replaced it.
+#[derive(Debug, Clone, Copy)]
+struct Fading {
+    track: Track,
+    /// Its own playback rate: what comes next doesn't change how it ends.
+    speed: f32,
+    remaining: f32,
+    total: f32,
+}
+
+impl Fading {
+    /// How much of the clip above it shows. Smoothstep makes the fade ease in and out.
+    fn weight(&self) -> f32 {
+        let t = 1.0 - (self.remaining / self.total).clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    }
+}
+
+/// Clips that can be fading out at once. Reaching it takes a change every couple of
+/// frames, and by then the oldest hardly shows.
+const MAX_FADING: usize = 8;
+
+/// Clips played over part of the body, the rest following the clips underneath: the arms
+/// holding a guard while the legs walk.
+#[derive(Debug, Clone)]
+struct Overlay {
+    current: Track,
+    previous: Vec<Fading>,
+    /// The joints it moves.
+    mask: Vec<bool>,
+    /// How far in it has faded, from 0 to 1, and how fast that changes per second.
+    amount: f32,
+    rate: f32,
+}
+
+/// Plays a skeleton's clips: looping or once, with crossfades between them. A change in
+/// the middle of a fade fades from what's on screen, however many clips that takes.
 ///
 /// Call [`Animator::update`] once per frame (the engine does it for animators
 /// on world objects), then read [`Animator::skinning_matrices`].
@@ -220,14 +291,20 @@ struct Track {
 pub struct Animator {
     skeleton: Arc<Skeleton>,
     current: Option<Track>,
-    /// Clip being faded out, with the fade's remaining and total seconds.
-    previous: Option<(Track, f32, f32)>,
-    /// Playback rate; 1 is normal speed.
+    /// Clips being faded out, oldest first.
+    previous: Vec<Fading>,
+    overlay: Option<Overlay>,
+    /// Playback rate of the clips underneath; 1 is normal speed. Overlays keep their own time.
     pub speed: f32,
     pose: Vec<JointTransform>,
     scratch: Vec<JointTransform>,
+    mixing: Vec<JointTransform>,
+    overlay_pose: Vec<JointTransform>,
     globals: Vec<Mat4>,
     matrices: Vec<Mat4>,
+    /// Events the last update passed, as clip and event indices.
+    fired: Vec<(usize, usize)>,
+    root_delta: Vec3,
 }
 
 impl Animator {
@@ -236,12 +313,17 @@ impl Animator {
         let mut animator = Self {
             pose: skeleton.rest_pose(),
             scratch: Vec::new(),
+            mixing: Vec::new(),
+            overlay_pose: Vec::new(),
             skeleton,
             current: None,
-            previous: None,
+            previous: Vec::new(),
+            overlay: None,
             speed: 1.0,
             globals: Vec::new(),
             matrices: Vec::new(),
+            fired: Vec::new(),
+            root_delta: Vec3::ZERO,
         };
         animator.evaluate();
         animator
@@ -262,26 +344,141 @@ impl Animator {
         self.start(name, fade, false)
     }
 
+    /// Plays the clip `name` once from its start, even if it is already playing.
+    pub fn replay_once(&mut self, name: &str, fade: f32) -> bool {
+        let Some(clip) = self.skeleton.clip(name) else { return false };
+        self.switch_to(Track::new(clip, 0.0, false), fade);
+        true
+    }
+
+    /// Like [`Animator::play`], picking up at the same point of the cycle as the clip
+    /// that was looping, so that the feet keep their step from one gait to another.
+    pub fn play_in_step(&mut self, name: &str, fade: f32) -> bool {
+        let Some(clip) = self.skeleton.clip(name) else { return false };
+        if self.current.is_some_and(|track| track.clip == clip && track.mix.is_none()) {
+            return true;
+        }
+        self.switch_to(Track::new(clip, self.time_in_step(clip), true), fade);
+        true
+    }
+
+    /// Loops `name` mixed with `other` by `weight`, from 0 (all `name`) to 1 (all `other`), both
+    /// at the same point of their cycles: walking on a diagonal, say. It can be called every
+    /// frame with a new weight, and changing either clip fades and keeps the step.
+    pub fn play_mixed(&mut self, name: &str, other: &str, weight: f32, fade: f32) -> bool {
+        let (Some(clip), Some(other)) = (self.skeleton.clip(name), self.skeleton.clip(other)) else { return false };
+        let mix = Some((other, weight.clamp(0.0, 1.0)));
+        if let Some(track) = &mut self.current
+            && track.clip == clip
+            && track.mix.is_some_and(|(already, _)| already == other)
+        {
+            track.mix = mix;
+            track.looping = true;
+            return true;
+        }
+        self.switch_to(Track { mix, ..Track::new(clip, self.time_in_step(clip), true) }, fade);
+        true
+    }
+
+    /// Where `clip` would be at the point of the cycle that the current clip is at, if it loops.
+    fn time_in_step(&self, clip: usize) -> f32 {
+        match self.current {
+            Some(track) if track.looping => {
+                let clips = &self.skeleton.clips;
+                track.time / clips[track.clip].duration.max(1e-3) * clips[clip].duration
+            }
+            _ => 0.0,
+        }
+    }
+
     fn start(&mut self, name: &str, fade: f32, looping: bool) -> bool {
         let Some(clip) = self.skeleton.clip(name) else { return false };
         if let Some(current) = &mut self.current
             && current.clip == clip
+            && current.mix.is_none()
         {
             current.looping = looping;
             return true;
         }
-        self.previous = match self.current.take() {
-            Some(old) if fade > 0.0 => Some((old, fade, fade)),
-            _ => None,
-        };
-        self.current = Some(Track { clip, time: 0.0, looping });
+        self.switch_to(Track::new(clip, 0.0, looping), fade);
         true
+    }
+
+    fn switch_to(&mut self, track: Track, fade: f32) {
+        match self.current.take() {
+            Some(old) if fade > 0.0 => push_fading(&mut self.previous, old, self.speed, fade),
+            _ => self.previous.clear(),
+        }
+        self.current = Some(track);
+    }
+
+    /// Loops `name` over `from` and the joints under it, fading in over `fade` seconds. Does
+    /// nothing if it's already looping there.
+    pub fn overlay_loop(&mut self, name: &str, from: &str, fade: f32) -> bool {
+        let Some(clip) = self.skeleton.clip(name) else { return false };
+        let already = self.overlay.as_ref().is_some_and(|over| over.current.clip == clip && over.rate >= 0.0);
+        already || self.start_overlay(Track::new(clip, 0.0, true), from, fade)
+    }
+
+    /// Plays `name` once from its start over `from` and the joints under it, then holds its
+    /// last frame (see [`Animator::overlay_finished`]).
+    pub fn overlay_once(&mut self, name: &str, from: &str, fade: f32) -> bool {
+        let Some(clip) = self.skeleton.clip(name) else { return false };
+        self.start_overlay(Track::new(clip, 0.0, false), from, fade)
+    }
+
+    fn start_overlay(&mut self, track: Track, from: &str, fade: f32) -> bool {
+        let Some(joint) = self.skeleton.joint(from) else { return false };
+        let rate = 1.0 / fade.max(1e-3);
+        match &mut self.overlay {
+            Some(over) => {
+                push_fading(&mut over.previous, over.current, 1.0, fade.max(1e-3));
+                over.current = track;
+                over.rate = rate;
+            }
+            None => {
+                let mut mask = vec![false; self.skeleton.joints.len()];
+                for &j in self.skeleton.order() {
+                    mask[j] = j == joint || self.skeleton.joints[j].parent.is_some_and(|parent| mask[parent]);
+                }
+                self.overlay = Some(Overlay { current: track, previous: Vec::new(), mask, amount: 0.0, rate });
+            }
+        }
+        true
+    }
+
+    /// Fades the overlay away over `fade` seconds, leaving the clips underneath.
+    pub fn overlay_stop(&mut self, fade: f32) {
+        if let Some(over) = &mut self.overlay {
+            over.rate = over.rate.min(-1.0 / fade.max(1e-3));
+        }
+    }
+
+    /// Name of the clip playing over the body, unless it's fading away.
+    pub fn overlay_current(&self) -> Option<&str> {
+        let over = self.overlay.as_ref().filter(|over| over.rate >= 0.0)?;
+        Some(self.skeleton.clips[over.current.clip].name.as_str())
+    }
+
+    /// The clip over the body, started with [`Animator::overlay_once`], has reached its end.
+    pub fn overlay_finished(&self) -> bool {
+        self.overlay.as_ref().is_some_and(|over| {
+            !over.current.looping && over.current.time >= self.skeleton.clips[over.current.clip].duration
+        })
+    }
+
+    /// Jumps to the end of a clip played once, firing nothing.
+    pub fn skip_to_end(&mut self) {
+        if let Some(track) = &mut self.current {
+            track.time = self.skeleton.clips[track.clip].duration;
+        }
     }
 
     /// Back to the bind pose.
     pub fn stop(&mut self) {
         self.current = None;
-        self.previous = None;
+        self.previous.clear();
+        self.overlay = None;
         self.pose = self.skeleton.rest_pose();
         self.evaluate();
     }
@@ -301,35 +498,73 @@ impl Animator {
         self.current.is_some_and(|t| !t.looping && t.time >= self.skeleton.clips[t.clip].duration)
     }
 
+    /// Names of the events the last [`Animator::update`] passed. Only the current
+    /// clip fires them, not one fading out, and not while it plays backwards.
+    pub fn events(&self) -> impl Iterator<Item = &str> {
+        self.fired.iter().map(|&(clip, event)| self.skeleton.clips[clip].events[event].name.as_str())
+    }
+
+    /// The last [`Animator::update`] passed an event called `name`.
+    pub fn fired(&self, name: &str) -> bool {
+        self.events().any(|event| event == name)
+    }
+
+    /// How far the clip moved its `root` joint in the last [`Animator::update`], in
+    /// model space. The pose itself stays put: the game moves the character by
+    /// this, so a step or a roll is stopped by walls like any other movement.
+    pub fn root_delta(&self) -> Vec3 {
+        self.root_delta
+    }
+
     /// Advances playback by `dt` seconds and recomputes the pose.
     pub fn update(&mut self, dt: f32) {
-        let dt = dt * self.speed;
         let clips = &self.skeleton.clips;
+        self.fired.clear();
+        self.root_delta = Vec3::ZERO;
         if let Some(track) = &mut self.current {
-            advance(track, dt, clips[track.clip].duration);
-        }
-        if let Some((track, remaining, _)) = &mut self.previous {
-            advance(track, dt, clips[track.clip].duration);
-            *remaining -= dt.abs();
-            if *remaining <= 0.0 {
-                self.previous = None;
+            let played = dt * self.speed;
+            passed_events(track, &clips[track.clip], played, &mut self.fired);
+            let before = track.time;
+            advance(track, played, clips[track.clip].duration);
+            if let Some(joint) = self.skeleton.motion
+                && track.time > before
+                && let (Some(from), Some(to)) = (
+                    clips[track.clip].translation_at(joint, before),
+                    clips[track.clip].translation_at(joint, track.time),
+                )
+            {
+                self.root_delta = self.skeleton.root.transform_vector3(to - from);
             }
         }
+        advance_fades(&mut self.previous, dt, clips);
 
         let Some(current) = self.current else { return };
-        self.pose.clear();
-        self.pose.extend(self.skeleton.joints.iter().map(|j| j.rest));
-        clips[current.clip].sample(current.time, &mut self.pose);
-        if let Some((old, remaining, total)) = self.previous {
-            self.scratch.clear();
-            self.scratch.extend(self.skeleton.joints.iter().map(|j| j.rest));
-            clips[old.clip].sample(old.time, &mut self.scratch);
-            // Smoothstep makes the fade ease in and out.
-            let t = 1.0 - (remaining / total).clamp(0.0, 1.0);
-            let w = t * t * (3.0 - 2.0 * t);
-            for (pose, old) in self.pose.iter_mut().zip(&self.scratch) {
-                *pose = old.lerp(pose, w);
+        blend_stack(&self.skeleton, &self.previous, current, &mut self.pose, &mut self.scratch, &mut self.mixing);
+        if let Some(over) = &mut self.overlay {
+            let duration = clips[over.current.clip].duration;
+            advance(&mut over.current, dt, duration);
+            advance_fades(&mut over.previous, dt, clips);
+            over.amount = (over.amount + over.rate * dt).clamp(0.0, 1.0);
+            blend_stack(
+                &self.skeleton,
+                &over.previous,
+                over.current,
+                &mut self.overlay_pose,
+                &mut self.scratch,
+                &mut self.mixing,
+            );
+            let weight = over.amount * over.amount * (3.0 - 2.0 * over.amount);
+            for (j, pose) in self.pose.iter_mut().enumerate() {
+                if over.mask[j] {
+                    *pose = pose.lerp(&self.overlay_pose[j], weight);
+                }
             }
+            if over.amount <= 0.0 && over.rate < 0.0 {
+                self.overlay = None;
+            }
+        }
+        if let Some(joint) = self.skeleton.motion {
+            self.pose[joint].translation = self.skeleton.joints[joint].rest.translation;
         }
         self.evaluate();
     }
@@ -338,6 +573,18 @@ impl Animator {
         self.skeleton.global_transforms(&self.pose, &mut self.globals);
         self.matrices.clear();
         self.matrices.extend(self.globals.iter().zip(&self.skeleton.joints).map(|(g, j)| *g * j.inverse_bind));
+    }
+
+    /// Shows `pose`, one local transform per joint, and stops whatever was playing: for
+    /// tools that work out their own poses.
+    pub fn set_pose(&mut self, pose: &[JointTransform]) {
+        self.current = None;
+        self.previous.clear();
+        self.overlay = None;
+        self.pose.clear();
+        self.pose.extend_from_slice(pose);
+        self.pose.resize(self.skeleton.joints.len(), JointTransform::IDENTITY);
+        self.evaluate();
     }
 
     /// The current local pose, one transform per joint.
@@ -354,6 +601,92 @@ impl Animator {
     /// in a hand, a hat on a head). Multiply by the object's transform for world space.
     pub fn joint_transform(&self, name: &str) -> Option<Mat4> {
         self.globals.get(self.skeleton.joint(name)?).copied()
+    }
+}
+
+/// One clip's pose at the track's time, on top of the rest pose, with what's mixed in.
+fn sample_track(skeleton: &Skeleton, track: Track, out: &mut Vec<JointTransform>, mixing: &mut Vec<JointTransform>) {
+    out.clear();
+    out.extend(skeleton.joints.iter().map(|j| j.rest));
+    let clip = &skeleton.clips[track.clip];
+    clip.sample(track.time, out);
+    if let Some((other, weight)) = track.mix {
+        let other = &skeleton.clips[other];
+        mixing.clear();
+        mixing.extend(skeleton.joints.iter().map(|j| j.rest));
+        other.sample(track.time / clip.duration.max(1e-3) * other.duration, mixing);
+        for (pose, mixed) in out.iter_mut().zip(mixing.iter()) {
+            *pose = pose.lerp(mixed, weight);
+        }
+    }
+}
+
+/// What's on screen of a clip and those fading out under it: from the oldest up, each one
+/// over what's below it.
+fn blend_stack(
+    skeleton: &Skeleton,
+    previous: &[Fading],
+    current: Track,
+    out: &mut Vec<JointTransform>,
+    scratch: &mut Vec<JointTransform>,
+    mixing: &mut Vec<JointTransform>,
+) {
+    sample_track(skeleton, previous.first().map_or(current, |fading| fading.track), out, mixing);
+    for (k, under) in previous.iter().enumerate() {
+        let over = previous.get(k + 1).map_or(current, |fading| fading.track);
+        sample_track(skeleton, over, scratch, mixing);
+        let weight = under.weight();
+        for (pose, over) in out.iter_mut().zip(scratch.iter()) {
+            *pose = pose.lerp(over, weight);
+        }
+    }
+}
+
+fn push_fading(previous: &mut Vec<Fading>, track: Track, speed: f32, fade: f32) {
+    if previous.len() == MAX_FADING {
+        previous.remove(0);
+    }
+    previous.push(Fading { track, speed, remaining: fade, total: fade });
+}
+
+/// Moves the clips fading out along. A fade that's over covers everything under it.
+fn advance_fades(previous: &mut Vec<Fading>, dt: f32, clips: &[AnimationClip]) {
+    for fading in previous.iter_mut() {
+        let duration = clips[fading.track.clip].duration;
+        advance(&mut fading.track, dt * fading.speed, duration);
+        fading.remaining -= dt;
+    }
+    if let Some(done) = previous.iter().rposition(|fading| fading.remaining <= 0.0) {
+        previous.drain(..=done);
+    }
+}
+
+/// Collects the events between `track.time` and `dt` seconds later, the start
+/// included and the end not, so a loop fires each one once per lap.
+fn passed_events(track: &Track, clip: &AnimationClip, dt: f32, fired: &mut Vec<(usize, usize)>) {
+    if dt <= 0.0 || clip.events.is_empty() {
+        return;
+    }
+    let end = track.time + dt;
+    if track.looping && clip.duration > 0.0 {
+        let mut lap = 0.0;
+        while lap < end {
+            for (i, event) in clip.events.iter().enumerate() {
+                let at = lap + event.time.rem_euclid(clip.duration);
+                if at >= track.time && at < end {
+                    fired.push((track.clip, i));
+                }
+            }
+            lap += clip.duration;
+        }
+    } else if track.time < clip.duration {
+        // An event on the last frame still counts: the clip stops there.
+        let last = end >= clip.duration;
+        for (i, event) in clip.events.iter().enumerate() {
+            if event.time >= track.time && (event.time < end || last) {
+                fired.push((track.clip, i));
+            }
+        }
     }
 }
 
@@ -393,6 +726,11 @@ mod tests {
                 times: vec![0.0, 1.0],
                 keys: Keyframes::Rotation(vec![Quat::IDENTITY, Quat::from_rotation_z(std::f32::consts::FRAC_PI_2)]),
             }],
+            events: vec![
+                ClipEvent { time: 0.0, name: "start".into() },
+                ClipEvent { time: 0.5, name: "mid".into() },
+                ClipEvent { time: 1.0, name: "end".into() },
+            ],
         };
         let wave = AnimationClip {
             name: "wave".into(),
@@ -403,6 +741,7 @@ mod tests {
                 times: vec![0.0, 1.0],
                 keys: Keyframes::Translation(vec![Vec3::ZERO, Vec3::X]),
             }],
+            events: Vec::new(),
         };
         Arc::new(Skeleton::new(joints, Mat4::IDENTITY, vec![bend, wave]))
     }
@@ -410,6 +749,68 @@ mod tests {
     /// Where a model-space point bound to `joint` ends up.
     fn skinned(animator: &Animator, joint: usize, point: Vec3) -> Vec3 {
         animator.skinning_matrices()[joint].transform_point3(point)
+    }
+
+    /// Runs `steps` updates of `dt` and lists the events they fire, in order.
+    fn collect(animator: &mut Animator, steps: usize, dt: f32) -> Vec<String> {
+        let mut seen = Vec::new();
+        for _ in 0..steps {
+            animator.update(dt);
+            seen.extend(animator.events().map(str::to_owned));
+        }
+        seen
+    }
+
+    #[test]
+    fn a_loop_fires_each_event_once_per_lap() {
+        let mut animator = Animator::new(arm());
+        animator.play("Bend", 0.0);
+        // "end" sits on the seam, so it counts as the loop's start.
+        assert_eq!(collect(&mut animator, 11, 0.09), ["start", "end", "mid"]);
+        assert_eq!(collect(&mut animator, 11, 0.09), ["start", "end", "mid"]);
+    }
+
+    #[test]
+    fn a_long_step_fires_everything_it_skipped() {
+        let mut animator = Animator::new(arm());
+        animator.play("Bend", 0.0);
+        animator.update(0.1);
+        animator.update(1.0); // from 0.1 past the seam to 0.1 again
+        let seen: Vec<_> = animator.events().collect();
+        assert_eq!(seen, ["mid", "start", "end"]);
+    }
+
+    #[test]
+    fn a_clip_played_once_fires_each_event_once() {
+        let mut animator = Animator::new(arm());
+        animator.play_once("Bend", 0.0);
+        assert_eq!(collect(&mut animator, 30, 0.1), ["start", "mid", "end"]);
+        assert!(animator.finished());
+        // Events last until the next update, and replaying fires them again.
+        animator.replay_once("Bend", 0.0);
+        assert_eq!(animator.time(), 0.0);
+        assert_eq!(collect(&mut animator, 30, 0.1), ["start", "mid", "end"]);
+    }
+
+    #[test]
+    fn the_playback_rate_moves_the_events_too() {
+        let mut animator = Animator::new(arm());
+        animator.play_once("Bend", 0.0);
+        animator.speed = 0.5;
+        assert_eq!(collect(&mut animator, 9, 0.1), ["start"]);
+        assert_eq!(collect(&mut animator, 2, 0.1), ["mid"]);
+        animator.speed = -1.0;
+        assert!(collect(&mut animator, 3, 0.1).is_empty());
+    }
+
+    #[test]
+    fn a_clip_fading_out_fires_nothing() {
+        let mut animator = Animator::new(arm());
+        animator.play("Bend", 0.0);
+        animator.update(0.4);
+        assert!(animator.play("wave", 0.5));
+        animator.update(0.2); // Bend, fading out, passes its 0.5
+        assert!(!animator.fired("mid"));
     }
 
     #[test]
@@ -468,5 +869,64 @@ mod tests {
         assert_eq!(animator.pose()[1].translation, Vec3::ZERO, "fade finished");
         assert_eq!(animator.current(), Some("Bend"));
         assert!(!animator.play("missing", 0.2));
+    }
+
+    #[test]
+    fn a_fade_cut_short_keeps_what_was_showing() {
+        let mut animator = Animator::new(arm());
+        animator.play("wave", 0.0);
+        animator.update(1.2); // shoulder stepped to +X
+        animator.play("Bend", 1.0);
+        animator.update(0.01); // still almost all wave
+        animator.replay_once("wave", 1.0); // back at its start, where the shoulder is at 0
+        animator.update(0.01);
+        let x = animator.pose()[1].translation.x;
+        assert!(x > 0.9, "the shoulder jumped to x = {x}");
+        animator.update(1.1);
+        assert_eq!(animator.current(), Some("wave"));
+        assert_eq!(animator.pose()[1].translation, Vec3::X, "wave alone again, past its step");
+    }
+
+    #[test]
+    fn an_overlay_moves_only_its_joints_and_fades() {
+        let mut animator = Animator::new(arm());
+        animator.play("wave", 0.0);
+        animator.update(1.2); // shoulder at +X
+        assert!(animator.overlay_loop("Bend", "elbow", 0.5));
+        animator.update(0.5);
+        assert_eq!(animator.pose()[1].translation, Vec3::X, "the shoulder keeps the clip underneath");
+        let elbow = animator.pose()[1].rotation;
+        assert_eq!(animator.overlay_current(), Some("Bend"));
+        animator.overlay_stop(0.5);
+        assert_eq!(animator.overlay_current(), None);
+        animator.update(0.25);
+        assert!(animator.pose()[1].rotation != elbow || animator.overlay.is_some());
+        animator.update(0.5);
+        assert!(animator.overlay.is_none());
+    }
+
+    #[test]
+    fn a_mix_shows_both_clips_and_can_change_every_frame() {
+        let mut animator = Animator::new(arm());
+        animator.play("wave", 0.0);
+        animator.update(1.2);
+        animator.play_mixed("wave", "Bend", 0.5, 0.0);
+        animator.update(0.1);
+        let x = animator.pose()[1].translation.x;
+        assert!((x - 0.5).abs() < 1e-5, "half of each, x = {x}");
+        animator.play_mixed("wave", "Bend", 0.0, 0.5);
+        animator.update(0.01);
+        assert_eq!(animator.pose()[1].translation, Vec3::X, "a new weight is no new clip");
+    }
+
+    #[test]
+    fn a_fade_takes_its_time_at_any_speed() {
+        let mut animator = Animator::new(arm());
+        animator.play("wave", 0.0);
+        animator.update(1.2);
+        animator.play("Bend", 1.0);
+        animator.speed = 0.25;
+        animator.update(1.1);
+        assert_eq!(animator.pose()[1].translation, Vec3::ZERO, "fade finished");
     }
 }

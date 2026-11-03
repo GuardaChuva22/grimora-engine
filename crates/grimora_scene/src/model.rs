@@ -14,10 +14,14 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 
+use crate::grip;
 use anyhow::{Context as _, Result, bail};
 use glam::{Mat3, Mat4, Quat, Vec2, Vec3, Vec4};
-use grimora_core::animation::{AnimationClip, Channel, Interpolation, Joint, JointTransform, Keyframes, MAX_JOINTS};
-use grimora_core::{AlphaMode, Material, MeshData, Skeleton, Submesh, TextureData, Vertex};
+use grimora_core::animation::{
+    AnimationClip, Channel, ClipEvent, Interpolation, Joint, JointTransform, Keyframes, MAX_JOINTS,
+};
+use grimora_core::pose::Rig as PoseRig;
+use grimora_core::{AlphaMode, Material, MeshData, PoseClip, Skeleton, Submesh, TextureData, Vertex};
 
 /// Largest texture side used when a scene doesn't say otherwise.
 pub const DEFAULT_MAX_TEXTURE_SIZE: u32 = 2048;
@@ -35,15 +39,88 @@ fn cache() -> &'static Mutex<HashMap<CacheKey, CacheEntry>> {
 pub fn load_model(path: &Path, max_texture_size: u32) -> Result<MeshData> {
     let max = if max_texture_size == 0 { DEFAULT_MAX_TEXTURE_SIZE } else { max_texture_size };
     let key = (path.to_path_buf(), max);
-    let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+    // A clip saved in the animator counts as the model changing.
+    let modified = |file: &Path| std::fs::metadata(file).and_then(|m| m.modified()).ok();
+    let mtime = modified(path).max(clips_changed(path)).max(modified(&grip::grip_path(path)));
     if let Some((cached_mtime, mesh)) = cache().lock().unwrap().get(&key)
         && *cached_mtime == mtime
     {
         return Ok(mesh.clone());
     }
-    let mesh = import(path, max)?;
+    let mut mesh = import(path, max)?;
+    let fit = hold_grip(path, &mut mesh);
+    add_pose_clips(path, &mut mesh);
+    // Baked clips key the fingers too: the file has the last word there as well.
+    if let (Some(fit), Some(skeleton)) = (&fit, &mesh.skeleton) {
+        let mut skeleton = Skeleton::clone(skeleton);
+        grip::apply_fit(&mut skeleton, fit);
+        grip::apply_carry(&mut skeleton, fit);
+        mesh.skeleton = Some(Arc::new(skeleton));
+    }
     cache().lock().unwrap().insert(key, (mtime, mesh.clone()));
     Ok(mesh)
+}
+
+/// The folder of a model's clips written as poses: `wanderer_clips` for `wanderer.gltf`.
+pub fn pose_clips_dir(model: &Path) -> PathBuf {
+    let stem = model.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    model.with_file_name(format!("{stem}_clips"))
+}
+
+/// The clips in a model's folder, with their names, by name. A broken file only logs its error.
+pub fn load_pose_clips(model: &Path) -> Vec<(String, PoseClip)> {
+    let Ok(files) = std::fs::read_dir(pose_clips_dir(model)) else { return Vec::new() };
+    let mut clips = Vec::new();
+    for path in files.flatten().map(|file| file.path()) {
+        if path.extension().is_none_or(|e| e != "ron") {
+            continue;
+        }
+        let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        let read = std::fs::read_to_string(&path).map_err(anyhow::Error::from);
+        match read.and_then(|text| ron::from_str::<PoseClip>(&text).map_err(anyhow::Error::from)) {
+            Ok(clip) => clips.push((name, clip)),
+            Err(err) => log::error!("clip {}: {err:#}", path.display()),
+        }
+    }
+    clips.sort_by(|a, b| a.0.cmp(&b.0));
+    clips
+}
+
+fn clips_changed(model: &Path) -> Option<SystemTime> {
+    let files = std::fs::read_dir(pose_clips_dir(model)).ok()?;
+    files.flatten().filter_map(|file| file.metadata().and_then(|m| m.modified()).ok()).max()
+}
+
+/// Sets the weapon's place in the hand from the model's grip file, before clips are baked on it.
+fn hold_grip(model: &Path, mesh: &mut MeshData) -> Option<grip::GripFit> {
+    let skeleton = mesh.skeleton.as_ref()?;
+    let fit = grip::load_grip(model, skeleton)?;
+    let mut skeleton = Skeleton::clone(skeleton);
+    grip::apply_fit(&mut skeleton, &fit);
+    mesh.skeleton = Some(Arc::new(skeleton));
+    Some(fit)
+}
+
+/// Bakes a model's pose clips into its skeleton, over any clip of the same name in its file.
+fn add_pose_clips(model: &Path, mesh: &mut MeshData) {
+    let Some(skeleton) = &mesh.skeleton else { return };
+    let clips = load_pose_clips(model);
+    if clips.is_empty() {
+        return;
+    }
+    let Some(rig) = PoseRig::new(skeleton) else {
+        log::warn!("{}: clips written as poses need a skeleton with the usual joints", model.display());
+        return;
+    };
+    let mut skeleton = Skeleton::clone(skeleton);
+    for (name, clip) in &clips {
+        let baked = rig.bake(name, clip);
+        match skeleton.clips.iter_mut().find(|c| c.name == *name) {
+            Some(old) => *old = baked,
+            None => skeleton.clips.push(baked),
+        }
+    }
+    mesh.skeleton = Some(Arc::new(skeleton));
 }
 
 fn import(path: &Path, max_texture_size: u32) -> Result<MeshData> {
@@ -288,7 +365,47 @@ fn clip(
         log::warn!("animation {name:?}: {skipped} channels target nodes outside the skeleton and were skipped");
     }
     let duration = channels.iter().filter_map(|c| c.times.last()).fold(0.0f32, |a, &b| a.max(b));
-    (!channels.is_empty()).then_some(AnimationClip { name, duration, channels })
+    let events = clip_events(animation);
+    (!channels.is_empty()).then_some(AnimationClip { name, duration, channels, events })
+}
+
+/// Reads `"extras": { "events": [{ "time": 0.3, "name": "hit" }] }` from an animation.
+fn clip_events(animation: &gltf::Animation) -> Vec<ClipEvent> {
+    let Some(extras) = animation.extras() else { return Vec::new() };
+    let Ok(value) = gltf::json::deserialize::from_str::<gltf::json::Value>(extras.get()) else {
+        return Vec::new();
+    };
+    let list = value.get("events").and_then(|events| events.as_array());
+    let mut events: Vec<ClipEvent> = list
+        .into_iter()
+        .flatten()
+        .filter_map(|event| {
+            let time = event.get("time")?.as_f64()? as f32;
+            let name = event.get("name")?.as_str()?.to_owned();
+            Some(ClipEvent { time, name })
+        })
+        .collect();
+    events.sort_by(|a, b| a.time.total_cmp(&b.time));
+    events
+}
+
+/// Adds events from a scene file to a model's clips, for a model whose file has none.
+pub(crate) fn add_events(mesh: &mut MeshData, events: &[(String, f32, String)]) {
+    let Some(skeleton) = &mesh.skeleton else {
+        log::warn!("model events: this model has no skeleton");
+        return;
+    };
+    let mut skeleton = Skeleton::clone(skeleton);
+    for (clip, time, name) in events {
+        let Some(index) = skeleton.clip(clip) else {
+            log::warn!("model events: no clip {clip:?}");
+            continue;
+        };
+        let events = &mut skeleton.clips[index].events;
+        events.push(ClipEvent { time: *time, name: name.clone() });
+        events.sort_by(|a, b| a.time.total_cmp(&b.time));
+    }
+    mesh.skeleton = Some(Arc::new(skeleton));
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -402,6 +519,10 @@ fn material(m: &gltf::Material, textures: &[Arc<TextureData>]) -> Material {
         normal_scale: normal.as_ref().map_or(1.0, |n| n.scale()),
         occlusion_strength: occlusion.as_ref().map_or(1.0, |o| o.strength()),
         double_sided: m.double_sided(),
+        shading: Default::default(),
+        pixelated: pbr
+            .base_color_texture()
+            .is_some_and(|t| t.texture().sampler().mag_filter() == Some(gltf::texture::MagFilter::Nearest)),
         alpha_mode: match m.alpha_mode() {
             gltf::material::AlphaMode::Opaque => AlphaMode::Opaque,
             gltf::material::AlphaMode::Mask => AlphaMode::Mask { cutoff: m.alpha_cutoff().unwrap_or(0.5) },
@@ -550,6 +671,45 @@ fn linear_to_srgb(c: Vec3) -> Vec3 {
 mod tests {
     use super::*;
 
+    #[test]
+    fn clips_in_text_take_over_those_in_the_file_and_do_what_they_say() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/models/wanderer/wanderer.gltf");
+        let mesh = load_model(&path, 16).unwrap();
+        let skeleton = mesh.skeleton.clone().unwrap();
+        let clips = load_pose_clips(&path);
+        let (name, written) = clips.iter().find(|(name, _)| name == "sword_1").unwrap();
+        let clip = &skeleton.clips[skeleton.clip(name).unwrap()];
+        assert_eq!(clip.events.len(), written.events.len());
+        assert!((clip.duration - written.duration).abs() < 1e-3);
+        // The pose reaches what the keys ask, as far as an arm can: 20 cm in front of the chest.
+        let rig = PoseRig::new(&skeleton).unwrap();
+        let mut controls = grimora_core::Controls::default();
+        controls[grimora_core::Control::HandR] = Vec3::new(0.2, 1.2, -0.35);
+        controls[grimora_core::Control::Blade] = Vec3::Y;
+        controls[grimora_core::Control::Edge] = Vec3::Z;
+        controls[grimora_core::Control::FootL] = Vec3::new(-0.15, 0.2, -0.2);
+        let solved = rig.solve(&controls);
+        let weapon = skeleton.joint("weapon.R").unwrap();
+        assert!(solved.positions[weapon].distance(controls[grimora_core::Control::HandR]) < 1e-3);
+        assert!((solved.turns[weapon] * Vec3::NEG_Z).distance(Vec3::Y) < 1e-3);
+        assert!(
+            solved.positions[skeleton.joint("foot.L").unwrap()].distance(controls[grimora_core::Control::FootL]) < 1e-3
+        );
+        assert_eq!(solved.short_hand, 0.0);
+        // What the solver says on the character is what it gets once baked to rotations.
+        let mut local = Vec::new();
+        rig.local_pose(&solved, &controls, Vec3::ZERO, &mut local);
+        let mut globals = Vec::new();
+        skeleton.global_transforms(&local, &mut globals);
+        for (joint, global) in globals.iter().enumerate() {
+            assert!(
+                global.w_axis.truncate().distance(solved.positions[joint]) < 2e-3,
+                "{}",
+                skeleton.joints[joint].name
+            );
+        }
+    }
+
     /// Writes a small glTF to a temp folder: one textured, alpha-masked, emissive
     /// triangle used by two nodes under a translated parent, one scaled by 2 and
     /// one mirrored.
@@ -673,14 +833,39 @@ mod tests {
     }
 
     #[test]
+    fn events_can_come_from_the_scene_file() {
+        let desc: crate::MeshDesc = ron::from_str(
+            r#"Model(path: "wanderer.gltf", events: [("idle", 1.0, "yawn"), ("walk", 0.1, "scuff"), ("nope", 0.0, "x")])"#,
+        )
+        .unwrap();
+        let dir = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/models/wanderer"));
+        let skeleton = desc.build_in(dir).skeleton.unwrap();
+        let idle = &skeleton.clips[skeleton.clip("idle").unwrap()];
+        assert_eq!(idle.events, [ClipEvent { time: 1.0, name: "yawn".into() }]);
+        // Kept in order, among the ones from the file.
+        let walk = &skeleton.clips[skeleton.clip("walk").unwrap()];
+        let names: Vec<_> = walk.events.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["scuff", "step", "step"]);
+    }
+
+    #[test]
     fn imports_skin_and_animations() {
         let path = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/models/wanderer/wanderer.gltf"));
         let mesh = load_model(path, 0).unwrap();
         let skeleton = mesh.skeleton.clone().expect("the wanderer is rigged");
-        assert_eq!(skeleton.joints.len(), 17);
+        assert_eq!(skeleton.joints.len(), 43);
         for name in ["idle", "walk", "run", "jump"] {
             assert!(skeleton.clip(name).is_some(), "missing clip {name}");
         }
+        let names = |clip: &str| -> Vec<String> {
+            let clip = &skeleton.clips[skeleton.clip(clip).unwrap()];
+            clip.events.iter().map(|e| e.name.clone()).collect()
+        };
+        assert_eq!(names("walk"), ["step", "step"]);
+        assert_eq!(names("attack"), ["swing", "hit"]);
+        assert!(names("idle").is_empty());
+        let walk = &skeleton.clips[skeleton.clip("walk").unwrap()];
+        assert!((walk.events[0].time - walk.duration * 0.25).abs() < 1e-4);
         for v in &mesh.vertices {
             assert_eq!(v.weights.iter().map(|&w| w as u32).sum::<u32>(), 255);
             assert!(v.joints.iter().all(|&j| (j as usize) < skeleton.joints.len()));
@@ -691,15 +876,18 @@ mod tests {
         for m in animator.skinning_matrices() {
             assert!(m.abs_diff_eq(Mat4::IDENTITY, 1e-5), "{m}");
         }
-        // Walking swings the legs; the lantern joint follows the left hand.
+        // Walking swings the legs; the lantern joint hangs from the hips.
         let rest_foot = animator.joint_transform("foot.L").unwrap();
+        let hips = animator.joint_transform("hips").unwrap().w_axis;
+        let lantern = animator.joint_transform("lantern").unwrap().w_axis;
+        let lantern_reach = hips.distance(lantern);
         assert!(animator.play("walk", 0.0));
         animator.update(0.2);
         let foot = animator.joint_transform("foot.L").unwrap();
         assert!(foot.w_axis.distance(rest_foot.w_axis) > 0.1);
-        let hand = animator.joint_transform("hand.L").unwrap().w_axis;
+        let hips = animator.joint_transform("hips").unwrap().w_axis;
         let lantern = animator.joint_transform("lantern").unwrap().w_axis;
-        assert!((hand.distance(lantern) - 0.07).abs() < 1e-4);
+        assert!((hips.distance(lantern) - lantern_reach).abs() < 1e-4);
     }
 
     #[test]

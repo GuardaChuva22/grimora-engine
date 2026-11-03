@@ -18,6 +18,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::World;
+use crate::combat::Health;
 use crate::interaction::TriggerState;
 use crate::world::{Body, Renderable};
 
@@ -58,6 +59,9 @@ pub struct WorldState {
     pub objects: Vec<ObjectState>,
     #[serde(default)]
     pub triggers: TriggerState,
+    /// The hour, in a scene with a day cycle.
+    #[serde(default)]
+    pub time_of_day: Option<f32>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
@@ -87,6 +91,9 @@ pub struct ObjectState {
     /// The game took away its `interact` (a chest already opened...).
     #[serde(default, skip_serializing_if = "is_false")]
     pub used: bool,
+    /// Health left, for what `combat:` made hurtable and got hurt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health: Option<f32>,
 }
 
 fn visible_default() -> bool {
@@ -117,18 +124,25 @@ impl WorldState {
                     velocity: None,
                     removed: true,
                     used: false,
+                    health: None,
                 });
                 continue;
             };
-            let mut query =
-                world.ecs.query_one::<(&Transform, Option<&Renderable>, Option<&Body>, Option<&Interactable>)>(entity);
-            let Ok((transform, renderable, body, interact)) = query.get() else { continue };
+            let mut query = world.ecs.query_one::<(
+                &Transform,
+                Option<&Renderable>,
+                Option<&Body>,
+                Option<&Interactable>,
+                Option<&Health>,
+            )>(entity);
+            let Ok((transform, renderable, body, interact, health)) = query.get() else { continue };
             let visible = renderable.is_none_or(|r| r.visible);
             let velocity = body
                 .and_then(|Body(body)| physics.body_velocity(*body))
                 .filter(|(linear, angular)| linear.length_squared() + angular.length_squared() > 1e-8);
             let used = desc.interact.is_some() && interact.is_none();
-            if *transform != desc.transform || !visible || velocity.is_some() || used {
+            let health = health.filter(|health| health.current != health.max).map(|health| health.current);
+            if *transform != desc.transform || !visible || velocity.is_some() || used || health.is_some() {
                 objects.push(ObjectState {
                     index,
                     name: desc.name.clone(),
@@ -137,11 +151,12 @@ impl WorldState {
                     velocity,
                     removed: false,
                     used,
+                    health,
                 });
             }
         }
         let camera = CameraState { position: camera.position, yaw: camera.yaw, pitch: camera.pitch };
-        Self { camera, objects, triggers: world.trigger_state.clone() }
+        Self { camera, objects, triggers: world.trigger_state.clone(), time_of_day: world.time_of_day() }
     }
 
     /// Puts the scene objects back as the scene file placed them (respawning
@@ -178,12 +193,19 @@ impl WorldState {
             if saved.used {
                 let _ = world.ecs.remove_one::<Interactable>(entity);
             }
+            if let Some(health) = saved.health {
+                world.set_health(entity, health, physics);
+            }
         }
 
+        if let Some(hour) = self.time_of_day {
+            world.set_time_of_day(hour);
+        }
         camera.position = self.camera.position;
         camera.yaw = self.camera.yaw;
         camera.pitch = self.camera.pitch;
         world.trigger_state = self.triggers.clone();
+        world.place_agents(physics);
         world.reload_streaming(camera.position, physics);
         unmatched
     }

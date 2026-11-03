@@ -1,4 +1,4 @@
-// Grimora sandbox: a stone circle at dusk, deep in a foggy valley.
+// Grimora sandbox: a stone circle in a foggy valley, where the hours pass.
 //
 // Everything here is plain data. Save the file while the engine runs and it
 // hot-reloads. Colors are sRGB 0..1, angles are degrees, distances are meters.
@@ -32,7 +32,14 @@ SceneDesc(
             ground: (0.15, 0.13, 0.17),
             sun_size: 1.6,
             sun_glow: 0.8,
+            // Pictures instead of the plain disc; half their width in degrees.
+            sun_texture: "../textures/sol.png",
+            moon_texture: "../textures/lua.png",
+            sun_sprite_size: 6.0,
+            moon_sprite_size: 5.0,
         ),
+        // Moves whatever has `sway` (plants) and drifts the water. `direction` is x and z.
+        wind: (direction: (1.0, 0.35), strength: 1.0, speed: 1.6),
         // Shadows reach `distance` meters from the camera, split into `cascades`
         // shadow maps (1-4): more cascades keep nearby shadows sharp.
         shadows: (enabled: true, distance: 120.0, strength: 0.85, cascades: 4),
@@ -45,6 +52,16 @@ SceneDesc(
             bloom: 0.14,
         ),
     ),
+
+    // The passing of the hours. `time` is the starting hour (0-24), `day_length` the real
+    // seconds a whole day takes (0 stops the clock), `sunrise` where the sun comes up (degrees
+    // around the vertical, 0 is +X and 90 is -Z) and `tilt` how far from overhead it passes
+    // at noon. It takes over the sun, ambient, fog colors and density, sky colors and
+    // exposure above; the rest stays. For another look, list `keys`: each is an hour with
+    // (sun_color, sun_intensity, moon_color, moon_intensity, ambient_sky, ambient_ground,
+    // ambient_intensity, fog_color, fog_density, zenith, horizon, ground, exposure, stars).
+    // Run with `--time <hour>` to stop it at an hour.
+    day_cycle: (time: 16.5, day_length: 480.0, sunrise: 40.0, tilt: 35.0),
 
     // Where the player character starts (sandbox: Tab switches to a free camera).
     player: (position: (0.0, 0.0, 15.0), yaw: 0.0),
@@ -66,12 +83,36 @@ SceneDesc(
         grass_color: (0.27, 0.33, 0.22),
         dirt_color: (0.38, 0.31, 0.24),
         rock_color: (0.4, 0.38, 0.4),
+        // Pictures for the ground instead of the colors above, chosen by the same slope
+        // and height; `tile` is the meters one repeat covers.
+        textures: (
+            grass: "../textures/grama1.png",
+            dirt: "../textures/terra_escura_com_raizes.png",
+            rock: "../textures/rocha_umida_escura.png",
+            tile: 4.0,
+        ),
+        // Dips in the ground for `water`. Scattered things stay out of them.
+        ponds: [(x: 20.0, z: 13.0, radius: 8.0, depth: 1.7)],
     ),
+
+    // Sheets of water, with no collider. `y` is from the ground at `position`, which here
+    // is the bottom of the pond. `waves` is in meters; `opacity` is how much it hides
+    // looking straight down (at low angles it mirrors the sky).
+    water: [
+        (position: (20.0, 1.3, 13.0), size: (20.0, 20.0), texture: "../textures/agua.png",
+         color: (0.75, 0.9, 1.0), opacity: 0.72, tile: 3.5, waves: 0.04),
+    ],
 
     // With a terrain, object `position.y` is measured from the ground.
     objects: [
         // ---- the altar and its heart crystal (animated by the sandbox game)
-        (name: "altar", mesh: Cube, scale: (2.4, 0.8, 1.5), color: (0.42, 0.4, 0.4)),
+        // `texture` puts a picture over the whole mesh, with `tile` meters per repeat.
+        // A `<name>_emission.png` beside the image glows by itself, in any light.
+        (name: "altar", mesh: Cube, scale: (2.4, 0.8, 1.5),
+         texture: (path: "../textures/pedra_com_veios_luminosos.png", tile: 1.6)),
+        // the worn floor around it
+        (mesh: Cube, position: (0.0, -0.02, 0.0), scale: (9.0, 0.05, 9.0), collider: None,
+         texture: (path: "../textures/piso_de_mausoleu.png", tile: 2.5)),
         (
             name: "heart",
             mesh: Crystal(seed: 7),
@@ -97,11 +138,51 @@ SceneDesc(
          collider: Cylinder(radius: 0.08, height: 3.2)),
         (mesh: Model(path: "../models/banner/banner.gltf"), position: (2.6, 0.0, 9.0), rotation: (0.0, -15.0, 0.0),
          collider: Cylinder(radius: 0.08, height: 3.2)),
-        // A rigged model loops the clip named in `animation` (here the wanderer from
-        // tools/gen_wanderer.py, which has idle, walk, run and jump). Games can switch
-        // clips through `Object::animator`.
-        (name: "watcher", mesh: Model(path: "../models/wanderer/wanderer.gltf"), position: (5.6, 0.0, 8.4),
-         rotation: (0.0, 215.0, 0.0), animation: "idle", collider: Cylinder(radius: 0.3, height: 1.8)),
+        // ---- characters. `npc` makes an object walk on its own, around whatever is in the
+        // way, with no navigation data to prepare. The engine plays `idle`, `walk` and
+        // `run` by speed; `clip_speeds` are the speeds the clips were made for. All of
+        // these are the standard body from tools/blender/build_wanderer.py, tinted by `color`.
+        // Stands (`Stand`, the default) and watches the player: `notice` needs a clear line of sight.
+        (name: "watcher", mesh: Model(path: "../models/chartest/chartest.gltf"), position: (5.6, 0.0, 8.4),
+         rotation: (0.0, 215.0, 0.0), animation: "idle", interact: (prompt: "falar"),
+         npc: (clip_speeds: (4.5, 8.5), notice: (radius: 6.0, reaction: Watch))),
+        // Walks these points in a loop (`y` from the ground). Every leg crosses the altar, so it goes around.
+        (name: "pilgrim", mesh: Model(path: "../models/chartest/chartest.gltf"), position: (3.5, 0.0, 3.5),
+         color: (0.55, 0.62, 0.85), animation: "idle",
+         npc: (walk_speed: 2.6, clip_speeds: (4.5, 8.5), behavior: Patrol(
+             points: [(-3.5, 0.0, -3.5), (3.5, 0.0, -3.5), (-3.5, 0.0, 3.5), (3.5, 0.0, 3.5)],
+             pause: 2.0,
+         ))),
+        // Walks at random around where it started, and comes to the player once it sees them.
+        (name: "follower", mesh: Model(path: "../models/chartest/chartest.gltf"), position: (-7.0, 0.0, 11.0),
+         color: (0.6, 0.85, 0.6), animation: "idle",
+         npc: (walk_speed: 2.2, run_speed: 5.5, clip_speeds: (4.5, 8.5),
+               behavior: Wander(radius: 5.0, pause: (2.0, 5.0)),
+               notice: (radius: 6.0, reaction: Follow(distance: 2.5)))),
+        // Runs away instead.
+        (name: "timid", mesh: Model(path: "../models/chartest/chartest.gltf"), position: (12.0, 0.0, -3.0),
+         color: (0.95, 0.85, 0.5), animation: "idle",
+         npc: (walk_speed: 2.0, run_speed: 6.0, clip_speeds: (4.5, 8.5),
+               behavior: Wander(radius: 6.0, pause: (1.0, 4.0)),
+               notice: (radius: 7.0, reaction: Flee))),
+
+        // ---- combat. `combat` makes an object hurtable; with a `weapon` it can hurt back:
+        // the blow lands when the clip (`attack`) fires its event (`hit`), on other teams only,
+        // within `reach` meters and `arc` degrees in front. At zero health it plays `die` and
+        // stays down; without that clip, it is removed, as the barrel below.
+        // `reaction: Attack` chases the player and strikes.
+        (name: "hostile", mesh: Model(path: "../models/chartest/chartest.gltf"), position: (-13.0, 0.0, -2.0),
+         color: (0.75, 0.35, 0.32), animation: "sword_idle",
+         npc: (walk_speed: 2.2, run_speed: 4.2, clip_speeds: (1.2, 5.5), clip_prefix: "sword_",
+               behavior: Wander(radius: 4.0, pause: (1.5, 4.0)),
+               notice: (radius: 9.0, reaction: Attack)),
+         combat: (health: 30.0, team: 1,
+                  // A blade only hurts what it touches: `reach` says when to swing.
+                  weapon: (damage: 8.0, reach: 1.7, arc: 90.0, cooldown: 2.0, clip: "sword_1",
+                           blade: (), hit_stop: 0.06))),
+        (name: "barrel", mesh: Cube, position: (-3.4, 0.01, 7.2), scale: (0.6, 0.9, 0.6),
+         texture: (path: "../textures/tabuas_de_madeira.png", tile: 0.9),
+         combat: (health: 15.0)),
 
         // ---- stone circle (radius 9, open towards the camera)
         (mesh: Pillar(seed: 1),               position: ( 9.0,  0.0,  0.0), rotation: (0.0,  10.0, 0.0)),
@@ -112,7 +193,19 @@ SceneDesc(
         (mesh: Pillar(seed: 6),               position: ( 0.0,  0.0, -9.0), rotation: (0.0, 275.0, 0.0)),
         (mesh: Pillar(seed: 8, broken: true), position: ( 6.36, 0.0, -6.36), rotation: (0.0, 320.0, -5.0)),
         // a fallen column
-        (mesh: Cylinder(segments: 8), position: (3.2, 0.3, 11.5), rotation: (0.0, 35.0, 90.0), scale: (0.66, 2.6, 0.66), color: (0.46, 0.44, 0.42)),
+        (mesh: Cylinder(segments: 8), position: (3.2, 0.3, 11.5), rotation: (0.0, 35.0, 90.0), scale: (0.66, 2.6, 0.66),
+         texture: (path: "../textures/pedra_com_liquen.png", tile: 1.5)),
+
+        // ---- decals: pictures flat on the ground, for level places (or turned onto a wall)
+        (mesh: Decal(texture: "../textures/decal_rachadura_larga.png", size: 2.2), position: (1.5, 0.05, 2.0), rotation: (0.0, 30.0, 0.0)),
+        (mesh: Decal(texture: "../textures/decal_musgo_mancha.png", size: 1.8), position: (-3.2, 0.05, -2.0)),
+        (mesh: Decal(texture: "../textures/decal_sangue_mancha_seca.png", size: 1.6), position: (-11.0, 0.0, -1.0), rotation: (0.0, 70.0, 0.0)),
+        (mesh: Decal(texture: "../textures/decal_terra_arrastada.png", size: 2.0), position: (-9.5, 0.0, 0.5), rotation: (0.0, 200.0, 0.0)),
+
+        // ---- `Sprite` with one plane and no sway: a still picture standing up
+        (mesh: Sprite(texture: "../textures/cerca_quebrada.png", size: 1.3, planes: 1, sway: 0.0), position: (-15.5, 0.0, 18.0), rotation: (0.0, 25.0, 0.0)),
+        (mesh: Sprite(texture: "../textures/cerca_quebrada.png", size: 1.3, planes: 1, sway: 0.0), position: (-13.8, 0.0, 15.5), rotation: (0.0, 80.0, 0.0)),
+        (mesh: Sprite(texture: "../textures/teia_circular.png", size: 1.1, planes: 1, sway: 0.03), position: (-7.6, 1.2, 4.2), rotation: (0.0, 40.0, 0.0)),
 
         // ---- loose things the wanderer can shove around. `body: Dynamic(...)` hands the
         // object to the physics simulation: it falls, tumbles and gets pushed. Optional
@@ -121,11 +214,26 @@ SceneDesc(
         // one; triangle meshes become convex hulls.
         // a small stack of crates
         (name: "crate", mesh: Cube, position: (-2.75, 0.01, 11.2), rotation: (0.0, 8.0, 0.0), scale: (0.7, 0.7, 0.7),
-         color: (0.38, 0.28, 0.19), body: Dynamic(density: 400.0)),
+         texture: (path: "../textures/caixa_de_madeira.png", tile: 0.7), body: Dynamic(density: 400.0)),
         (mesh: Cube, position: (-2.0, 0.01, 11.3), rotation: (0.0, -4.0, 0.0), scale: (0.7, 0.7, 0.7),
-         color: (0.35, 0.26, 0.18), body: Dynamic(density: 400.0)),
+         texture: (path: "../textures/caixa_de_madeira.png", tile: 0.7), body: Dynamic(density: 400.0)),
         (mesh: Cube, position: (-2.4, 0.72, 11.25), rotation: (0.0, 25.0, 0.0), scale: (0.6, 0.6, 0.6),
-         color: (0.4, 0.3, 0.2), body: Dynamic(density: 400.0)),
+         texture: (path: "../textures/caixa_de_madeira.png", tile: 0.6), body: Dynamic(density: 400.0)),
+        // ---- a hut by the pond, with a lantern that `night_only` lights only after sunset
+        (mesh: Cylinder(segments: 8), position: (-20.0, 0.0, 12.0), scale: (5.0, 2.6, 5.0),
+         texture: (path: "../textures/parede_madeira_escura.png", tile: 1.8)),
+        (mesh: Sprite(texture: "../textures/tecido_rasgado_sprite.png", size: 1.5, planes: 1, sway: 0.05),
+         position: (-17.7, 0.6, 14.7), rotation: (0.0, 40.0, 0.0)),
+        // a brazier of embers: they glow on their own
+        (mesh: Cylinder(segments: 8), position: (-13.5, 0.0, 11.0), scale: (0.8, 0.7, 0.8),
+         texture: (path: "../textures/pedra_chamuscada.png", tile: 1.0)),
+        (mesh: Cube, position: (-13.5, 0.7, 11.0), scale: (0.55, 0.04, 0.55), collider: None,
+         texture: (path: "../textures/carvao_em_brasa.png", tile: 0.55),
+         light: (position: (0.0, 0.3, 0.0), color: (1.0, 0.4, 0.15), intensity: 5.0, radius: 6.0, flicker: 0.5)),
+        (mesh: Cone(segments: 8), position: (-20.0, 2.6, 12.0), scale: (6.4, 2.4, 6.4), collider: None,
+         texture: (path: "../textures/telhado_de_palha.png", tile: 2.5),
+         light: (position: (2.2, -0.6, 3.0), color: (1.0, 0.65, 0.35), intensity: 12.0, radius: 11.0,
+                 flicker: 0.4, night_only: true)),
         // a round stone that rolls when pushed
         (name: "stone", mesh: Sphere(subdivisions: 1), position: (-1.0, 0.01, 13.3), scale: (0.9, 0.9, 0.9),
          color: (0.45, 0.43, 0.42), body: Dynamic(mass: 120.0, friction: 0.8)),
@@ -171,10 +279,44 @@ SceneDesc(
          color_jitter: 0.18, tilt: 3.0, seed: 11),
         // dead trees close to the circle
         (mesh: DeadTree(), variants: 5, count: 16, radius: 26.0, min_radius: 13.0, scale: (0.9, 1.5),
-         color_jitter: 0.1, tilt: 8.0, seed: 5),
+         color: (2.2, 2.1, 2.0), color_jitter: 0.1, tilt: 8.0, seed: 5,
+         texture: (path: "../textures/madeira_apodrecida.png", tile: 1.2)),
         // boulders everywhere
         (mesh: Rock(), variants: 6, count: 70, radius: 85.0, min_radius: 6.0, scale: (0.4, 2.2),
-         color_jitter: 0.12, tilt: 20.0, sink: 0.15, seed: 3),
+         color: (1.8, 1.8, 1.8), color_jitter: 0.12, tilt: 20.0, sink: 0.15, seed: 3,
+         texture: (path: "../textures/pedra_coberta_de_musgo.png", tile: 1.5)),
+        // Plants are pictures: `Sprite` stands crossed copies of an image up, its base on the
+        // ground. `size` is the height of the drawing, `sway` how far the wind moves its top
+        // (default a fifth of `size`). They cast no shadow unless `shadow: true`.
+        (mesh: Sprite(texture: "../textures/mato1.png", size: 0.8), count: 700, radius: 75.0, min_radius: 3.0,
+         scale: (0.7, 1.3), color_jitter: 0.15, tilt: 0.0, sink: 0.03, seed: 31),
+        (mesh: Sprite(texture: "../textures/mato2.png", size: 1.0), count: 500, radius: 75.0, min_radius: 5.0,
+         scale: (0.7, 1.3), color_jitter: 0.15, tilt: 0.0, sink: 0.03, seed: 32),
+        (mesh: Sprite(texture: "../textures/mato3.png", size: 0.8), count: 250, radius: 60.0, min_radius: 5.0,
+         scale: (0.7, 1.2), color_jitter: 0.1, tilt: 0.0, sink: 0.03, seed: 33),
+        (mesh: Sprite(texture: "../textures/mato4.png", size: 0.9), count: 250, radius: 70.0, min_radius: 7.0,
+         scale: (0.7, 1.3), color_jitter: 0.15, tilt: 0.0, sink: 0.03, seed: 34),
+        (mesh: Sprite(texture: "../textures/capim_alto.png", size: 1.3), count: 200, radius: 80.0, min_radius: 18.0,
+         scale: (0.8, 1.3), color_jitter: 0.15, tilt: 0.0, sink: 0.03, seed: 35),
+        (mesh: Sprite(texture: "../textures/samambaia.png", size: 1.0), count: 180, radius: 90.0, min_radius: 25.0,
+         scale: (0.8, 1.5), color_jitter: 0.15, tilt: 0.0, sink: 0.03, seed: 36),
+        (mesh: Sprite(texture: "../textures/arbusto_seco.png", size: 1.1, sway: 0.05), count: 40, radius: 45.0, min_radius: 10.0,
+         scale: (0.8, 1.3), color_jitter: 0.1, tilt: 0.0, sink: 0.03, seed: 37),
+        (mesh: Sprite(texture: "../textures/planta_espinhosa.png", size: 0.9, sway: 0.08), count: 40, radius: 50.0, min_radius: 12.0,
+         scale: (0.8, 1.3), color_jitter: 0.1, tilt: 0.0, sink: 0.03, seed: 38),
+        (mesh: Sprite(texture: "../textures/cogumelos_floresta.png", size: 0.5, sway: 0.0), count: 50, radius: 60.0, min_radius: 14.0,
+         scale: (0.7, 1.4), color_jitter: 0.1, tilt: 0.0, sink: 0.02, seed: 39),
+        // these carry an emission map, so they light up the night (but cast no light)
+        (mesh: Sprite(texture: "../textures/cogumelos_luminosos.png", size: 0.55, sway: 0.0), count: 35, radius: 40.0, min_radius: 12.0,
+         scale: (0.7, 1.4), color_jitter: 0.05, tilt: 0.0, sink: 0.02, seed: 40),
+        // a reedbed around the pond (nothing scattered lands in the water)
+        (mesh: Sprite(texture: "../textures/taboas.png", size: 1.6), center: (20.0, 0.0, 13.0), count: 45, radius: 11.5, min_radius: 7.5,
+         scale: (0.8, 1.2), color_jitter: 0.1, tilt: 0.0, sink: 0.05, seed: 41),
+        (mesh: Sprite(texture: "../textures/juncos.png", size: 1.3), center: (20.0, 0.0, 13.0), count: 45, radius: 12.0, min_radius: 7.5,
+         scale: (0.8, 1.2), color_jitter: 0.1, tilt: 0.0, sink: 0.05, seed: 42),
+        // fallen leaves: decals can be scattered too (keep `sink` at 0)
+        (mesh: Decal(texture: "../textures/folhas_e_petalas_caidas.png", size: 0.9), count: 90, radius: 40.0, min_radius: 4.0,
+         scale: (0.8, 1.3), color_jitter: 0.1, tilt: 0.0, sink: 0.0, seed: 43),
         // small glowing crystals hidden among the dead trees
         (mesh: Crystal(), variants: 3, count: 7, radius: 30.0, min_radius: 14.0, scale: (0.3, 0.55),
          color: (0.4, 0.78, 1.0), emissive: 2.5, tilt: 15.0, seed: 21,

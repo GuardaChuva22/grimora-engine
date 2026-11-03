@@ -1,13 +1,16 @@
 use std::collections::HashMap;
 
 use grimora_core::{
-    Animator, Environment, MeshData, ParticleEffect, ParticleInstance, ParticleSystem, PointLight, Transform, Vec3,
+    Animator, DayCycle, Environment, MeshData, ParticleEffect, ParticleInstance, ParticleSystem, PointLight,
+    SkyTextures, Transform, Vec3,
 };
 use grimora_physics::{BodyHandle, ColliderHandle, Physics};
 use grimora_scene::{PlayerSpawn, Scene, SceneObject, SceneSound, Terrain};
 pub use hecs::Entity;
 
+use crate::combat;
 use crate::interaction::TriggerState;
+use crate::npc::{self, Agent};
 use crate::streaming::{Streamer, StreamingStats};
 
 /// Index of a mesh stored in the [`World`].
@@ -58,7 +61,7 @@ pub struct SceneIndex(pub usize);
 ///
 /// Objects are entities in [`World::ecs`] (a [`hecs::World`]) with engine
 /// components ([`Transform`], [`Renderable`], [`Name`], [`Light`],
-/// [`Animator`], [`Body`], [`Collider`], [`SceneIndex`]) and any components
+/// [`Animator`], [`Body`], [`Collider`], [`SceneIndex`], [`Agent`]) and any components
 /// of the game's own:
 ///
 /// ```ignore
@@ -77,6 +80,12 @@ pub struct SceneIndex(pub usize);
 #[derive(Default)]
 pub struct World {
     pub environment: Environment,
+    /// The pictures of the sun and moon in the sky.
+    pub sky_textures: SkyTextures,
+    /// The running day, if the scene has one. It writes the sun, light, fog and
+    /// sky of [`World::environment`] every frame, so to change those for good,
+    /// change its keys.
+    pub day_cycle: Option<DayCycle>,
     /// Lights not attached to an entity (the scene's `lights`, and any the game
     /// adds). Lights on entities are [`Light`] components.
     pub lights: Vec<PointLight>,
@@ -89,6 +98,9 @@ pub struct World {
     /// Which triggers the player is in and which `once` ones already fired, by
     /// name, so it survives streaming; see [`World::update_triggers`].
     pub trigger_state: TriggerState,
+    /// While true, every [`Brain`](crate::Brain) ignores the player: one who just
+    /// died, is in a cutscene or can't be seen. Those who had noticed lose interest.
+    pub npcs_ignore_player: bool,
     meshes: Vec<MeshData>,
     streamer: Option<Streamer>,
     /// The scene file's objects, to put them back when a saved game loads.
@@ -124,12 +136,20 @@ impl World {
         }
         physics.refresh();
         let streamer = scene.streaming.map(|s| Streamer::new(s, scene.terrain.as_ref()));
+        let day_cycle = scene.day_cycle.as_ref().map(DayCycle::new);
+        let mut environment = scene.environment;
+        if let Some(day) = &day_cycle {
+            day.apply(&mut environment);
+        }
         Self {
-            environment: scene.environment,
+            environment,
+            sky_textures: scene.sky_textures,
+            day_cycle,
             lights: scene.lights,
             ecs,
             terrain: scene.terrain,
             player_spawn: scene.player,
+            npcs_ignore_player: false,
             sounds: scene.sounds,
             trigger_state: TriggerState::default(),
             meshes: scene.meshes,
@@ -233,6 +253,17 @@ impl World {
             if let Some(interact) = &desc.interact {
                 let _ = self.ecs.insert_one(entity, interact.clone());
             }
+            if desc.combat.is_some() {
+                combat::revive(&mut self.ecs, entity, physics);
+                if let Ok(animator) = self.ecs.query_one_mut::<&mut Animator>(entity) {
+                    match &desc.animation {
+                        Some(clip) => {
+                            animator.play(clip, 0.0);
+                        }
+                        None => animator.stop(),
+                    }
+                }
+            }
         }
         if respawned {
             physics.refresh();
@@ -254,7 +285,41 @@ impl World {
             let position = transform.position + transform.rotation * light.position;
             lights.push(PointLight { position, ..light.clone() });
         }
+        // Those of the night come on as the daylight goes.
+        let daylight = self.day_cycle.as_ref().map_or(0.0, DayCycle::daylight);
+        lights.retain_mut(|light| {
+            if light.night_only {
+                light.intensity *= 1.0 - daylight;
+            }
+            light.intensity > 0.0
+        });
         lights
+    }
+
+    /// The hour of the scene's day, from 0 to 24, if it has one.
+    pub fn time_of_day(&self) -> Option<f32> {
+        self.day_cycle.as_ref().map(DayCycle::hour)
+    }
+
+    /// Moves the clock to `hour`. Does nothing in a scene without a day cycle.
+    pub fn set_time_of_day(&mut self, hour: f32) {
+        if let Some(day) = &mut self.day_cycle {
+            day.set_hour(hour);
+            day.apply(&mut self.environment);
+        }
+    }
+
+    /// Whether the sun has set. Always false in a scene without a day cycle.
+    pub fn is_night(&self) -> bool {
+        self.day_cycle.as_ref().is_some_and(DayCycle::is_night)
+    }
+
+    /// Runs the clock for `dt` seconds. The engine calls this each frame, unless paused.
+    pub fn update_day(&mut self, dt: f32) {
+        if let Some(day) = &mut self.day_cycle {
+            day.advance(dt);
+            day.apply(&mut self.environment);
+        }
     }
 
     /// Looping sounds to play: [`World::sounds`] plus those of loaded regions.
@@ -274,6 +339,46 @@ impl World {
 
     pub(crate) fn meshes(&self) -> &[MeshData] {
         &self.meshes
+    }
+
+    /// Spawns `mesh` held by a joint of `parent`: a sword in a hand. It follows
+    /// the joint from then on, and goes away with `parent`.
+    pub fn attach(&mut self, parent: Entity, joint: &str, mesh: MeshId, offset: Transform) -> Entity {
+        let entity = self.spawn(mesh, Transform::IDENTITY);
+        let _ = self.ecs.insert_one(entity, Attached { parent, joint: joint.to_string(), offset });
+        self.update_attachments();
+        entity
+    }
+
+    /// Puts everything [`World::attach`] made where its joint is now. The engine
+    /// calls this after [`World::update_animations`].
+    pub fn update_attachments(&mut self) {
+        let mut orphans = Vec::new();
+        let mut placed = Vec::new();
+        for (entity, attached) in self.ecs.query::<(Entity, &Attached)>().iter() {
+            let mut parent = self.ecs.query_one::<(&Transform, &Animator, Option<&Renderable>)>(attached.parent);
+            let held = parent.get().ok().map(|(transform, animator, renderable)| {
+                let joint = animator.joint_transform(&attached.joint).unwrap_or_default();
+                let (scale, rotation, position) =
+                    (transform.matrix() * joint * attached.offset.matrix()).to_scale_rotation_translation();
+                (Transform { position, rotation, scale }, renderable.is_none_or(|r| r.visible))
+            });
+            match held {
+                Some(held) => placed.push((entity, held)),
+                None => orphans.push(entity),
+            }
+        }
+        for (entity, (at, visible)) in placed {
+            if let Some(transform) = self.get_mut::<Transform>(entity) {
+                *transform = at;
+            }
+            if let Some(renderable) = self.get_mut::<Renderable>(entity) {
+                renderable.visible = visible;
+            }
+        }
+        for entity in orphans {
+            let _ = self.ecs.despawn(entity);
+        }
     }
 
     /// Advances every animator. The engine calls this after `Game::update`.
@@ -347,6 +452,15 @@ impl World {
     }
 }
 
+/// Follows a joint of another entity: see [`World::attach`].
+#[derive(Debug, Clone)]
+pub struct Attached {
+    pub parent: Entity,
+    pub joint: String,
+    /// From the joint to this entity.
+    pub offset: Transform,
+}
+
 /// The components of a scene object whose mesh is now `mesh`: its animation
 /// clip started, and its collider or body added to `physics`.
 pub(crate) fn object_builder(
@@ -377,6 +491,17 @@ pub(crate) fn object_builder(
         }
         entity.add(animator);
     }
+    if let Some(desc) = &o.npc {
+        let (agent, brain) = npc::from_desc(desc, &o.transform, physics);
+        entity.add(agent).add(brain);
+    }
+    if let Some(desc) = &o.combat {
+        let (health, fighter) = combat::components(desc);
+        entity.add(health);
+        if let Some(fighter) = fighter {
+            entity.add(fighter);
+        }
+    }
     match &o.collider {
         Some(shape) if o.body.is_dynamic() => {
             if let Some(body) = physics.add_body(shape, &o.transform, &o.body) {
@@ -403,6 +528,9 @@ pub(crate) fn despawn(ecs: &mut hecs::World, entity: Entity, physics: &mut Physi
     }
     if let Ok(collider) = ecs.get::<&Collider>(entity) {
         physics.remove(collider.0);
+    }
+    if let Ok(agent) = ecs.get::<&Agent>(entity) {
+        physics.remove(agent.collider());
     }
     ecs.despawn(entity).is_ok()
 }

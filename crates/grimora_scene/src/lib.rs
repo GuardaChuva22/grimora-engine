@@ -5,30 +5,38 @@
 //! See `assets/scenes/sandbox.ron` for a commented example.
 
 mod collider;
+mod combat;
 mod effect;
+pub mod grip;
 mod model;
+mod npc;
 mod rng;
 mod shapes;
 mod sound;
 mod streaming;
 mod terrain;
+mod texture;
 mod trigger;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
-use grimora_core::{Camera, Environment, MeshData, PointLight, Transform, Vec2, Vec3};
+use grimora_core::{Camera, DayCycleDesc, Environment, MeshData, PointLight, SkyTextures, Transform, Vec2, Vec3};
 use serde::{Deserialize, Serialize};
 
 pub use collider::{BodyDesc, ColliderDesc, ColliderShape};
+pub use combat::{Blade, CombatDesc, Weapon};
 pub use effect::{EffectDesc, SceneEffect, load_effect, parse_effect};
-pub use model::{DEFAULT_MAX_TEXTURE_SIZE, load_model};
+pub use model::{DEFAULT_MAX_TEXTURE_SIZE, load_model, load_pose_clips, pose_clips_dir};
+pub use npc::{Behavior, Notice, NpcDesc, Reaction};
 pub use rng::{Rng, fbm, value_noise};
 pub use shapes::{MeshDesc, blob, cube, tube};
 pub use sound::{SceneSound, SoundDesc};
 pub use streaming::{CellCoord, RegionDesc, SceneCell, SceneRegion, SceneStreaming, StreamingDesc};
-pub use terrain::{Terrain, TerrainDesc};
+pub use terrain::{Pond, Terrain, TerrainDesc, TerrainTextures};
+use texture::{Picture, apply_texture, texture_or_log, water_mesh};
+pub use texture::{TextureDesc, WaterDesc, load_texture};
 pub use trigger::{Interactable, SceneTrigger, Trigger, TriggerDesc, TriggerShape};
 
 /// The on-disk scene format.
@@ -55,6 +63,11 @@ pub struct SceneDesc {
     pub triggers: Vec<TriggerDesc>,
     /// Particle effects on their own: mist over a valley, smoke from a chimney...
     pub effects: Vec<EffectDesc>,
+    /// The passing of the hours: it then decides the sun, light, fog and sky of
+    /// `environment`, and the rest of `environment` still applies.
+    pub day_cycle: Option<DayCycleDesc>,
+    /// Sheets of water.
+    pub water: Vec<WaterDesc>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -125,6 +138,12 @@ pub struct ObjectDesc {
     /// Particle effect attached to the object; its position is an offset rotated
     /// with the object, like `light`.
     pub effect: Option<EffectDesc>,
+    /// Makes it a character that walks on its own; replaces `collider` and `body`.
+    pub npc: Option<NpcDesc>,
+    #[serde(default)]
+    pub combat: Option<CombatDesc>,
+    /// A picture over the whole mesh, instead of its plain colors.
+    pub texture: Option<TextureDesc>,
 }
 
 impl Default for ObjectDesc {
@@ -145,6 +164,9 @@ impl Default for ObjectDesc {
             sound: None,
             interact: None,
             effect: None,
+            npc: None,
+            combat: None,
+            texture: None,
         }
     }
 }
@@ -177,6 +199,8 @@ pub struct ScatterDesc {
     /// Optional particle effect on every copy; its position is an offset.
     pub effect: Option<EffectDesc>,
     pub collider: ColliderDesc,
+    /// A picture over the whole mesh of every copy, instead of its plain colors.
+    pub texture: Option<TextureDesc>,
 }
 
 impl Default for ScatterDesc {
@@ -198,6 +222,7 @@ impl Default for ScatterDesc {
             light: None,
             effect: None,
             collider: ColliderDesc::Auto,
+            texture: None,
         }
     }
 }
@@ -222,6 +247,8 @@ pub struct SceneObject {
     pub light: Option<PointLight>,
     pub interact: Option<Interactable>,
     pub effect: Option<SceneEffect>,
+    pub npc: Option<NpcDesc>,
+    pub combat: Option<CombatDesc>,
 }
 
 /// A scene ready to render: unique meshes plus the instances that use them.
@@ -243,6 +270,9 @@ pub struct Scene {
     pub triggers: Vec<SceneTrigger>,
     /// Effects on their own, each with where it stands.
     pub effects: Vec<(Transform, SceneEffect)>,
+    pub day_cycle: Option<DayCycleDesc>,
+    /// The pictures `environment.sky` names.
+    pub sky_textures: SkyTextures,
 }
 
 /// Terrain render chunks are this many grid cells on a side.
@@ -281,7 +311,7 @@ impl Scene {
         let terrain = desc.terrain.clone().map(Terrain::new);
         let mut builder = Builder::new(dir, terrain.as_ref());
         if let Some(terrain) = &terrain {
-            for chunk in terrain.chunk_meshes(TERRAIN_CHUNK) {
+            for chunk in terrain_chunks(terrain, dir) {
                 let collider = Some(ColliderShape::trimesh(&chunk));
                 builder.meshes.push(chunk);
                 builder.objects.push(SceneObject {
@@ -296,6 +326,8 @@ impl Scene {
                     light: None,
                     interact: None,
                     effect: None,
+                    npc: None,
+                    combat: None,
                 });
             }
         }
@@ -331,6 +363,10 @@ impl Scene {
             yaw: p.yaw.to_radians(),
         });
 
+        let sky = &desc.environment.sky;
+        let sky_picture = |path: &Option<String>| path.as_ref().and_then(|p| texture_or_log(&dir.join(p)));
+        let sky_textures = SkyTextures { sun: sky_picture(&sky.sun_texture), moon: sky_picture(&sky.moon_texture) };
+
         let Builder { meshes, objects, lights, sounds, triggers, effects, .. } = builder;
         Self {
             environment: desc.environment.clone(),
@@ -344,6 +380,8 @@ impl Scene {
             streaming,
             triggers,
             effects,
+            day_cycle: desc.day_cycle.clone(),
+            sky_textures,
         }
     }
 
@@ -368,6 +406,8 @@ impl Scene {
             streaming: None,
             triggers: builder.triggers,
             effects: builder.effects,
+            day_cycle: None,
+            sky_textures: SkyTextures::default(),
         })
     }
 
@@ -382,6 +422,18 @@ impl Scene {
 
     pub fn triangle_count(&self) -> usize {
         self.objects.iter().map(|o| self.meshes[o.mesh].triangle_count()).sum()
+    }
+}
+
+/// The terrain's render chunks, with pictures if they all load.
+fn terrain_chunks(terrain: &Terrain, dir: &Path) -> Vec<MeshData> {
+    let textured = terrain.desc.textures.as_ref().and_then(|t| {
+        let material = |path: &String| Some(Picture::load(&dir.join(path))?.material());
+        Some(([material(&t.grass)?, material(&t.dirt)?, material(&t.rock)?], t.tile))
+    });
+    match textured {
+        Some((materials, tile)) => terrain.textured_chunks(TERRAIN_CHUNK, materials, tile),
+        None => terrain.chunk_meshes(TERRAIN_CHUNK),
     }
 }
 
@@ -428,6 +480,21 @@ impl<'a> Builder<'a> {
         self.meshes.len() - 1
     }
 
+    /// Like [`Builder::mesh`], for an object with a picture, whose repeats depend
+    /// on its scale. A picture that fails to load leaves the plain mesh.
+    fn textured_mesh(&mut self, desc: &MeshDesc, texture: &TextureDesc, scale: Vec3) -> usize {
+        let Some(picture) = Picture::load(&self.dir.join(&texture.path)) else { return self.mesh(desc) };
+        let key = format!("{desc:?} {texture:?} {scale}");
+        if let Some(&index) = self.cache.get(&key) {
+            return index;
+        }
+        let mut mesh = desc.build_in(&self.dir);
+        apply_texture(&mut mesh, &picture, texture.tile, scale);
+        self.meshes.push(mesh);
+        self.cache.insert(key, self.meshes.len() - 1);
+        self.meshes.len() - 1
+    }
+
     /// Loads an effect file. One that is missing or broken is logged, and the
     /// scene goes on without it.
     fn effect(&self, desc: &EffectDesc) -> Option<SceneEffect> {
@@ -468,8 +535,12 @@ impl<'a> Builder<'a> {
                 position.y += self.ground(position.x, position.z);
             }
             let transform = Transform::from_euler_degrees(position, obj.rotation, obj.scale);
-            let mesh = self.mesh(&obj.mesh);
-            let collider = obj.collider.resolve(&obj.mesh, &self.meshes[mesh]);
+            let mesh = match &obj.texture {
+                Some(texture) => self.textured_mesh(&obj.mesh, texture, obj.scale),
+                None => self.mesh(&obj.mesh),
+            };
+            let collider = if obj.npc.is_some() { None } else { obj.collider.resolve(&obj.mesh, &self.meshes[mesh]) };
+            let npc = obj.npc.as_ref().map(|npc| npc.resolve(|x, z| self.ground(x, z)));
             self.objects.push(SceneObject {
                 name: obj.name.clone(),
                 mesh,
@@ -482,10 +553,32 @@ impl<'a> Builder<'a> {
                 light: obj.light.clone(),
                 interact: obj.interact.clone(),
                 effect: obj.effect.as_ref().and_then(|e| self.effect(e)),
+                npc,
+                combat: obj.combat.clone(),
             });
             if let Some(sound) = &obj.sound {
                 self.sounds.push(sound.attached(&dir, &transform));
             }
+        }
+        for water in &desc.water {
+            let picture = water.texture.as_ref().and_then(|path| texture_or_log(&dir.join(path)));
+            self.meshes.push(water_mesh(water, picture));
+            let at = water.position + Vec3::Y * self.ground(water.position.x, water.position.z);
+            self.objects.push(SceneObject {
+                name: Some("water".into()),
+                mesh: self.meshes.len() - 1,
+                transform: Transform::from_position(at),
+                color: Vec3::ONE,
+                emissive: 0.0,
+                collider: None,
+                body: BodyDesc::Static,
+                animation: None,
+                light: None,
+                interact: None,
+                effect: None,
+                npc: None,
+                combat: None,
+            });
         }
 
         for scatter in &desc.scatter {
@@ -494,7 +587,10 @@ impl<'a> Builder<'a> {
             let variants: Vec<(usize, Option<ColliderShape>)> = (0..scatter.variants.max(1))
                 .map(|k| {
                     let desc = scatter.mesh.with_seed(scatter.seed.wrapping_mul(31).wrapping_add(u64::from(k)));
-                    let mesh = self.mesh(&desc);
+                    let mesh = match &scatter.texture {
+                        Some(texture) => self.textured_mesh(&desc, texture, Vec3::ONE),
+                        None => self.mesh(&desc),
+                    };
                     (mesh, scatter.collider.resolve(&desc, &self.meshes[mesh]))
                 })
                 .collect();
@@ -521,7 +617,12 @@ impl<'a> Builder<'a> {
                     light: scatter.light.clone(),
                     interact: None,
                     effect: effect.clone(),
+                    npc: None,
+                    combat: None,
                 };
+                if self.terrain.is_some_and(|t| t.in_pond(x, z)) {
+                    continue;
+                }
                 match streaming.as_deref_mut() {
                     Some(streaming) => {
                         let cell = streaming.cells.entry(streaming.cell_of(transform.position)).or_default();
@@ -669,6 +770,56 @@ mod tests {
         let with_effect: Vec<_> = scene.objects.iter().filter_map(|o| o.effect.as_ref()).collect();
         assert_eq!(with_effect.len(), 4, "the object with a real file and the 3 scattered copies");
         assert_eq!(with_effect[0].offset, Vec3::Y);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn builds_pictures_water_and_the_day() {
+        let dir = std::env::temp_dir().join(format!("grimora_scene_pictures_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([90, 120, 60, 255])).save(dir.join("a.png")).unwrap();
+        let desc = SceneDesc::parse(
+            r#"(
+                environment: (sky: (sun_texture: "a.png", moon_texture: "missing.png")),
+                day_cycle: (time: 20.0, day_length: 0.0),
+                terrain: (size: 64.0, resolution: 16, flat_radius: 30.0, edge_rise: 0.0,
+                          textures: (grass: "a.png", dirt: "a.png", rock: "a.png", tile: 2.0),
+                          ponds: [(x: 10.0, z: 10.0, radius: 6.0)]),
+                water: [(position: (10.0, 1.0, 10.0), size: (12.0, 12.0), texture: "a.png")],
+                objects: [
+                    (name: "small", mesh: Cube, texture: (path: "a.png", tile: 1.0), scale: (1.0, 1.0, 1.0)),
+                    (name: "big", mesh: Cube, texture: (path: "a.png", tile: 1.0), scale: (3.0, 1.0, 1.0)),
+                    (name: "broken", mesh: Cube, texture: (path: "missing.png")),
+                    (name: "plain", mesh: Cube),
+                ],
+                scatter: [(mesh: Sprite(texture: "a.png", size: 0.5), center: (10.0, 0.0, 10.0), radius: 20.0,
+                           count: 60, seed: 3)],
+            )"#,
+        )
+        .unwrap();
+        assert_eq!(SceneDesc::parse(&desc.to_ron().unwrap()).unwrap(), desc);
+
+        let scene = Scene::build_in(&desc, &dir);
+        assert!(scene.sky_textures.sun.is_some() && scene.sky_textures.moon.is_none());
+        assert_eq!(scene.day_cycle.as_ref().unwrap().time, 20.0);
+        let terrain = scene.find("terrain").unwrap();
+        assert!(scene.meshes[terrain.mesh].material(0).base_color_texture.is_some());
+
+        let mesh_of = |name| &scene.meshes[scene.find(name).unwrap().mesh];
+        let water = scene.find("water").unwrap();
+        assert!((water.transform.position.y - 1.0 - scene.ground_height(10.0, 10.0)).abs() < 1e-4);
+        assert!(water.collider.is_none() && mesh_of("water").shadowless);
+        assert_ne!(scene.find("small").unwrap().mesh, scene.find("big").unwrap().mesh, "repeats depend on scale");
+        assert_eq!(scene.find("broken").unwrap().mesh, scene.find("plain").unwrap().mesh);
+
+        let terrain_map = scene.terrain.as_ref().unwrap();
+        let plants: Vec<_> = scene.objects.iter().filter(|o| o.name.is_none()).collect();
+        assert!(!plants.is_empty() && plants.len() < 60, "those that fell in the pond are gone: {}", plants.len());
+        for plant in plants {
+            let at = plant.transform.position;
+            assert!(!terrain_map.in_pond(at.x, at.z));
+            assert!(plant.collider.is_none());
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -28,6 +28,11 @@ struct Globals {
     sky_horizon: vec4<f32>,
     sky_ground: vec4<f32>,
     sun_disc: vec4<f32>,          // x cos(sun radius), y glow strength
+    sky_sun: vec4<f32>,           // xyz where the sun is, w half width of its picture (tangent), 0 = none
+    sky_moon: vec4<f32>,          // the same for the moon
+    sky_glow: vec4<f32>,          // xyz where the source of the light really is
+    sky_params: vec4<f32>,        // x stars, y sun picture brightness, z moon picture brightness
+    wind: vec4<f32>,              // xy direction, z strength, w speed
     counts: vec4<u32>,            // x point light count, y shadows enabled, z shadow cascades
     point_lights: array<PointLight, MAX_POINT_LIGHTS>,
 }
@@ -36,7 +41,7 @@ struct MaterialParams {
     base_color: vec4<f32>,        // linear
     params: vec4<f32>,            // x metallic, y roughness, z normal scale, w occlusion strength
     emissive: vec4<f32>,          // rgb emitted light (linear), w alpha cutoff
-    flags: vec4<u32>,             // x has normal map, y alpha mode (0 opaque, 1 mask, 2 blend), z alpha to coverage
+    flags: vec4<u32>,             // x has normal map, y alpha mode (0 opaque, 1 mask, 2 blend), z alpha output, w foliage
 }
 
 @group(0) @binding(0) var<uniform> g: Globals;
@@ -53,6 +58,10 @@ struct MaterialParams {
 @group(2) @binding(4) var occlusion_tex: texture_2d<f32>;
 @group(2) @binding(5) var material_sampler: sampler;
 @group(2) @binding(6) var emissive_tex: texture_2d<f32>;
+// Sky pass only, in the group the materials use elsewhere.
+@group(2) @binding(7) var sun_picture: texture_2d<f32>;
+@group(2) @binding(8) var moon_picture: texture_2d<f32>;
+@group(2) @binding(9) var sky_sampler: sampler;
 
 const PI: f32 = 3.14159265;
 
@@ -72,7 +81,7 @@ struct InstanceIn {
     @location(5) model_2: vec4<f32>,
     @location(6) model_3: vec4<f32>,
     @location(7) normal_0: vec4<f32>, // w = first joint matrix, or -1 when not skinned
-    @location(8) normal_1: vec4<f32>,
+    @location(8) normal_1: vec4<f32>, // w = how much the wind moves it (see MeshData::wind)
     @location(9) normal_2: vec4<f32>,
     @location(10) tint: vec4<f32>,  // rgb sRGB tint, a = emissive strength
 }
@@ -111,13 +120,27 @@ fn instance_model(i: InstanceIn) -> mat4x4<f32> {
     return mat4x4<f32>(i.model_0, i.model_1, i.model_2, i.model_3);
 }
 
+// Moves a vertex downwind, the farther the higher above its model's origin.
+// Each plant has its own phase along the wind, so gusts roll across a field.
+fn sway(world: vec4<f32>, height: f32, i: InstanceIn) -> vec4<f32> {
+    let amount = i.normal_1.w;
+    if amount <= 0.0 {
+        return world;
+    }
+    let t = g.camera_pos.w * g.wind.w;
+    let phase = dot(i.model_3.xz, g.wind.xy) * 0.4 + i.model_3.x * 0.17;
+    let gust = 0.5 + 0.5 * sin(t + phase) + 0.25 * sin(t * 2.7 + phase * 1.9 + height * 3.0);
+    let push = height * height * amount * g.wind.z * gust;
+    return world + vec4<f32>(g.wind.x * push, 0.0, g.wind.y * push, 0.0);
+}
+
 @vertex
 fn vs_main(v: VertexIn, i: InstanceIn) -> VsOut {
     let skin = skin_matrix(v, i);
     // Joints rotate (and at most uniformly scale), so their 3x3 also takes normals.
     let skin_n = mat3x3<f32>(skin[0].xyz, skin[1].xyz, skin[2].xyz);
     let normal_m = mat3x3<f32>(i.normal_0.xyz, i.normal_1.xyz, i.normal_2.xyz) * skin_n;
-    let world = instance_model(i) * skin * vec4<f32>(v.position, 1.0);
+    let world = sway(instance_model(i) * skin * vec4<f32>(v.position, 1.0), v.position.y, i);
     var out: VsOut;
     out.clip = g.view_proj * world;
     out.world_pos = world.xyz;
@@ -132,7 +155,7 @@ fn vs_main(v: VertexIn, i: InstanceIn) -> VsOut {
 
 @vertex
 fn vs_shadow(v: VertexIn, i: InstanceIn) -> @builtin(position) vec4<f32> {
-    return cascade_view_proj * instance_model(i) * skin_matrix(v, i) * vec4<f32>(v.position, 1.0);
+    return cascade_view_proj * sway(instance_model(i) * skin_matrix(v, i) * vec4<f32>(v.position, 1.0), v.position.y, i);
 }
 
 struct ShadowMaskedOut {
@@ -143,7 +166,7 @@ struct ShadowMaskedOut {
 @vertex
 fn vs_shadow_masked(v: VertexIn, i: InstanceIn) -> ShadowMaskedOut {
     var out: ShadowMaskedOut;
-    out.clip = cascade_view_proj * instance_model(i) * skin_matrix(v, i) * vec4<f32>(v.position, 1.0);
+    out.clip = cascade_view_proj * sway(instance_model(i) * skin_matrix(v, i) * vec4<f32>(v.position, 1.0), v.position.y, i);
     out.uv = v.uv;
     return out;
 }
@@ -158,15 +181,10 @@ fn fs_shadow_masked(in: ShadowMaskedOut) {
     }
 }
 
-// Per-pixel threshold in 0..1 that looks like fine grain (Jimenez 2014).
-fn interleaved_gradient_noise(pixel: vec2<f32>) -> f32 {
-    return fract(52.9829189 * fract(dot(pixel, vec2<f32>(0.06711056, 0.00583715))));
-}
-
 // Final coverage for the material's alpha mode, discarding cut-out texels.
 // With alpha-to-coverage, mask edges get a one-pixel ramp (`width` is the
-// screen-space derivative of alpha) and blending maps alpha to MSAA samples.
-fn coverage(alpha: f32, width: f32, pixel: vec2<f32>) -> f32 {
+// screen-space derivative of alpha). Blended surfaces just output their alpha.
+fn coverage(alpha: f32, width: f32) -> f32 {
     let mode = material.flags.y;
     let a2c = material.flags.z == 1u;
     if mode == 0u {
@@ -186,16 +204,10 @@ fn coverage(alpha: f32, width: f32, pixel: vec2<f32>) -> f32 {
         }
         return ramp;
     }
-    if a2c {
-        if alpha < 0.004 {
-            discard;
-        }
-        return alpha;
-    }
-    if alpha <= interleaved_gradient_noise(pixel) {
+    if alpha < 0.004 {
         discard;
     }
-    return 1.0;
+    return alpha;
 }
 
 // Lit fraction (0..1) from cascade `i`, 1 outside its map.
@@ -376,10 +388,10 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
     let emissive_sample = textureSample(emissive_tex, material_sampler, in.uv).rgb;
     // Derivatives also need uniform control flow, so take them before any discard.
     let raw_alpha = base_sample.a * material.base_color.a;
-    let alpha = coverage(raw_alpha, fwidth(raw_alpha), in.clip.xy);
+    let alpha = coverage(raw_alpha, fwidth(raw_alpha));
 
     var n = normalize(in.normal);
-    if !front {
+    if !front && material.flags.w == 0u {
         n = -n;
     }
     if material.flags.x == 1u {
@@ -435,21 +447,127 @@ fn vs_sky(@builtin(vertex_index) idx: u32) -> SkyOut {
     return out;
 }
 
+// Where `dir` falls on a picture hanging in the sky at `at`, upright; 0..1 inside it.
+fn picture_uv(dir: vec3<f32>, at: vec4<f32>) -> vec2<f32> {
+    let facing = dot(dir, at.xyz);
+    if at.w <= 0.0 || facing <= 0.0 {
+        return vec2<f32>(-1.0);
+    }
+    var right = cross(at.xyz, vec3<f32>(0.0, 1.0, 0.0));
+    if dot(right, right) < 1e-4 {
+        right = vec3<f32>(1.0, 0.0, 0.0);
+    }
+    right = normalize(right);
+    let up = cross(right, at.xyz);
+    let p = dir / facing;
+    return vec2<f32>(dot(p, right), -dot(p, up)) / at.w * 0.5 + 0.5;
+}
+
+fn picture_mask(uv: vec2<f32>) -> f32 {
+    return select(0.0, 1.0, all(uv >= vec2<f32>(0.0)) && all(uv <= vec2<f32>(1.0)));
+}
+
+// Scattered points of light that fade towards the horizon and twinkle a little.
+fn stars(dir: vec3<f32>) -> f32 {
+    if dir.y <= 0.0 {
+        return 0.0;
+    }
+    let scaled = dir * 170.0;
+    let cell = floor(scaled);
+    let chance = hash13(cell + vec3<f32>(11.0));
+    if chance < 0.985 {
+        return 0.0;
+    }
+    let bright = (chance - 0.985) / 0.015;
+    let round = 1.0 - smoothstep(0.1, 0.45, length(fract(scaled) - 0.5));
+    let twinkle = 0.75 + 0.25 * sin(g.camera_pos.w * (1.0 + bright * 2.0) + chance * 500.0);
+    return round * (0.25 + bright * bright * 1.6) * twinkle * smoothstep(0.02, 0.25, dir.y);
+}
+
 @fragment
 fn fs_sky(in: SkyOut) -> @location(0) vec4<f32> {
     let far = g.inv_view_proj * vec4<f32>(in.ndc, 1.0, 1.0);
     let dir = normalize(far.xyz / far.w - g.camera_pos.xyz);
 
     var color = sky_gradient(dir);
+    color += vec3<f32>(stars(dir) * g.sky_params.x);
 
-    let cos_sun = dot(dir, g.sun_dir.xyz);
-    let disc = smoothstep(g.sun_disc.x, g.sun_disc.x + 0.0004, cos_sun);
+    let cos_sun = dot(dir, g.sky_glow.xyz);
     let glow = pow(max(cos_sun, 0.0), 64.0) * g.sun_disc.y + pow(max(cos_sun, 0.0), 6.0) * g.sun_disc.y * 0.15;
-    color += g.sun_color.rgb * (disc * 8.0 + glow);
+    color += g.sun_color.rgb * glow;
+
+    // The pictures of the sun and moon, or else the plain disc where the light is.
+    let above = smoothstep(-0.015, 0.01, dir.y);
+    if g.sky_sun.w > 0.0 || g.sky_moon.w > 0.0 {
+        let moon_uv = picture_uv(dir, g.sky_moon);
+        let moon = textureSampleLevel(moon_picture, sky_sampler, moon_uv, 0.0);
+        color = mix(color, moon.rgb * g.sky_params.z, moon.a * picture_mask(moon_uv) * above);
+        let sun_uv = picture_uv(dir, g.sky_sun);
+        let sun = textureSampleLevel(sun_picture, sky_sampler, sun_uv, 0.0);
+        color = mix(color, sun.rgb * g.sky_params.y, sun.a * picture_mask(sun_uv) * above);
+    } else {
+        let disc = smoothstep(g.sun_disc.x, g.sun_disc.x + 0.0004, cos_sun);
+        color += g.sun_color.rgb * disc * 8.0;
+    }
 
     // Fog the sky as if it were very far away, so the horizon melts into the fog.
     color = apply_fog(color, g.camera_pos.xyz + dir * 600.0);
     return vec4<f32>(color, 1.0);
+}
+
+// ---------------------------------------------------------------- water
+
+struct WaterOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) world_pos: vec3<f32>,
+    @location(1) tint: vec3<f32>,
+    @location(2) uv: vec2<f32>,
+}
+
+// `normal_1.w` is the height of the waves. They run along the wind and across it,
+// and the shading takes its normals from the faces they make.
+@vertex
+fn vs_water(v: VertexIn, i: InstanceIn) -> WaterOut {
+    var world = instance_model(i) * vec4<f32>(v.position, 1.0);
+    let t = g.camera_pos.w * max(g.wind.w, 0.2);
+    let along = dot(world.xz, g.wind.xy);
+    let across = dot(world.xz, vec2<f32>(-g.wind.y, g.wind.x));
+    world.y += i.normal_1.w * (sin(along * 1.3 - t * 1.1) + 0.6 * sin(across * 2.1 + t * 0.8 + along * 0.7));
+    var out: WaterOut;
+    out.clip = g.view_proj * world;
+    out.world_pos = world.xyz;
+    out.tint = srgb_to_linear(v.color * i.tint.rgb);
+    out.uv = v.uv;
+    return out;
+}
+
+@fragment
+fn fs_water(in: WaterOut) -> @location(0) vec4<f32> {
+    // Two layers of the picture drifting at different speeds with the wind.
+    let drift = g.wind.xy * g.camera_pos.w * g.wind.w * 0.012;
+    let layer_a = textureSample(base_color_tex, material_sampler, in.uv + drift);
+    let layer_b = textureSample(base_color_tex, material_sampler, in.uv * 0.61 - drift * 0.7 + vec2<f32>(0.37, 0.11));
+    var n = normalize(cross(dpdy(in.world_pos), dpdx(in.world_pos)));
+    if n.y < 0.0 {
+        n = -n;
+    }
+
+    var s: Surface;
+    s.albedo = in.tint * (layer_a.rgb + layer_b.rgb) * 0.5 * material.base_color.rgb;
+    s.n = n;
+    s.v = normalize(g.camera_pos.xyz - in.world_pos);
+    s.metallic = 0.0;
+    s.roughness = material.params.y;
+    s.f0 = vec3<f32>(0.02);
+
+    var color = shade(s, g.sun_dir.xyz, g.sun_color.rgb * shadow_factor(in.world_pos, n), 0.0);
+    color += point_lights(in.world_pos, s) + hemisphere(n) * s.albedo;
+
+    // The water mirrors the sky more the lower you look along it, and hides what's under it.
+    let mirror = 0.02 + 0.98 * pow(1.0 - max(dot(n, s.v), 0.0), 5.0);
+    color = mix(color, sky_gradient(reflect(-s.v, n)), mirror);
+    let alpha = mix(material.base_color.a, 1.0, mirror);
+    return vec4<f32>(apply_fog(color, in.world_pos), alpha);
 }
 
 // ---------------------------------------------------------------- particles

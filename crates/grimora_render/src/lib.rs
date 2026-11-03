@@ -14,7 +14,7 @@ mod uniforms;
 
 pub use image::RgbaImage;
 pub use renderer::{DrawItem, Frame, FrameStats, MeshHandle, Renderer, RendererSettings};
-pub use ui::{Anchor, Rect, TextStyle, Ui};
+pub use ui::{Anchor, Rect, TextStyle, Theme, Ui, UiInput};
 pub use uniforms::MAX_POINT_LIGHTS;
 pub use wgpu;
 

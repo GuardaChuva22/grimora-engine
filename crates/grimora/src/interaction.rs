@@ -11,6 +11,8 @@ use hecs::Entity;
 use serde::{Deserialize, Serialize};
 
 use crate::World;
+use crate::combat::Health;
+use crate::npc::Agent;
 use crate::world::{Body, Collider, Name, Renderable};
 
 /// What [`World::update_triggers`] noticed this frame.
@@ -84,11 +86,13 @@ impl World {
     /// `forward` (usually the camera's direction).
     pub fn interaction_target(&self, from: Vec3, forward: Vec3, physics: &Physics) -> Option<Interaction> {
         let forward = forward.normalize_or_zero();
-        let mut query = self.ecs.query::<(Entity, &Interactable, &Transform, Option<&Renderable>)>();
+        let mut query = self.ecs.query::<(Entity, &Interactable, &Transform, Option<&Renderable>, Option<&Health>)>();
         let mut candidates: Vec<(f32, Entity)> = query
             .iter()
-            .filter(|(_, _, _, renderable)| renderable.is_none_or(|r| r.visible))
-            .filter_map(|(entity, interactable, transform, _)| {
+            .filter(|(_, _, _, renderable, health)| {
+                renderable.is_none_or(|r| r.visible) && health.is_none_or(|h| !h.is_dead())
+            })
+            .filter_map(|(entity, interactable, transform, _, _)| {
                 let to = transform.position - from;
                 let distance = to.length();
                 // Straight behind counts as twice as far as straight ahead.
@@ -114,7 +118,7 @@ impl World {
         let own = match (self.get::<Collider>(entity), self.get::<Body>(entity)) {
             (Some(collider), _) => Some(collider.0),
             (_, Some(body)) => physics.body_collider(body.0),
-            _ => None,
+            _ => self.get::<Agent>(entity).map(|agent| agent.collider()),
         };
         physics.raycast(from, target - from, from.distance(target)).is_none_or(|hit| Some(hit.collider) == own)
     }

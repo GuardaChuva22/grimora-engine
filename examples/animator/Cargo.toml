@@ -1,0 +1,14 @@
+[package]
+name = "animator"
+description = "Pose and keyframe editor for Grimora's clips."
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+grimora.workspace = true
+anyhow.workspace = true
+ron.workspace = true
+
+[lints]
+workspace = true

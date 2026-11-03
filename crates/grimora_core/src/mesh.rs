@@ -85,9 +85,23 @@ pub enum AlphaMode {
     /// Cut out where alpha is below `cutoff`: foliage, torn cloth, fences.
     /// Edges are smoothed with alpha-to-coverage under MSAA.
     Mask { cutoff: f32 },
-    /// See-through surfaces, approximated with alpha-to-coverage (or dithering
-    /// without MSAA). Needs no sorting but only has a few levels of opacity.
+    /// See-through surfaces, really blended with what is behind them: drawn after
+    /// everything opaque, from the farthest to the nearest object. Inside one
+    /// object nothing is sorted, so keep them simple shapes.
     Blend,
+}
+
+/// How a surface is shaded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Shading {
+    /// Lit like any solid thing.
+    #[default]
+    Standard,
+    /// Lit from above on both faces, as if the sprites were part of the ground cover.
+    Foliage,
+    /// Waves on the vertices (`MeshData::wind` is their height), scrolling
+    /// texture and the sky reflected at low angles. Use with `AlphaMode::Blend`.
+    Water,
 }
 
 /// Surface appearance, modeled on glTF's metallic-roughness materials.
@@ -108,6 +122,9 @@ pub struct Material {
     /// Render both faces of each triangle (thin geometry like leaves or cloth).
     pub double_sided: bool,
     pub alpha_mode: AlphaMode,
+    pub shading: Shading,
+    /// Keeps the texels sharp up close instead of blurring them: pixel art.
+    pub pixelated: bool,
     /// Linear light emitted by the surface, multiplied by `emissive_texture`.
     /// Unaffected by lighting; values above 1 feed the bloom.
     pub emissive: Vec3,
@@ -134,6 +151,8 @@ impl Default for Material {
             occlusion_strength: 1.0,
             double_sided: false,
             alpha_mode: AlphaMode::Opaque,
+            shading: Shading::Standard,
+            pixelated: false,
             emissive: Vec3::ZERO,
             base_color_texture: None,
             normal_texture: None,
@@ -166,6 +185,11 @@ pub struct MeshData {
     /// Simpler versions drawn when the object looks small, from most to least
     /// detailed (see [`MeshLod`]).
     pub lods: Vec<MeshLod>,
+    /// How much the wind moves it: meters at one unit above its origin, growing
+    /// with the square of the height, so the base stays put. 0 stands still.
+    pub wind: f32,
+    /// Casts no shadow: grass that would cost more than it shows, or water.
+    pub shadowless: bool,
 }
 
 /// A lower-detail stand-in for a mesh.

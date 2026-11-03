@@ -12,7 +12,7 @@ Requisitos: Windows 10/11, GPU com Vulkan ou DirectX 12, [Rust](https://rustup.r
 cargo run -p sandbox
 ```
 
-Você controla um andarilho encapuzado com uma lanterna:
+Você controla um personagem low poly com espada e lanterna:
 
 | Tecla | Modo personagem (padrão) | Modo voo (**Tab** alterna) |
 | --- | --- | --- |
@@ -22,8 +22,10 @@ Você controla um andarilho encapuzado com uma lanterna:
 | Espaço | pula | sobe (E/Q também) |
 | Roda | aproxima/afasta a câmera | ajusta a velocidade |
 | E | usa o objeto ao alcance | sobe |
+| Clique ou F | golpeia com o cajado | |
+| Gamepad | todos os comandos do personagem | |
 
-**F5** recarrega a cena, **F6** salva o jogo, **F9** carrega o último save, **F12** salva uma captura em `screenshots/`, **Esc** sai.
+**F5** recarrega a cena, **F6** salva o jogo, **F9** carrega o último save, **F12** salva uma captura em `screenshots/`, **Esc** abre a pausa.
 
 ![Andarilho com lanterna](docs/wanderer.png)
 
@@ -55,6 +57,8 @@ cargo run --release -p sandbox -- --frames 600 --no-vsync
 | `--no-ui` | Esconde o HUD do jogo (capturas só da cena) |
 | `--save-dir <pasta>` | Pasta dos saves (padrão: `%APPDATA%\<título do jogo>\saves`) |
 | `--load <slot>` | Pede ao jogo para carregar esse save ao abrir (o sandbox atende) |
+| `--menu <nome>` | Pede ao jogo para abrir esse menu, para captura (o sandbox atende `title`, `pause`, `options`, `video` e `controls`) |
+| `--time <hora>` | Trava o dia da cena nessa hora, de 0 a 24 |
 
 Ao fechar, o motor imprime uma linha de métricas fácil de ler por scripts:
 
@@ -71,17 +75,18 @@ crates/
   grimora_core/    tempo, entrada, Transform, Camera, MeshData, Material, Environment (luz/névoa/céu/pós), simulação de partículas
   grimora_render/  renderizador wgpu: sombras, HDR + MSAA 4x, materiais PBR, névoa de altura, partículas, bloom, tonemapping, HUD
   grimora_scene/   formato de cena RON, importação glTF, terreno procedural, geradores low poly, espalhamento, colisores
-  grimora_physics/ física com Rapier: mundo estático da cena, corpos dinâmicos, raycasts, corpo de personagem (cápsula)
+  grimora_physics/ física com Rapier: mundo estático da cena, corpos dinâmicos, raycasts, corpo de personagem (cápsula), busca de caminhos
   grimora_audio/   som com kira: efeitos, loops de ambiente e emissores 3D que seguem a câmera
-  grimora/         janela (winit), laço principal, trait Game, World (entidades hecs), gatilhos e interação, partículas, FlyCamera, ThirdPersonController, CLI, hot-reload
+  grimora/         janela (winit), laço principal, trait Game, World (entidades hecs), gatilhos e interação, partículas, NPCs, combate, FlyCamera, ThirdPersonController, CLI, hot-reload
 examples/
   sandbox/         cena de teste do motor
 assets/scenes/     cenas .ron
 assets/models/     modelos glTF (com a licença de cada um)
 assets/sounds/     sons WAV/OGG (os do sandbox são gerados por tools/gen_sounds.py)
+assets/textures/   texturas e sprites em pixel art, parte do motor (importadas por tools/import_textures.py)
 ```
 
-Quadro a quadro: mapa de sombra do sol → passe HDR (céu + malhas iluminadas + partículas ordenadas, MSAA) → cadeia de bloom → tonemap ACES, contraste, saturação, vinheta e granulado na tela → HUD por cima. Objetos com a mesma malha são desenhados numa única chamada instanciada.
+Quadro a quadro: mapa de sombra do sol ou da lua → passe HDR (céu + malhas iluminadas + transparentes e água + partículas ordenadas, MSAA) → cadeia de bloom → tonemap ACES, contraste, saturação, vinheta e granulado na tela → HUD por cima. Objetos com a mesma malha são desenhados numa única chamada instanciada.
 
 | Componente | Escolha |
 | --- | --- |
@@ -142,6 +147,8 @@ Cada objeto do mundo é uma entidade do [`hecs`](https://docs.rs/hecs) em `ctx.w
 | `Trigger` | área que avisa quando o jogador entra ou sai |
 | `Interactable` | objeto que o jogador usa com uma tecla |
 | `ParticleSystem` | efeito de partículas que sai da entidade |
+| `Agent` / `Brain` | personagem que anda sozinho e o que decide para onde |
+| `Health` / `Fighter` | o que pode ser ferido e o que pode golpear |
 | `Body` / `Collider` | corpo dinâmico ou colisor estático na física |
 | `SceneIndex` | posição no `objects` da cena (usado pelo save) |
 
@@ -387,6 +394,332 @@ ctx.world.ecs.get::<&mut ParticleSystem>(inimigo)?.emitting = false;
 
 No sandbox, as tochas têm chama, fumaça e fagulhas, há poeira no ar, e **E** faz o cristal do altar estourar em faíscas ao despertar. O F3 mostra quantas partículas estão ativas.
 
+### Personagens (NPCs)
+
+![O seguidor parado ao lado do jogador e o peregrino ao fundo, perto do altar](docs/npcs.png)
+
+`npc:` faz um objeto andar sozinho. Não há malha de navegação para preparar: o caminho é procurado na física como ela está agora, então objetos de streaming e caixas empurradas já contam.
+
+```ron
+(name: "peregrino", mesh: Model(path: "../models/wanderer/wanderer.gltf"), position: (3.5, 0.0, 3.5),
+ animation: "idle",
+ npc: (
+     walk_speed: 2.6,            // metros por segundo; também há run_speed, radius e height
+     clip_speeds: (4.5, 8.5),    // velocidades para as quais `walk` e `run` foram feitos
+
+     // O que faz sem nada chamar sua atenção:
+     // Stand (padrão), Wander(radius: 5.0, pause: (2.0, 5.0)) ou:
+     behavior: Patrol(points: [(-3.5, 0.0, -3.5), (3.5, 0.0, -3.5)], pause: 2.0), // `y` a partir do chão
+
+     // Quando vê o jogador, com linha de visão livre: Watch, Follow(distance: 2.5) ou Flee.
+     notice: (radius: 6.0, reaction: Watch),
+ )),
+```
+
+O jogo chama uma vez por quadro, depois de mover o jogador:
+
+```rust
+for event in ctx.world.update_npcs(&mut ctx.physics, jogador.body.center(), dt) {
+    if let NpcEvent::Noticed(npc) = event { /* NpcEvent::Lost(npc) quando perde o interesse */ }
+}
+```
+
+Para dar as ordens no código, tire o `Brain` e use o `Agent`:
+
+```rust
+ctx.world.ecs.remove_one::<Brain>(guarda)?;
+let agente = ctx.world.get_mut::<Agent>(guarda).unwrap();
+agente.running = true;
+agente.go_to(destino);          // pode chamar a cada quadro com um alvo em movimento
+if agente.status() == AgentStatus::Arrived { /* também há Moving, Failed e Idle */ }
+agente.look_at(ponto);          // vira para o ponto quando parado
+agente.animate = false;         // o jogo escolhe os clipes (um ataque, por exemplo)
+```
+
+`Physics::find_path(de, para, &NavShape::new(raio, altura))` também pode ser usada sozinha.
+
+- **Caminhos:** uma busca A* numa grade de 0,5 m, feita na hora com raios e testes de cápsula. Respeita degraus de até 0,4 m e rampas de até 40°, não desce de beiradas e desvia de corpos dinâmicos. Um destino dentro de algo sólido vira o chão ao lado; sem caminho, o personagem chega o mais perto que der e fica em `Failed`.
+- **Encontros:** personagens desviam uns dos outros e do jogador, cada um pela própria direita. A cápsula deles bloqueia o jogador e aparece em `Physics::raycast`, mas não em buscas de caminho nem em `Physics::raycast_scenery`, usada pela câmera.
+- **Animação:** o motor toca `idle`, `walk` e `run` conforme a velocidade, sem deixar os pés deslizarem.
+- **Streaming e saves:** num arquivo de região, o personagem carrega e descarrega junto com ela e volta ao ponto inicial. O save guarda só onde ele está: ao carregar, ele retoma a rotina do começo.
+- **Desempenho:** no sandbox, a busca mais cara medida (destino inalcançável) custou 1,2 ms, e o motor faz no máximo 2 por quadro. Numa RTX 3060 em 1280x720 (`--release`), cada personagem custa cerca de 17 µs por quadro: 100 passeando somam 1,7 ms. A mais de 120 m do jogador, ele espera parado e não custa nada.
+- **Fora de escopo por enquanto:** a grade tem um andar só por célula, então um caminho não escolhe entre uma ponte e o que passa embaixo dela. Personagens não pulam. Multidões apertadas podem travar um pouco antes de achar outra rota.
+
+No sandbox, o vigia observa e responde com **E**, o peregrino dá voltas em torno do altar, um segue o jogador e outro foge.
+
+### Eventos de animação e combate
+
+![O errante corrompido acerta o jogador com o cajado, entre faíscas, com as barras de vida na tela](docs/combat.png)
+
+Um **evento** marca um instante de um clipe: um pé no chão, um golpe que acerta. Eles vêm do glTF, em `extras` da animação, ou do arquivo de cena, para um modelo que não os tem:
+
+```ron
+// No .gltf: "animations": [{ "name": "attack", "extras": { "events": [{ "time": 0.38, "name": "hit" }] }, ... }]
+mesh: Model(path: "orc.glb", events: [("attack", 0.38, "hit"), ("walk", 0.2, "step")]), // clipe, segundos, nome
+```
+
+```rust
+for evento in animator.events() { /* os que passaram na última atualização */ }
+if animator.fired("step") { /* tocar um passo */ }
+animator.replay_once("attack", 0.08); // do começo, mesmo que já esteja tocando
+```
+
+Em laço, cada evento dispara uma vez por volta, e a velocidade do clipe conta. Um clipe saindo num crossfade não dispara nada, nem um tocado de trás para frente. O andarilho do sandbox tem `step` em `walk` e `run`, `swing` e `hit` em `attack` e `fall` em `die`.
+
+**Combate:** `combat:` deixa um objeto ser ferido e, com `weapon`, revidar. O dano acontece no quadro em que o clipe dispara o evento da arma, então ele combina com o que aparece na tela.
+
+```ron
+(name: "guarda", mesh: Model(path: "../models/wanderer/wanderer.gltf"), animation: "idle",
+ npc: (notice: (radius: 9.0, reaction: Attack)),   // persegue o jogador e golpeia ao alcançar
+ combat: (
+     health: 30.0,
+     team: 1,                 // golpes só acertam outros times; o jogador costuma ser o 0
+     radius: 0.4,             // largura do alvo: o golpe alcança isso a mais
+     weapon: (damage: 8.0, reach: 1.7, arc: 90.0, cooldown: 2.0, clip: "attack", event: "hit"),
+ )),
+(name: "barril", mesh: Cube, combat: (health: 15.0)), // sem clipe `die`: some ao quebrar
+```
+
+O jogo chama uma vez por quadro, depois de `update_npcs`, e dá vida e arma ao seu jogador:
+
+```rust
+ctx.world.ecs.insert(avatar, (Health::new(60.0, 0), Fighter::new(Weapon { damage: 10.0, ..Default::default() })))?;
+
+if clicou { ctx.world.get_mut::<Fighter>(avatar).unwrap().attack(); }
+jogador.locked = lutador.busy() || vida.staggered() || vida.is_dead(); // trava WASD e pulo; a câmera continua
+
+for evento in ctx.world.update_combat(&mut ctx.physics, dt) {
+    if let CombatEvent::Hit { attacker, target, damage, position, direction, killed } = evento { /* som, faíscas... */ }
+}
+ctx.world.damage(alvo, 5.0, &mut ctx.physics);  // armadilhas e magias
+ctx.world.npcs_ignore_player = true;            // ninguém persegue quem morreu (ou numa cena de diálogo)
+ctx.world.revive(avatar, &mut ctx.physics);     // de pé outra vez; a animação fica com o jogo
+```
+
+- **Quem é atingido:** quem tem `Health` de outro time, dentro de `reach` e de `arc` graus à frente, até 2 m acima ou abaixo, sem nada sólido no caminho. Um personagem sem `Health` não pode ser ferido: no sandbox, só o errante corrompido e o barril podem.
+- **Reações:** o alvo toca `hurt`, fica sem agir por 0,35 s, perde o golpe que ainda não acertou e, se tiver `Brain`, percebe quem o atacou. Em zero, toca `die` e fica caído, sem cápsula para atrapalhar a passagem.
+- **Clipes que faltam:** sem o clipe da arma, o golpe acerta na hora. Sem o evento, acerta no fim do clipe. Sem `hurt`, o alvo não vacila.
+- **Pausa:** com o mundo pausado, as animações param e os eventos ficam guardados. O jogo não chama `update_combat`, e o golpe em andamento acerta depois, no momento certo. É assim que o sandbox faz: o menu de pausa volta antes de qualquer lógica do jogo.
+- **Saves:** a vida de cada objeto da cena entra no save, e quem morreu continua caído ao carregar. Um personagem de região volta inteiro quando ela recarrega.
+- **Desempenho:** no sandbox, com o errante corrompido em cena, um quadro custa 0,95 ms numa RTX 3060 em 1280x720 (`--release`). Quase nada disso é do combate, que só percorre quem tem arma e procura alvos no quadro do golpe. No pior caso testado, 100 inimigos perseguindo e golpeando o jogador ao mesmo tempo, a média foi de 5,9 ms e o percentil 95 de 13 ms, a maior parte em busca de caminhos.
+- **Fora de escopo por enquanto:** `Brain` só persegue o jogador; para um personagem atacar outro, o jogo dá as ordens pelo `Agent` e pelo `Fighter`. Não há bloqueio, armas à distância nem camadas de animação: o corpo inteiro para durante o golpe.
+
+**Espada:** com `blade`, o golpe deixa de olhar `reach` e `arc` (que só dizem quando um NPC deve golpear) e fere o que a lâmina toca de verdade, uma vez por golpe, entre os eventos `hit_on` e `hit_off` do clipe.
+
+```ron
+weapon: (damage: 10.0, cooldown: 0.0,
+         clip: "sword_1", combo: ["sword_2", "sword_3"], // o próximo começa no evento `combo`
+         blade: (),       // osso `weapon.R`; `joint`, `base`, `tip` e `radius` mudam isso
+         stamina: 16.0,   // custo; sem `Stamina` na entidade, nada é cobrado
+         hit_stop: 0.075) // os dois lados quase param por esse tempo ao acertar
+```
+
+- **Combo:** `Fighter::attack` pedido no meio de um golpe fica guardado por 0,45 s, e por isso um clique adiantado não se perde. O evento `cancel` marca onde a recuperação pode ser cortada (`can_cancel`, `interrupt`), como numa rolagem.
+- **Movimento vindo do clipe:** o osso `root` do clipe não mexe na pose. `Animator::root_delta` diz quanto ele andou neste quadro, e quem move a cápsula é o `ThirdPersonController::root_motion` (ou o `Agent`, sozinho).
+- **Esquiva:** `Health::make_untouchable(segundos)` faz `damage` devolver `None` nesse tempo. O sandbox rola com direção, ou dá um passo para trás sem ela, e cobra `Stamina`.
+- **Travar a câmera:** `World::find_lock_target` e `next_lock_target` só escolhem alvos à vista; `ThirdPersonController::lock_target` leva a câmera e `lock_holds` diz quando soltar. Segurar a trava é do jogo.
+- **Na mão:** `World::attach(pai, "osso", malha, deslocamento)` prende uma malha a um osso, e ela sai junto com o pai.
+- **Câmera lenta:** `Time::set_scale` escala o relógio do mundo, para conferir um golpe quadro a quadro. No sandbox é o F4.
+
+Os golpes agora se editam no [animador](#animador). Eles nasceram em texto, em `tools/blender/sword_moves.py`, e `blender --background --python tools/blender/build_wanderer.py -- --export-clips` os exporta de novo para `wanderer_clips/`, **por cima do que foi salvo no animador**. Em `sword_moves.py`: poses-chave por controle (mãos, pés, quadril, tronco, cabeça, lâmina), resolvidas por IK em `anim_kit.py`. O corpo não fica preso às chaves: molas o fazem chegar um pouco depois, passar do ponto e assentar. O `sword_moves.py` é o conjunto da espada leve, que toda espada leve usa: corte descendo, corte de volta subindo pela mesma linha e estocada longa, todos com uma mão.
+
+```bash
+blender --background --python tools/blender/build_wanderer.py -- --metrics sword_1
+```
+
+Isso imprime em 2 segundos, sem gravar nada, uma linha `[anim]` por clipe, com pé que não alcança ou escorrega, salto de rotação por quadro, pulso, torção do antebraço e velocidade da ponta da lâmina, além da linha do tempo do clipe nomeado. Sem `--metrics`, o comando remonta o modelo. Com `-- --strips <pasta> sword_1 sword_2`, ele também desenha uma folha de 8 quadros de cada clipe, e com `-- --closeup <pasta> sword_idle` mostra a mão no cabo.
+
+No sandbox, **clique** ou **F** golpeia na direção da câmera. O errante corrompido, a oeste do círculo, ataca quem chega perto. Ao morrer, o jogador volta ao início com a vida cheia depois de 4 s.
+
+### Animador
+
+Uma ferramenta dentro do motor para fazer golpes arrastando o personagem:
+
+```bash
+cargo run --release -p animator
+```
+
+Abra um clipe na lista da esquerda, pare no quadro que quiser e arraste as alças: mãos, pés, quadril, ponta da espada, cotovelos e joelhos seguem por IK, e tronco e cabeça giram. Mexer em qualquer momento cria uma chave ali. Salve com Ctrl+S: os clipes são os arquivos de texto em `assets/models/wanderer/wanderer_clips/`, e o jogo os lê ao abrir.
+
+| Entrada | Ação |
+| --- | --- |
+| Botão esquerdo numa alça | Move a parte (Shift: gira; na ponta da espada, gira o fio) |
+| Botão direito / meio / roda | Orbita / move / aproxima a câmera |
+| Espaço | Toca ou pausa, em 100%, 50%, 25% ou 10% |
+| Setas | Quadro a quadro |
+| Linha do tempo | Clique para ir ao momento, arraste chaves e marcas; na linha "Tudo", move a pose inteira |
+| K / Delete | Põe uma chave aqui / apaga a chave ou a marca selecionada |
+| Ctrl+Z / Ctrl+Y / Ctrl+S | Desfaz / refaz / salva tudo |
+
+- **Parada, a tela mostra as chaves exatas; tocando, o corpo segue as chaves com molas**, que dão o peso. "Ver molas parado" mostra as molas quadro a quadro.
+- **"Alcance"** é até onde, em segundos, um arraste leva junto as chaves vizinhas, para dobrar um arco em vez de amassá-lo. Com 0, só a chave daquele momento muda.
+- **Marcas:** a faixa vermelha é onde a lâmina fere (`hit_on` a `hit_off`), `combo` é onde o próximo golpe pode entrar e `cancel`, onde a rolagem pode cortar a recuperação. Tocando, a lâmina é testada contra o alvo, com pausa de impacto e rastro, e a tela diz em que momento acertou ou por quantos centímetros errou.
+- **Pulso, Giro e Falta** ficam vermelhos quando a pose força o braço (pulso acima de 65°, giro acima de 100°) ou quando o membro não alcança o ponto pedido.
+- Para renomear ou apagar um clipe, renomeie ou apague o arquivo. Os clipes de "Só ver" vêm do glTF e não têm poses para editar.
+
+### Menus e estados de jogo
+
+O motor oferece as peças; cada jogo decide quais telas tem. O sandbox abre numa tela de título sobre a cena viva, pausa no **Esc** e guarda as opções num arquivo ([menu.rs](examples/sandbox/src/menu.rs)).
+
+![Tela de título e opções do sandbox](docs/menus.png)
+
+**Widgets.** Botão, controle deslizante, liga/desliga e lista de escolha em modo imediato, no mesmo `ctx.ui` do HUD e no mesmo estilo de pixels:
+
+```rust
+let ui = &mut ctx.ui;
+let linha = |n: f32| Rect::new(Vec2::new(40.0, 100.0 + n * 52.0), Vec2::new(600.0, 44.0));
+if ui.button(linha(0.0), "Novo jogo") {
+    // clicado, ou Enter/Espaço com o foco nele
+}
+if ui.button_if(tem_save, linha(1.0), "Continuar") { /* cinza e inerte sem save */ }
+if ui.slider(linha(2.0), "Volume", &mut volume, 0.0..=1.0, 0.05) {
+    ctx.audio.set_master_volume(volume); // true nos quadros em que o valor muda
+}
+ui.toggle(linha(3.0), "Tela cheia", &mut cheia);
+ui.choice(linha(4.0), "Dificuldade", &["Fácil", "Difícil"], &mut dificuldade);
+```
+
+- **Foco:** um widget por vez tem o foco; o primeiro habilitado começa com ele. Setas ou W/S movem o foco (pulando os desabilitados e dando a volta), e o mouse o toma ao passar por cima. Um cursor parado não briga com o teclado.
+- **Teclado:** Enter ou Espaço usam o widget em foco; esquerda/direita ou A/D mudam deslizantes, liga/desliga e listas. Segurar uma direção repete.
+- **Mouse:** um clique pede apertar e soltar no mesmo widget. O deslizante segue o cursor, mesmo fora dele, enquanto o botão estiver apertado na trilha.
+- **Trocar de tela:** chame `ui.reset_focus()` (o primeiro widget toma o foco) ou `ui.set_focus("Opções")` (para voltar de onde veio). O widget é identificado pelo rótulo, então dois na mesma tela não devem ter o mesmo.
+- **Aparência:** `ui.theme` guarda cores e tamanho do texto. Os estados são normal, sob o cursor, em foco, apertado e desabilitado.
+- **Entrada:** o motor preenche `UiInput` a partir de `ctx.input` a cada quadro, já em pixels lógicos. Com o cursor preso (`set_cursor_grab(true)`), o mouse não alcança os widgets.
+
+**Pausa.** `ctx.set_paused(true)` para o mundo: o motor pula física, animações e partículas, e o `Game::update` continua rodando para desenhar os menus. Pule a sua própria simulação nesse quadro.
+
+- `ctx.time.delta()` e `elapsed()` são tempo real e nunca param: use-os em menus e em avisos que somem.
+- `ctx.time.world_delta()` e `world_elapsed()` param na pausa e seguem de onde estavam: use-os no que pertence ao mundo. O tremor das luzes também usa esse relógio.
+- O som continua tocando na pausa; quem quiser silêncio baixa o volume.
+
+**Outras peças do `Context`:**
+
+| Peça | Efeito |
+| --- | --- |
+| `EngineConfig { escape_quits: false, .. }` | O **Esc** deixa de fechar o motor e fica para o jogo (o padrão continua fechando) |
+| `ctx.set_cursor_grab(false)` | Solta o cursor enquanto um menu está aberto; o jogo o prende de novo ao voltar |
+| `ctx.set_ui_scale(1.5)` | Aumenta toda a interface; `ui.size()` encolhe junto, então os layouts se ajustam |
+| `ctx.set_fullscreen(true)` | Janela sem bordas em tela cheia |
+| `ctx.reload_scene()` | Reconstrói o mundo a partir do arquivo no próximo quadro (`Game::scene_loaded` roda de novo) |
+
+**Sandbox:**
+
+- **Título:** Novo jogo, Continuar (só com save; carrega o mais recente), Opções, Sair. O andarilho fica parado com a lanterna e os outros personagens seguem suas rotinas.
+- **Pausa:** Continuar, Salvar (no mesmo slot do F6), Carregar, Opções, Menu principal, Sair. **Esc** fecha.
+- **Opções:** volume geral, ambiente e efeitos (`Category`), tamanho da interface e tela cheia. Valem na hora e são gravadas de forma atômica ao sair da tela, em `<saves>/config/options.ron`. Um arquivo quebrado é ignorado com um aviso no terminal.
+
+**Automação.** `--screenshot`, `--frames`, `--load`, `--camera`, `--look-at` e `--no-ui` continuam indo direto para o jogo. `--screenshot` e `--frames` também ignoram as opções salvas e não gravam nada, para a captura não depender da máquina. Para capturar um menu, use `--menu`:
+
+```bash
+cargo run -p sandbox -- --screenshot screenshots/menu_title.png --size 1280x720 --menu title
+cargo run -p sandbox -- --screenshot screenshots/menu_pause.png --size 1280x720 --menu pause
+cargo run -p sandbox -- --screenshot screenshots/menu_options.png --size 1280x720 --menu options
+cargo run -p sandbox -- --screenshot screenshots/menu_video.png --size 1280x720 --menu video
+cargo run -p sandbox -- --screenshot screenshots/menu_controls.png --size 1280x720 --menu controls
+```
+
+`pause` e `options` jogam 30 quadros antes de abrir, para mostrar um jogo em andamento. Testes sem janela usam `Context::headless` e `headless_frame`, que rodam os mesmos passos do laço principal, sem renderizar ([tests/pause.rs](crates/grimora/tests/pause.rs)).
+
+- **Fora de escopo por enquanto:** sem confirmação ao sair para o menu principal, sem rolagem nem campos de texto, e o menu não reage à perda de foco da janela.
+
+### Controles e opções
+
+O jogo pergunta por **ações com nome**, não por teclas. Cada ação guarda uma lista de controles (tecla, botão do mouse, botão do gamepad ou direção de um analógico), e o motor já traz as de andar, correr, pular, usar, golpear, rolar, travar alvo e pausar em `grimora::core::actions`:
+
+```rust
+ctx.input.actions.add("magia", [Binding::Key(KeyCode::KeyG), Binding::Pad(PadButton::North)]); // a sua, com o padrão dela
+if ctx.input.action_just_pressed(actions::JUMP) { /* ... */ }
+let frente = ctx.input.action_axis(actions::MOVE_BACK, actions::MOVE_FORWARD); // analógico, de -1 a 1
+ctx.input.actions.rebind("magia", Binding::Key(KeyCode::KeyR)); // troca; se a tecla já tiver dono, os dois trocam de lugar
+```
+
+| Ação | Teclado e mouse | Gamepad |
+| --- | --- | --- |
+| Andar | WASD | analógico esquerdo |
+| Olhar | mouse | analógico direito |
+| Correr | Shift | LB |
+| Pular | Espaço | A |
+| Usar | E | X |
+| Golpear | clique ou F | RT |
+| Rolar | Ctrl esquerdo | B |
+| Travar alvo | Q | RB |
+| Pausar | Esc | Start |
+
+No menu, as setas do gamepad movem o foco, A confirma e B volta. **Esc, F3, F5, F12 e Start** são reservados e não podem ser reatribuídos.
+
+`Options` guarda o que o jogador muda (volumes, interface, tela cheia, resolução, vsync, sombras, antisserrilhado, sensibilidade, inversão do eixo Y e controles) em `<saves>/config/options.ron`. `Options::load` lê, `apply(ctx)` aplica e `apply_at_startup(&mut config)` cobre o que precisa valer antes da janela abrir. O antisserrilhado só muda ao reiniciar. O sandbox tem as telas **Vídeo** e **Controles**:
+
+![Telas de vídeo e controles](docs/controls.png)
+
+### Texturas e sprites
+
+`assets/textures/` traz a biblioteca do motor, em pixel art de 128x128: pisos, paredes, rochas, madeiras, tecidos, plantas, teias, decalques, sol e luas. Para trazer imagens novas:
+
+```bash
+python -I tools/import_textures.py "C:/caminho/da/pasta"
+```
+
+Ele copia os PNG da pasta e de `moons/` com nomes em ASCII minúsculo (`água.png` vira `agua.png`) e prepara a borda dos sprites transparentes. Uma imagem `<nome>_emission.png` ao lado de `<nome>.png` faz o desenho brilhar sozinho, a qualquer hora, sem nada a declarar na cena.
+
+```ron
+// Uma imagem sobre a malha inteira; `tile` são os metros de cada repetição, seja qual for o tamanho do objeto.
+(mesh: Cube, scale: (2.4, 0.8, 1.5), texture: (path: "../textures/pedra_inscricoes_gastas.png", tile: 1.6)),
+// Planta: imagens cruzadas em pé, com a base no chão. `size` é a altura do desenho, sem contar as margens vazias.
+(mesh: Sprite(texture: "../textures/samambaia.png", size: 1.0), position: (3.0, 0.0, 2.0)),
+// Imagem parada: um plano só e sem vento (uma cerca, uma teia, um pano).
+(mesh: Sprite(texture: "../textures/cerca_quebrada.png", size: 1.3, planes: 1, sway: 0.0)),
+// Decalque: imagem deitada no chão, sem sombra nem colisor. Gire o objeto para pô-la numa parede.
+(mesh: Decal(texture: "../textures/decal_sangue_gotas.png", size: 1.5), position: (2.0, 0.05, 0.0)),
+```
+
+`scatter` também aceita `texture`, `Sprite` e `Decal` (use `sink: 0.0` nos decalques). O terreno troca as cores por imagens, escolhidas pela mesma inclinação e altura das cores:
+
+```ron
+terrain: (textures: (grass: "../textures/grama1.png", dirt: "../textures/terra_pedregosa.png",
+                     rock: "../textures/rocha_umida_escura.png", tile: 4.0)),
+```
+
+Imagem ausente só registra o erro: a cena abre com a malha sem textura (um cubo magenta no lugar de um sprite ou decalque).
+
+Limites: sprites têm luz de cima, como o chão em volta, e não projetam sombra sem `shadow: true`. Decalques são planos, então em terreno inclinado parte deles afunda. A textura vai por projeção de caixa, com emendas em objetos redondos.
+
+### Dia e noite
+
+```ron
+day_cycle: (time: 16.5, day_length: 480.0, sunrise: 40.0, tilt: 35.0),
+```
+
+`time` é a hora inicial, `day_length` os segundos reais de um dia inteiro (0 para o relógio), `sunrise` onde o sol nasce (em graus, 0 é +X e 90 é -Z) e `tilt` o quanto ele passa longe do topo ao meio-dia. O sol nasce às 6 e se põe às 18. O relógio assume sol, luz ambiente, cor e densidade da névoa, cores do céu, exposição e estrelas do `environment`; o resto continua valendo. Para outro clima, liste `keys`, um horário por entrada: o motor interpola entre eles, e sem `keys` vale um dia de céu pesado, com noites frias e auroras vermelhas.
+
+```ron
+environment: (sky: (sun_texture: "../textures/sol.png", moon_texture: "../textures/lua.png", sun_sprite_size: 6.0, moon_sprite_size: 5.0)),
+```
+
+A luz direcional é o sol de dia e a lua de noite, e as duas se apagam na troca para a sombra não saltar. O relógio para na pausa e entra no save. `--time <hora>` trava a hora, para capturas repetíveis. No código: `world.time_of_day()`, `world.set_time_of_day(hora)` e `world.is_night()`.
+
+Uma luz com `night_only: true` acende ao anoitecer, como a da cabana do sandbox.
+
+![Sol, lua, aurora e anoitecer](docs/day_cycle.png)
+
+Limites: o céu mostra uma lua só. Sem nuvens nem clima. A luz direcional não desce abaixo de cerca de 8 graus, para as sombras não cruzarem o mapa, então o sol no horizonte ilumina um pouco mais alto do que aparece.
+
+### Água, vento e transparência
+
+```ron
+environment: (wind: (direction: (1.0, 0.35), strength: 1.0, speed: 1.6)),
+terrain: (ponds: [(x: 20.0, z: 13.0, radius: 8.0, depth: 1.7)]),
+water: [(position: (20.0, 1.3, 13.0), size: (20.0, 20.0), texture: "../textures/agua.png",
+         color: (0.75, 0.9, 1.0), opacity: 0.72, tile: 3.5, waves: 0.04)],
+```
+
+`ponds` cava o terreno, e nada do `scatter` nasce dentro. O `y` da água conta a partir do chão em `position`, que aqui é o fundo da lagoa. As ondas movem os vértices e o sombreamento facetado vem das faces delas; duas camadas da imagem derivam com o vento, e olhando de lado a água reflete o céu. O vento balança tudo que tem `sway`, com rajadas que atravessam o campo.
+
+`AlphaMode::Blend` agora é transparência de verdade: desenhada depois do que é opaco, do objeto mais longe para o mais perto. Dentro de um mesmo objeto nada é ordenado, então prefira formas simples.
+
+![Meio-dia, noite, lagoa e a cabana à noite](docs/living_world.png)
+
+Limites: a água não tem colisor, então personagens andam pelo fundo, sem nado nem física de flutuação. Não há reflexo dos objetos, só do céu, nem refração. Partículas atrás da água aparecem na frente dela, porque a água não grava profundidade.
+
 ### Áudio
 
 Sons em loop fazem parte da cena. Sem `position`, o som é ambiente (igual em todo lugar); com `position`, ele vira um emissor 3D: volume cheio até `min_distance`, cai pela distância (-6 dB a cada vez que ela dobra) e some em `max_distance`, com o pan acompanhando a câmera. Com terreno, `y` é medido a partir do chão. Objetos também carregam um som, como carregam uma luz; aí `position` é um deslocamento a partir do objeto:
@@ -532,10 +865,21 @@ Diretrizes:
 - [x] HUD: texto com fonte bitmap embutida (com acentos), contorno, painéis e barras
 - [x] Gatilhos de área e objetos usáveis, na cena, com estado que sobrevive ao streaming e ao save
 - [x] Partículas: efeitos em `.ron`, passe ordenado com luz e névoa, emissores em objetos, regiões e `scatter`
+- [x] NPCs: busca de caminhos sem malha pronta, desvio de obstáculos, rotinas e reações ao jogador, na cena
+- [x] Eventos de animação e combate: eventos em clipes, vida, golpes por time e inimigos, na cena e nos saves
+- [x] Combate de espada: lâmina que fere o que toca, combo, rolagem, stamina, câmera travada e golpes escritos com IK e métricas
+- [x] Menus e estados de jogo: widgets para mouse e teclado, pausa do mundo, tela de título, pausa e opções salvas
+- [x] Controle e opções: ações com nome, gamepad, troca de teclas, resolução, vsync, sombras e câmera
+- [x] Mundo vivo: ciclo de dia e noite com sol, lua e estrelas, água, vento na vegetação e transparência de verdade
+- [x] Biblioteca de texturas: pixel art em objetos e terreno, sprites de plantas, decalques e mapas de emissão
 
 **Próximos passos**
 - [x] Avaliação de ECS: `hecs` recomendado, `bevy_ecs` descartado ([docs/ecs.md](docs/ecs.md))
 - [x] `World` sobre `hecs`: entidades estáveis, `despawn`, componentes do jogo e luzes presas a entidades
+
+## Créditos
+
+Veja [CREDITS.md](CREDITS.md).
 
 ## Em aberto
 

@@ -1,5 +1,5 @@
-//! The sandbox's HUD: the controls, notices, the prompt of the object in reach
-//! and an F3 panel with frame time and world counters.
+//! The sandbox's HUD: the controls, notices, the prompt of the object in reach,
+//! health bars and an F3 panel with frame time and world counters.
 
 use grimora::prelude::*;
 
@@ -10,6 +10,8 @@ const RED: Vec4 = Vec4::new(1.0, 0.45, 0.38, 1.0);
 const GREEN: Vec4 = Vec4::new(0.55, 0.85, 0.5, 1.0);
 const PANEL: Vec4 = Vec4::new(0.05, 0.04, 0.06, 0.75);
 const BORDER: Vec4 = Vec4::new(0.55, 0.43, 0.28, 0.9);
+const HEALTH: Vec4 = Vec4::new(0.72, 0.13, 0.11, 1.0);
+const STAMINA: Vec4 = Vec4::new(0.36, 0.56, 0.26, 1.0);
 const NOTICE_SECONDS: f32 = 2.5;
 /// Notices fade out over their last this many seconds.
 const FADE_SECONDS: f32 = 0.6;
@@ -18,6 +20,35 @@ struct Notice {
     text: String,
     color: Vec4,
     shown_at: f32,
+}
+
+/// The control that triggers `action` on whichever device the player is using.
+fn first_control(input: &Input, action: &str) -> String {
+    let gamepad = input.gamepad_last();
+    let binding = input.actions.bindings(action).iter().find(|binding| binding.is_gamepad() == gamepad);
+    binding.map_or_else(|| "?".to_string(), |binding| binding.label())
+}
+
+/// What the keys do while playing, with the player's own controls.
+fn play_hint(input: &Input) -> String {
+    let control = |action| first_control(input, action);
+    let (run, jump, attack) = (control(actions::RUN), control(actions::JUMP), control(actions::ATTACK));
+    let (roll, lock, guard) = (control(actions::ROLL), control(actions::LOCK_ON), control(actions::GUARD));
+    if input.gamepad_last() {
+        return format!(
+            "L andar · R olhar · {run} correr · {jump} pular · {attack} golpear · {guard} defender · {roll} rolar · {lock} travar alvo · Start pausar"
+        );
+    }
+    let (forward, left, back, right) = (
+        control(actions::MOVE_FORWARD),
+        control(actions::MOVE_LEFT),
+        control(actions::MOVE_BACK),
+        control(actions::MOVE_RIGHT),
+    );
+    let (save, load) = (control(crate::QUICK_SAVE), control(crate::QUICK_LOAD));
+    format!(
+        "{forward}{left}{back}{right} andar · {run} correr · {jump} pular · {attack} golpear · {guard} defender · {roll} rolar · {lock} travar alvo · {save} salvar · {load} carregar · F4 câmera lenta · Esc pausar"
+    )
 }
 
 #[derive(Default)]
@@ -36,27 +67,35 @@ impl Hud {
     }
 
     pub fn draw(&mut self, ctx: &mut Context, flying: bool) {
-        if ctx.input.just_pressed(KeyCode::F3) {
-            self.stats = !self.stats;
-        }
-        let ms = ctx.time.delta() * 1000.0;
-        self.frame_ms = if self.frame_ms == 0.0 { ms } else { self.frame_ms + (ms - self.frame_ms) * 0.05 };
-
         let controls = if flying {
-            "WASD voar · botão direito olhar · Q/E descer/subir · Shift rápido · Tab andarilho"
+            let walk = first_control(&ctx.input, crate::TOGGLE_FLY);
+            format!("WASD voar · botão direito olhar · Q/E descer/subir · Shift rápido · {walk} andarilho · Esc pausar")
         } else {
-            "WASD andar · Shift correr · Espaço pular · Tab voar · F6 salvar · F9 carregar · F3 métricas"
+            play_hint(&ctx.input)
         };
-        let ui = &mut ctx.ui;
-        let style = TextStyle::new(16.0).color(DIM).anchor(Anchor::Bottom).wrap(ui.size().x - 32.0);
-        ui.text(ui.at(Anchor::Bottom, Vec2::new(0.0, -14.0)), controls, &style);
+        self.draw_with_hint(ctx, &controls);
         if flying {
+            let ui = &mut ctx.ui;
             ui.text(
                 ui.at(Anchor::Top, Vec2::new(0.0, 14.0)),
                 "MODO VOO",
                 &TextStyle::new(16.0).color(GOLD).anchor(Anchor::Top),
             );
         }
+    }
+
+    /// The part of the HUD every state has: `hint` at the bottom of the screen,
+    /// notices and the F3 panel.
+    pub fn draw_with_hint(&mut self, ctx: &mut Context, hint: &str) {
+        if ctx.input.just_pressed(KeyCode::F3) {
+            self.stats = !self.stats;
+        }
+        let ms = ctx.time.delta() * 1000.0;
+        self.frame_ms = if self.frame_ms == 0.0 { ms } else { self.frame_ms + (ms - self.frame_ms) * 0.05 };
+
+        let ui = &mut ctx.ui;
+        let style = TextStyle::new(16.0).color(DIM).anchor(Anchor::Bottom).wrap(ui.size().x - 32.0);
+        ui.text(ui.at(Anchor::Bottom, Vec2::new(0.0, -14.0)), hint, &style);
 
         self.draw_notice(ctx);
         if self.stats {
@@ -64,19 +103,68 @@ impl Hud {
         }
     }
 
+    /// The player's health, in the bottom left corner.
+    pub fn draw_health(&self, ctx: &mut Context, fraction: f32) {
+        let ui = &mut ctx.ui;
+        let size = Vec2::new(240.0, 14.0);
+        let at = ui.at(Anchor::BottomLeft, Vec2::new(18.0, -82.0));
+        let bar = Rect::anchored(at, size, Anchor::BottomLeft);
+        ui.panel(bar.expand(4.0), PANEL, BORDER);
+        ui.bar(bar, fraction, HEALTH, Vec4::new(0.0, 0.0, 0.0, 0.6));
+    }
+
+    /// The player's stamina, under the health.
+    pub fn draw_stamina(&self, ctx: &mut Context, fraction: f32) {
+        let ui = &mut ctx.ui;
+        let size = Vec2::new(200.0, 8.0);
+        let at = ui.at(Anchor::BottomLeft, Vec2::new(18.0, -64.0));
+        let bar = Rect::anchored(at, size, Anchor::BottomLeft);
+        ui.panel(bar.expand(3.0), PANEL, BORDER);
+        ui.bar(bar, fraction, STAMINA, Vec4::new(0.0, 0.0, 0.0, 0.6));
+    }
+
+    /// A mark on the locked enemy.
+    pub fn draw_lock(&self, ctx: &mut Context, point: Vec3) {
+        let ui = &mut ctx.ui;
+        let size = ui.size();
+        let clip = ctx.camera.view_projection(size.x / size.y.max(1.0)) * point.extend(1.0);
+        if clip.w <= 0.0 {
+            return;
+        }
+        let (x, y) = (clip.x / clip.w, clip.y / clip.w);
+        let at = Vec2::new((x + 1.0) * 0.5 * size.x, (1.0 - y) * 0.5 * size.y);
+        ui.panel(Rect::anchored(at, Vec2::splat(7.0), Anchor::Center), GOLD, PANEL);
+    }
+
+    /// The health of the enemy in the fight, at the top of the screen.
+    pub fn draw_foe(&self, ctx: &mut Context, name: &str, fraction: f32) {
+        let ui = &mut ctx.ui;
+        let at = ui.at(Anchor::Top, Vec2::new(0.0, 14.0));
+        ui.text(at, name, &TextStyle::new(16.0).color(TEXT).anchor(Anchor::Top));
+        let bar = Rect::anchored(at + Vec2::Y * 24.0, Vec2::new(320.0, 10.0), Anchor::Top);
+        ui.panel(bar.expand(3.0), PANEL, BORDER);
+        ui.bar(bar, fraction, HEALTH, Vec4::new(0.0, 0.0, 0.0, 0.6));
+    }
+
+    /// Forgets the notice on screen.
+    pub fn clear_notice(&mut self) {
+        self.notice = None;
+    }
+
     /// The key and what it does, for the object the player could use right now.
     pub fn draw_prompt(&self, ctx: &mut Context, prompt: &str) {
+        let control = first_control(&ctx.input, actions::INTERACT);
         let ui = &mut ctx.ui;
         let key = TextStyle::new(24.0).color(GOLD).anchor(Anchor::Left);
         let label = TextStyle::new(24.0).color(TEXT).anchor(Anchor::Left);
-        let (key_size, label_size) = (ui.measure("E", &key), ui.measure(prompt, &label));
+        let (key_size, label_size) = (ui.measure(&control, &key), ui.measure(prompt, &label));
         const GAP: f32 = 12.0;
         let size = Vec2::new(key_size.x + GAP + label_size.x, key_size.y.max(label_size.y));
         let at = ui.at(Anchor::Bottom, Vec2::new(0.0, -72.0));
         let box_ = Rect::anchored(at, size, Anchor::Center);
         ui.panel(box_.expand(10.0), PANEL, BORDER);
         let left = box_.point(Anchor::Left);
-        ui.text(left, "E", &key);
+        ui.text(left, &control, &key);
         ui.text(left + Vec2::X * (key_size.x + GAP), prompt, &label);
     }
 

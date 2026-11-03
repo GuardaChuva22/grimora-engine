@@ -87,3 +87,26 @@ fn lights_move_with_their_entity() {
     world.ecs.remove_one::<Light>(heart).unwrap();
     assert_eq!(world.active_lights().len(), 1);
 }
+
+#[test]
+fn night_lights_come_on_as_the_daylight_goes() {
+    let objects = "objects: [
+        (mesh: Cube, light: (intensity: 4.0, radius: 6.0, night_only: true)),
+        (mesh: Cube, position: (3.0, 0.0, 0.0), light: (intensity: 2.0, radius: 6.0)),
+    ]";
+    let (_, mut world) = world(&format!("(day_cycle: (time: 12.0, tilt: 20.0), {objects})"));
+    let intensities = |world: &World| world.active_lights().iter().map(|l| l.intensity).collect::<Vec<_>>();
+
+    assert_eq!(intensities(&world), [2.0], "off by day, and not sent to the renderer");
+    world.set_time_of_day(0.0);
+    let mut night = intensities(&world);
+    night.sort_by(f32::total_cmp);
+    assert_eq!(night, [2.0, 4.0]);
+
+    world.set_time_of_day(17.7);
+    let dusk = intensities(&world);
+    assert!(dusk.iter().any(|&i| i > 0.0 && i < 4.0 && i != 2.0), "fading in at dusk: {dusk:?}");
+
+    let (_, world) = self::world(&format!("({objects})"));
+    assert_eq!(world.active_lights().len(), 2, "with no day cycle it is always lit");
+}

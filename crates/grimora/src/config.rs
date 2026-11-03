@@ -34,6 +34,14 @@ pub struct EngineConfig {
     /// Saved game slot for the game to load at startup (it decides how, with
     /// [`crate::Context::load_game`]).
     pub load: Option<String>,
+    /// Menu for the game to open at startup, for capturing it (the game decides
+    /// what the names mean).
+    pub menu: Option<String>,
+    /// Escape closes the engine. Games with a pause menu turn this off and read
+    /// the key themselves.
+    pub escape_quits: bool,
+    /// Stops the scene's clock at this hour, for repeatable captures.
+    pub time_of_day: Option<f32>,
 }
 
 impl Default for EngineConfig {
@@ -54,6 +62,9 @@ impl Default for EngineConfig {
             ui: true,
             save_dir: None,
             load: None,
+            menu: None,
+            escape_quits: true,
+            time_of_day: None,
         }
     }
 }
@@ -73,10 +84,13 @@ Options:
   --no-ui                   Hide the game's HUD
   --save-dir <folder>       Where saved games go
   --load <slot>             Ask the game to load this saved game at startup
+  --menu <name>             Ask the game to open this menu at startup, to capture it
+                            (the sandbox has title, pause, options, video and controls)
+  --time <hour>             Stop the scene's day at this hour, from 0 to 24
   --help                    Show this message
 
 Controls: hold right mouse + move to look, WASD move, E/Q up/down,
-Shift fast, F5 reload scene, F12 screenshot, Esc quit.";
+Shift fast, F5 reload scene, F12 screenshot, Esc quit (or the game's menu).";
 
 impl EngineConfig {
     /// Applies command line flags on top of `self`.
@@ -103,6 +117,8 @@ impl EngineConfig {
                 "--no-audio" => self.audio = false,
                 "--save-dir" => self.save_dir = Some(value()?.into()),
                 "--load" => self.load = Some(value()?),
+                "--menu" => self.menu = Some(value()?),
+                "--time" => self.time_of_day = Some(value()?.parse().context("--time expects an hour")?),
                 "--help" | "-h" => {
                     println!("{USAGE}");
                     std::process::exit(0);
@@ -145,6 +161,10 @@ mod tests {
         let config =
             EngineConfig::default().with_args(["--load", "quick", "--save-dir", "s"].map(String::from)).unwrap();
         assert_eq!((config.load.as_deref(), config.save_dir.unwrap().to_str()), (Some("quick"), Some("s")));
+        let config = EngineConfig::default().with_args(["--menu", "pause"].map(String::from)).unwrap();
+        assert_eq!(config.menu.as_deref(), Some("pause"));
+        let config = EngineConfig::default().with_args(["--time", "21.5"].map(String::from)).unwrap();
+        assert_eq!(config.time_of_day, Some(21.5));
         assert_eq!(EngineConfig { screenshot: Some("x".into()), ..Default::default() }.frame_limit(), Some(90));
     }
 
