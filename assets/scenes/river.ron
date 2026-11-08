@@ -1,0 +1,106 @@
+// Fresh water: a clear river with a current, and a dark pond beside it.
+// Run with `cargo run --release -p sandbox -- --scene assets/scenes/river.ron`.
+SceneDesc(
+    environment: (
+        fog: (height_falloff: 0.09, base_height: 0.0, sun_scatter: 0.25),
+        sky: (
+            sun_size: 1.6,
+            sun_texture: "../textures/sol.png",
+            moon_texture: "../textures/moons/maris.png",
+            sun_sprite_size: 2.4,
+            moon_sprite_size: 11.0,
+            halo: 1.0,
+            clouds: (scale: 1.2, speed: 1.0),
+        ),
+        wind: (direction: (1.0, 0.35), strength: 0.8, speed: 1.2),
+        shadows: (enabled: true, distance: 140.0, strength: 0.7, cascades: 4),
+        post: (
+            contrast: 1.15, saturation: 1.15, vignette: 0.35, grain: 0.02, bloom: 0.25,
+            vivid: 0.6, sharpen: 0.6, shadow_tint: (0.0, 0.01, 0.04),
+        ),
+        surface: (
+            contrast: 1.35, saturation: 0.95, mottle: 0.6, mottle_size: 7.0,
+            mottle_dark: (0.5, 0.5, 0.65), mottle_light: (1.1, 1.1, 1.0), crisp: 1.5,
+        ),
+    ),
+
+    day_cycle: (time: 11.0, day_length: 480.0, sunrise: 40.0, tilt: 52.0, moon_tilt: 76.0, haze: 0.5, weather: Clear),
+
+    player: (position: (-28.0, 0.0, -6.0), yaw: 45.0),
+    camera: (position: (-22.0, 6.0, 0.0), look_at: (-62.0, 6.0, -40.0), fov: 60.0),
+
+    terrain: (
+        size: 240.0,
+        resolution: 120,
+        height: 3.0,
+        frequency: 1.5,
+        seed: 31,
+        flat_radius: 26.0,
+        textures: (
+            grass: "../textures/grama1.png",
+            dirt: "../textures/terra_escura_com_raizes.png",
+            rock: "../textures/rocha_umida_escura.png",
+            tile: 5.0,
+        ),
+        // The pond below sits in this, with its level just under the rim.
+        ponds: [(x: 14.0, z: 10.0, radius: 11.0, depth: 3.4)],
+        // High ground the river runs off, which makes the waterfall.
+        plateaus: [(x: -105.0, z: -62.0, radius: 38.0, height: 15.0, edge: 3.0)],
+    ),
+
+    water_sounds: (
+        river: "../sounds/river.wav",
+        underwater: "../sounds/underwater.wav",
+        splash: ["../sounds/splash_1.wav", "../sounds/splash_2.wav"],
+        splash_effect: "../effects/splash.ron",
+    ),
+
+    // Flows from the first point to the last, and digs its own bed. `y` is how far the water
+    // stands above the ground; it follows the land, but never runs uphill. `speed` carries
+    // what floats and whoever swims. A high `clarity` shows the stones on the bottom; try
+    // `clarity: 1.0, murk: 0.8` and a brown `deep` for a muddy one. Wherever it drops steeply it
+    // falls, and `fall_effect` and `fall_sound` play where it lands.
+    rivers: [
+        (
+            points: [(-120.0, 0.5, -70.0), (-70.0, 0.0, -42.0), (-25.0, 0.0, -24.0), (20.0, 0.0, -20.0),
+                     (60.0, 0.0, -44.0), (120.0, 0.0, -60.0)],
+            width: 13.0,
+            depth: 2.6,
+            speed: 2.2,
+            texture: "../textures/agua.png",
+            tile: 4.0,
+            waves: 0.05,
+            fall_effect: "../effects/waterfall.ron",
+            fall_sound: "../sounds/waterfall.wav",
+            look: (deep: (0.08, 0.42, 0.42), shallow: (0.45, 0.85, 0.68), clarity: 7.0, murk: 0.2,
+                   refraction: 0.8, foam: 1.0, foam_color: (0.93, 0.98, 0.95), caustics: 0.9),
+        ),
+    ],
+
+    // A sheet of still water. This one is nearly black, and shows little of what is in it.
+    water: [
+        (position: (14.0, 3.0, 10.0), size: (24.0, 24.0), texture: "../textures/agua_parada_pantano.png",
+         tile: 4.0, waves: 0.015,
+         look: (deep: (0.03, 0.09, 0.05), shallow: (0.2, 0.26, 0.12), clarity: 1.1, murk: 0.85,
+                refraction: 0.4, foam: 0.25, foam_color: (0.62, 0.66, 0.46), caustics: 0.0)),
+    ],
+
+    objects: [
+        // Logs the river takes away.
+        (name: "tronco", mesh: Cylinder(segments: 8), position: (-55.0, 2.0, -36.0), snap_to_ground: false,
+         scale: (0.45, 3.2, 0.45), rotation: (90.0, 30.0, 0.0), body: Dynamic(), float: (fill: 0.6),
+         texture: (path: "../textures/madeira_lisa.png", tile: 1.0)),
+        (name: "tronco 2", mesh: Cylinder(segments: 8), position: (-35.0, 2.0, -28.0), snap_to_ground: false,
+         scale: (0.35, 2.4, 0.35), rotation: (90.0, -50.0, 0.0), body: Dynamic(), float: (fill: 0.55),
+         texture: (path: "../textures/madeira_lisa.png", tile: 1.0)),
+        // A boat left on the pond.
+        (name: "bote", ground: Some(Wood), mesh: Model(path: "../models/boats/Bote.glb"), position: (14.0, 2.2, 10.0), snap_to_ground: false,
+         rotation: (0.0, 60.0, 0.0), body: Dynamic(friction: 0.7),
+         float: (mass: 170.0, ballast: 0.5, drag: (0.6, 1.6, 1.6), hollow: true)),
+        // Stones in the current: foam gathers where they break the surface.
+        (mesh: Rock(seed: 3), position: (-8.0, -0.5, -22.0), scale: (2.2, 4.2, 2.0),
+         texture: (path: "../textures/rocha_umida_escura.png", tile: 2.0)),
+        (mesh: Rock(seed: 5), position: (2.0, -0.5, -18.0), scale: (1.6, 3.8, 1.7),
+         texture: (path: "../textures/rocha_umida_escura.png", tile: 2.0)),
+    ],
+)

@@ -1,7 +1,12 @@
-use grimora_core::{Material, MeshData, Submesh, Vec3};
+use grimora_core::{Material, MeshData, RiverPoint, Submesh, Vec2, Vec3, Vertex};
 use serde::{Deserialize, Serialize};
 
+use crate::ground::{Ground, TerrainGrounds};
 use crate::rng::{Rng, fbm};
+use crate::texture::Picture;
+
+/// Meters between the cross sections of a path.
+const PATH_STEP: f32 = 1.5;
 
 /// A square heightfield terrain centered on the origin.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -27,6 +32,89 @@ pub struct TerrainDesc {
     pub textures: Option<TerrainTextures>,
     /// Holes in the ground to fill with `water`. Scattered things stay out of them.
     pub ponds: Vec<Pond>,
+    /// High ground with steep sides. A river that runs off one makes a waterfall.
+    pub plateaus: Vec<Plateau>,
+    /// River beds dug into the ground; the scene's `rivers` fill this in.
+    #[serde(skip)]
+    pub carves: Vec<Carve>,
+    /// Trails laid over the ground. Scattered things stay off them too.
+    pub paths: Vec<TerrainPath>,
+    /// What a step sounds like on each layer (flat, slope, rock), say sand on a beach.
+    pub grounds: TerrainGrounds,
+}
+
+/// A trail following the ground. It is only a picture: the terrain under it is what
+/// holds things up.
+/// A river's bed: it lowers the ground along a course to under the water's level.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Carve {
+    pub points: Vec<RiverPoint>,
+    pub depth: f32,
+}
+
+impl Carve {
+    fn dig(&self, ground: f32, x: f32, z: f32) -> f32 {
+        let p = Vec2::new(x, z);
+        let mut result = ground;
+        for pair in self.points.windows(2) {
+            let (a, b) = (&pair[0], &pair[1]);
+            let from = Vec2::new(a.position.x, a.position.z);
+            let along = Vec2::new(b.position.x, b.position.z) - from;
+            let t = ((p - from).dot(along) / along.length_squared().max(1e-5)).clamp(0.0, 1.0);
+            let gap = (from + along * t).distance(p);
+            let half = a.half_width.max(0.1);
+            let bed = a.position.y + (b.position.y - a.position.y) * t - self.depth;
+            let keep = smooth(half * 0.6, half * 1.5, gap);
+            result = result.min(bed.min(ground) + (ground - bed.min(ground)) * keep);
+        }
+        result
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TerrainPath {
+    /// `(x, z)` points it curves through.
+    pub points: Vec<Vec2>,
+    /// In meters. The edges wander around it, so it looks worn and not drawn with a ruler.
+    pub width: f32,
+    /// Image file, relative to the scene file.
+    pub texture: String,
+    /// Meters one repeat of the image covers.
+    pub tile: f32,
+    /// What a step on it sounds like.
+    pub ground: Ground,
+}
+
+impl Default for TerrainPath {
+    fn default() -> Self {
+        Self { points: Vec::new(), width: 3.0, texture: String::new(), tile: 3.0, ground: Ground::Dirt }
+    }
+}
+
+impl TerrainPath {
+    /// The curve through `points`, about `step` meters between each two points of it.
+    fn curve(&self, step: f32) -> Vec<Vec2> {
+        let points = &self.points;
+        let at = |i: isize| points[i.clamp(0, points.len() as isize - 1) as usize];
+        let mut curve = Vec::new();
+        for i in 0..points.len() as isize - 1 {
+            let (p0, p1, p2, p3) = (at(i - 1), at(i), at(i + 1), at(i + 2));
+            let steps = (p1.distance(p2) / step).ceil().max(1.0) as u32;
+            for k in 0..steps {
+                // Catmull-Rom passes through every point.
+                let t = k as f32 / steps as f32;
+                curve.push(
+                    0.5 * (p1 * 2.0
+                        + (p2 - p0) * t
+                        + (p0 * 2.0 - p1 * 5.0 + p2 * 4.0 - p3) * t * t
+                        + (p1 * 3.0 - p0 - p2 * 3.0 + p3) * t * t * t),
+                );
+            }
+        }
+        curve.extend(points.last());
+        curve
+    }
 }
 
 /// One picture per kind of ground, relative to the scene file; the slope and
@@ -58,6 +146,25 @@ pub struct Pond {
     pub depth: f32,
 }
 
+/// High ground with a steep side all around, a little uneven.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Plateau {
+    pub x: f32,
+    pub z: f32,
+    /// How far its flat top reaches.
+    pub radius: f32,
+    pub height: f32,
+    /// How far on the ground its side takes to come down; the lower, the steeper.
+    pub edge: f32,
+}
+
+impl Default for Plateau {
+    fn default() -> Self {
+        Self { x: 0.0, z: 0.0, radius: 30.0, height: 12.0, edge: 4.0 }
+    }
+}
+
 impl Default for Pond {
     fn default() -> Self {
         Self { x: 0.0, z: 0.0, radius: 8.0, depth: 1.5 }
@@ -85,6 +192,10 @@ impl Default for TerrainDesc {
             rock_color: Vec3::new(0.32, 0.31, 0.33),
             textures: None,
             ponds: Vec::new(),
+            plateaus: Vec::new(),
+            carves: Vec::new(),
+            paths: Vec::new(),
+            grounds: TerrainGrounds::default(),
         }
     }
 }
@@ -96,6 +207,9 @@ pub struct Terrain {
     pub desc: TerrainDesc,
     heights: Vec<f32>,
     cell: f32,
+    /// How far the world's origin has moved it: the queries take local positions, and the
+    /// heights they give are local too. See [`Terrain::shift`].
+    shifted: Vec3,
 }
 
 impl Terrain {
@@ -111,7 +225,7 @@ impl Terrain {
                 heights.push(sample_height(&desc, x, z));
             }
         }
-        Self { desc, heights, cell }
+        Self { desc, heights, cell, shifted: Vec3::ZERO }
     }
 
     fn grid(&self, i: usize, j: usize) -> f32 {
@@ -125,7 +239,23 @@ impl Terrain {
     }
 
     /// Height of the rendered surface at world `(x, z)`. Clamped at the borders.
+    /// How long each side is, in meters.
+    pub fn size(&self) -> f32 {
+        self.desc.size
+    }
+
+    /// Moves the terrain by `offset` for its queries, as the world's origin moves the other
+    /// way. Its meshes are entities, which move by themselves.
+    pub fn shift(&mut self, offset: Vec3) {
+        self.shifted += offset;
+    }
+
     pub fn height_at(&self, x: f32, z: f32) -> f32 {
+        let (x, z) = (x - self.shifted.x, z - self.shifted.z);
+        self.shifted.y + self.height_unshifted(x, z)
+    }
+
+    fn height_unshifted(&self, x: f32, z: f32) -> f32 {
         let half = self.desc.size * 0.5;
         let res = self.desc.resolution as f32;
         let gx = ((x + half) / self.cell).clamp(0.0, res - 1e-3);
@@ -210,7 +340,82 @@ impl Terrain {
 
     /// Whether `(x, z)` is inside a pond.
     pub fn in_pond(&self, x: f32, z: f32) -> bool {
+        let (x, z) = (x - self.shifted.x, z - self.shifted.z);
         self.desc.ponds.iter().any(|pond| pond.contains(x, z))
+    }
+
+    /// Whether `(x, z)` is on a path, or less than `margin` meters away from one.
+    pub fn on_path(&self, x: f32, z: f32, margin: f32) -> bool {
+        let point = Vec2::new(x - self.shifted.x, z - self.shifted.z);
+        self.desc.paths.iter().any(|path| {
+            let reach = path.width * 0.5 + margin;
+            path.curve(PATH_STEP).iter().any(|p| p.distance_squared(point) < reach * reach)
+        })
+    }
+
+    /// What the ground is made of at world `(x, z)`: a path's, or the layer the
+    /// face there is drawn with.
+    pub fn ground_at(&self, x: f32, z: f32) -> Ground {
+        let (x, z) = (x - self.shifted.x, z - self.shifted.z);
+        let point = Vec2::new(x, z);
+        let path = self.desc.paths.iter().find(|path| {
+            let reach = path.width * 0.5;
+            path.curve(PATH_STEP).iter().any(|p| p.distance_squared(point) < reach * reach)
+        });
+        if let Some(path) = path {
+            return path.ground;
+        }
+        let half = self.desc.size * 0.5;
+        let res = self.desc.resolution as f32;
+        let gx = ((x + half) / self.cell).clamp(0.0, res - 1e-3);
+        let gz = ((z + half) / self.cell).clamp(0.0, res - 1e-3);
+        let (i, j) = (gx.floor() as usize, gz.floor() as usize);
+        let (p00, p10, p01, p11) =
+            (self.corner(i, j), self.corner(i + 1, j), self.corner(i, j + 1), self.corner(i + 1, j + 1));
+        // Same diagonal split as `mesh()`.
+        let layer =
+            if gz.fract() >= gx.fract() { self.face_layer(p00, p01, p11) } else { self.face_layer(p00, p11, p10) };
+        let grounds = &self.desc.grounds;
+        [grounds.grass, grounds.dirt, grounds.rock][layer]
+    }
+
+    /// The mesh of a path: a strip resting on the ground, with `picture` running along it.
+    pub(crate) fn path_mesh(&self, path: &TerrainPath, picture: &Picture, seed: u64) -> MeshData {
+        const ACROSS: u32 = 4;
+        const LIFT: f32 = 0.07;
+        let curve = path.curve(PATH_STEP);
+        let tile = path.tile.max(0.01);
+        let half = path.width * 0.5;
+        let mut rng = Rng::new(seed);
+        let mut mesh = MeshData::new();
+        let mut travelled = 0.0;
+        for (i, &point) in curve.iter().enumerate() {
+            let (before, after) = (curve[i.saturating_sub(1)], curve[(i + 1).min(curve.len() - 1)]);
+            let side = (after - before).normalize_or(Vec2::X).perp();
+            if i > 0 {
+                travelled += point.distance(before);
+            }
+            let (left, right) = (half * (1.0 + rng.jitter(0.28)), half * (1.0 + rng.jitter(0.28)));
+            for k in 0..=ACROSS {
+                let f = k as f32 / ACROSS as f32;
+                let offset = -left + (left + right) * f;
+                let at = point + side * offset;
+                let position = Vec3::new(at.x, self.height_at(at.x, at.y) + LIFT, at.y);
+                let mut vertex = Vertex::new(position, Vec3::Y, Vec3::ONE);
+                vertex.uv = [offset / tile, travelled / tile];
+                mesh.vertices.push(vertex);
+            }
+        }
+        let row = ACROSS + 1;
+        for i in 0..curve.len().saturating_sub(1) as u32 {
+            for k in 0..ACROSS {
+                let (a, b) = (i * row + k, (i + 1) * row + k);
+                mesh.indices.extend_from_slice(&[a, a + 1, b + 1, a, b + 1, b]);
+            }
+        }
+        mesh.materials = vec![Material { double_sided: true, ..picture.material() }];
+        mesh.shadowless = true;
+        mesh
     }
 
     /// Which picture a face gets: 0 grass, 1 dirt, 2 rock.
@@ -258,15 +463,27 @@ fn sample_height(desc: &TerrainDesc, x: f32, z: f32) -> f32 {
     let t = smooth(desc.flat_radius, desc.flat_radius * 2.0, r);
     let mut ground = flat_h + (h - flat_h) * t;
 
+    for plateau in &desc.plateaus {
+        let wander = (fbm(x * 0.03, z * 0.03, desc.seed + 21, 3) - 0.5) * plateau.radius * 0.35;
+        let d = (x - plateau.x).hypot(z - plateau.z) + wander;
+        ground += plateau.height * (1.0 - smooth(plateau.radius, plateau.radius + plateau.edge.max(0.1), d));
+    }
     for pond in &desc.ponds {
         let d = (x - pond.x).hypot(z - pond.z);
         ground -= pond.depth * (1.0 - smooth(pond.radius * 0.45, pond.radius, d));
+    }
+    for carve in &desc.carves {
+        ground = carve.dig(ground, x, z);
     }
     ground
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use grimora_core::TextureData;
+
     use super::*;
 
     #[test]
@@ -324,6 +541,35 @@ mod tests {
             }
         }
         assert_eq!(layers_used, [true, true, true], "this much relief has all three");
+    }
+
+    #[test]
+    fn paths_follow_the_ground_and_keep_things_off() {
+        let path = TerrainPath {
+            points: vec![Vec2::new(0.0, 0.0), Vec2::new(10.0, 4.0), Vec2::new(20.0, 0.0)],
+            width: 2.0,
+            ..Default::default()
+        };
+        let curve = path.curve(PATH_STEP);
+        assert_eq!(curve.first(), path.points.first());
+        assert_eq!(curve.last(), path.points.last());
+        assert!(curve.iter().any(|p| p.distance(path.points[1]) < 1e-3), "it goes through every point");
+
+        let terrain = Terrain::new(TerrainDesc { paths: vec![path.clone()], ..Default::default() });
+        assert!(terrain.on_path(10.0, 4.0, 0.0) && !terrain.on_path(10.0, 8.0, 0.0));
+        assert!(terrain.on_path(10.0, 8.0, 5.0), "with a margin, what is beside it counts too");
+
+        let picture = Picture {
+            texture: Arc::new(TextureData { name: "p".into(), width: 1, height: 1, rgba: vec![255; 4] }),
+            emission: None,
+        };
+        let mesh = terrain.path_mesh(&path, &picture, 1);
+        for v in &mesh.vertices {
+            let [x, y, z] = v.position;
+            assert!((y - terrain.height_at(x, z)).abs() < 0.2, "the strip rests on the ground");
+        }
+        assert!(mesh.indices.iter().all(|&i| (i as usize) < mesh.vertices.len()));
+        assert!(!mesh.indices.is_empty() && mesh.shadowless);
     }
 
     #[test]

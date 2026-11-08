@@ -14,6 +14,8 @@ pub const MOVE_LEFT: &str = "move_left";
 pub const MOVE_RIGHT: &str = "move_right";
 pub const RUN: &str = "run";
 pub const JUMP: &str = "jump";
+/// Down, in the water.
+pub const DIVE: &str = "dive";
 pub const INTERACT: &str = "interact";
 pub const ATTACK: &str = "attack";
 pub const ROLL: &str = "roll";
@@ -164,6 +166,7 @@ impl Default for ActionMap {
         map.add(MOVE_RIGHT, [Key(KeyCode::KeyD), Stick(PadAxis::LeftX, true)]);
         map.add(RUN, [Key(KeyCode::ShiftLeft), Key(KeyCode::ShiftRight), Pad(PadButton::LeftBumper)]);
         map.add(JUMP, [Key(KeyCode::Space), Pad(PadButton::South)]);
+        map.add(DIVE, [Key(KeyCode::ControlLeft), Pad(PadButton::East)]);
         map.add(INTERACT, [Key(KeyCode::KeyE), Pad(PadButton::West)]);
         map.add(ATTACK, [Mouse(MouseButton::Left), Key(KeyCode::KeyF), Pad(PadButton::RightTrigger)]);
         map.add(ROLL, [Key(KeyCode::ControlLeft), Pad(PadButton::East)]);

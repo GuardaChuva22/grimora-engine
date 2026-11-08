@@ -1,0 +1,17 @@
+// What comes out of the muzzle when the ball drops in: a breath of old powder.
+[
+    (
+        rate: 0.0,
+        burst: 4,
+        lifetime: (0.35, 0.8),
+        direction: (0.0, 1.0, 0.0),
+        spread: 28.0,
+        speed: (0.15, 0.5),
+        drag: 1.5,
+        sizes: [0.012, 0.045, 0.08],
+        size_jitter: 0.3,
+        colors: [(0.62, 0.6, 0.57, 0.0), (0.6, 0.58, 0.55, 0.34), (0.56, 0.55, 0.53, 0.0)],
+        lit: 0.9,
+        shape: Soft,
+    ),
+]

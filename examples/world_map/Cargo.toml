@@ -1,0 +1,16 @@
+[package]
+name = "world_map"
+description = "Draws what Grimora's macro map answers around a generated world, to check it by eye."
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+grimora.workspace = true
+grimora_world.workspace = true
+anyhow.workspace = true
+image.workspace = true
+glam.workspace = true
+
+[lints]
+workspace = true

@@ -1,8 +1,9 @@
 //! Sound for Grimora, built on [kira](https://crates.io/crates/kira).
 //!
-//! [`Audio`] plays one-shot effects, looping ambience and positional emitters
-//! that get quieter with distance and pan with a listener (the camera). Without
-//! an audio device it quietly does nothing, so games and CI never fail over sound.
+//! [`Audio`] plays one-shot effects, looping ambience and sounds from places in the
+//! world. Those come from the right side and, the farther they are, the quieter, duller
+//! and later they arrive; walls muffle them (`space.rs` has the numbers). Without an
+//! audio device it quietly does nothing, so games and CI never fail over sound.
 //!
 //! ```no_run
 //! use grimora_audio::{Audio, Emitter};
@@ -10,9 +11,12 @@
 //!
 //! let mut audio = Audio::new();
 //! audio.play("assets/sounds/step_1.wav", 0.8);
-//! let fire = audio.play_loop_at("assets/sounds/fire.wav", 1.0, Emitter::at(Vec3::new(4.5, 2.0, 6.0)));
+//! audio.play_pitched_at("assets/sounds/clang_1.wav", 0.9, 1.1, Emitter::loud(Vec3::new(30.0, 1.0, 0.0)));
+//! let fire = audio.play_loop_at("assets/sounds/fire.ogg", 1.0, Emitter::at(Vec3::new(4.5, 2.0, 6.0)));
 //! # let _ = fire;
 //! ```
+
+mod space;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -21,10 +25,25 @@ use std::time::{Duration, SystemTime};
 use grimora_core::{Camera, Quat, Vec3};
 use grimora_scene::SceneSound;
 use kira::backend::mock::{MockBackend, MockBackendSettings};
+use kira::effect::filter::{FilterBuilder, FilterHandle};
 use kira::listener::ListenerHandle;
+use kira::sound::PlaybackState;
 use kira::sound::static_sound::{StaticSoundData, StaticSoundHandle};
 use kira::track::{MainTrackHandle, SpatialTrackBuilder, SpatialTrackHandle, TrackBuilder, TrackHandle};
-use kira::{AudioManager, AudioManagerSettings, Decibels, DefaultBackend, ResourceLimitReached, Tween};
+use kira::{AudioManager, AudioManagerSettings, Decibels, DefaultBackend, ResourceLimitReached, StartTime, Tween};
+
+use space::{Ears, OPEN_CUTOFF, occlusion_between};
+pub use space::{Emitter, Heard, SPEED_OF_SOUND};
+
+/// How high the filter on each category's track lets sounds through, in hertz.
+const UNDERWATER_CUTOFF: f64 = 480.0;
+
+/// How long a sound in the world takes to follow what changed, so changes don't click.
+const FOLLOW: Duration = Duration::from_millis(40);
+/// Sounds already playing that look again for walls each frame. The rest wait their turn.
+const OCCLUSION_CHECKS: usize = 6;
+/// How fast a wall appearing or going away takes effect, in full changes per second.
+const OCCLUSION_SPEED: f32 = 5.0;
 
 /// Fade used when loops start and stop, so hot reloads don't click.
 const LOOP_FADE: Duration = Duration::from_millis(400);
@@ -54,43 +73,6 @@ impl Category {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SoundId(u64);
 
-/// Where a positional sound plays and how it fades with distance.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Emitter {
-    pub position: Vec3,
-    /// Full volume up to this distance, in meters.
-    pub min_distance: f32,
-    /// Silent beyond this distance.
-    pub max_distance: f32,
-}
-
-impl Emitter {
-    /// An emitter at `position` with the default distances (1 to 25 m).
-    pub fn at(position: Vec3) -> Self {
-        Self { position, ..Default::default() }
-    }
-
-    /// Gain heard from `listener`: 1 within `min_distance`, then the natural
-    /// inverse-distance falloff (-6 dB per doubling), eased to silence at `max_distance`.
-    pub fn gain_at(&self, listener: Vec3) -> f32 {
-        let (min, max) = self.distances();
-        let d = self.position.distance(listener);
-        let t = ((d - min) / (max - min)).clamp(0.0, 1.0);
-        min / d.max(min) * (1.0 - t * t)
-    }
-
-    fn distances(&self) -> (f32, f32) {
-        let min = self.min_distance.max(0.01);
-        (min, self.max_distance.max(min + 0.01))
-    }
-}
-
-impl Default for Emitter {
-    fn default() -> Self {
-        Self { position: Vec3::ZERO, min_distance: 1.0, max_distance: 25.0 }
-    }
-}
-
 /// The engine's sound system. Volumes are linear gains (1 = as recorded).
 pub struct Audio {
     engine: Option<Engine>,
@@ -98,10 +80,16 @@ pub struct Audio {
     /// cached too, so a missing file logs once instead of on every play.
     cache: HashMap<PathBuf, (Option<SystemTime>, Option<StaticSoundData>)>,
     loops: Vec<Loop>,
+    /// One-shots in the world waiting for this frame's look at the walls.
+    waiting: Vec<Waiting>,
+    /// One-shots in the world still sounding.
+    shots: Vec<Shot>,
     next_id: u64,
     master: f32,
     volumes: [f32; 2],
-    listener: Vec3,
+    ears: Ears,
+    /// Where the round of [`OCCLUSION_CHECKS`] is.
+    occlusion_turn: usize,
 }
 
 /// The live kira side; absent when audio is disabled.
@@ -110,6 +98,9 @@ struct Engine {
     listener: ListenerHandle,
     /// One mixer track per [`Category`].
     tracks: Vec<TrackHandle>,
+    /// One per track, to muffle them.
+    filters: Vec<FilterHandle>,
+    muffled: f32,
 }
 
 /// Kira's manager is generic over its backend; this keeps that out of [`Audio`].
@@ -142,31 +133,102 @@ impl Manager {
     }
 }
 
+/// A sound's own track in the mixer, which puts it in its place in the world.
+struct Voice {
+    track: SpatialTrackHandle,
+    filter: FilterHandle,
+    /// What the track is set to now.
+    heard: Heard,
+    /// How much of the sound is blocked, on its way to `blocked_target`.
+    blocked: f32,
+    blocked_target: f32,
+    /// Whether anyone looked for walls yet: the first answer applies at once.
+    checked: bool,
+}
+
+impl Voice {
+    fn new(engine: &mut Engine, category: Category, emitter: &Emitter, heard: Heard) -> Option<Self> {
+        // Kira only pans; the falloff is ours, set as the track volume.
+        let mut builder = SpatialTrackBuilder::new()
+            .attenuation_function(None)
+            .volume(gain_to_db(heard.track_gain()))
+            .spatialization_strength(heard.pan)
+            .sound_capacity(1)
+            .sub_track_capacity(0)
+            .persist_until_sounds_finish(true);
+        let filter = builder.add_effect(FilterBuilder::new().cutoff(f64::from(heard.cutoff)));
+        let track = engine.tracks[category.index()]
+            .add_spatial_sub_track(&engine.listener, emitter.position, builder)
+            .map_err(|_| log::warn!("Too many sound emitters at once ({TRACK_CAPACITY} per category)"))
+            .ok()?;
+        Some(Self { track, filter, heard, blocked: 0.0, blocked_target: 0.0, checked: false })
+    }
+
+    fn follow(&mut self, ears: &Ears, emitter: &Emitter) {
+        let heard = ears.hear(emitter, self.blocked);
+        if heard == self.heard {
+            return;
+        }
+        self.heard = heard;
+        let tween = Tween { duration: FOLLOW, ..Default::default() };
+        self.track.set_volume(gain_to_db(heard.track_gain()), tween);
+        self.track.set_spatialization_strength(heard.pan, tween);
+        self.filter.set_cutoff(f64::from(heard.cutoff), tween);
+    }
+
+    fn look_for_walls(
+        &mut self,
+        emitter: &Emitter,
+        from: Vec3,
+        due: bool,
+        dt: f32,
+        blocked: &mut impl FnMut(Vec3, Vec3) -> bool,
+    ) {
+        // Out of earshot it doesn't matter, and it costs no rays.
+        if (due || !self.checked) && emitter.gain_at(from) > 0.0 {
+            self.blocked_target = occlusion_between(from, emitter.position, blocked);
+            if !self.checked {
+                self.blocked = self.blocked_target;
+                self.checked = true;
+            }
+        }
+        let step = OCCLUSION_SPEED * dt;
+        self.blocked += (self.blocked_target - self.blocked).clamp(-step, step);
+    }
+}
+
 struct Loop {
     id: SoundId,
     /// `None` when audio is disabled; the loop is still tracked so ids stay valid.
     sound: Option<StaticSoundHandle>,
-    /// Positional loops: where they are, and their own spatial track whose
-    /// volume follows the distance to the listener.
+    /// Positional loops: where they are, and their own track.
     emitter: Option<Emitter>,
-    track: Option<SpatialTrackHandle>,
+    voice: Option<Voice>,
     /// Set for loops started by [`Audio::set_scene_sounds`].
     scene: Option<SceneSound>,
 }
 
-impl Loop {
-    fn follow_listener(&mut self, listener: Vec3) {
-        if let (Some(emitter), Some(track)) = (&self.emitter, &mut self.track) {
-            track.set_volume(gain_to_db(emitter.gain_at(listener)), Tween::default());
-        }
-    }
+/// A one-shot in the world that hasn't started yet.
+struct Waiting {
+    data: StaticSoundData,
+    emitter: Emitter,
+    blocked: Option<f32>,
+}
 
+/// A one-shot in the world. It goes away when the sound ends.
+struct Shot {
+    emitter: Emitter,
+    voice: Voice,
+    sound: StaticSoundHandle,
+}
+
+impl Loop {
     /// Fades the sound out; drop the loop afterwards.
     fn stop(&mut self) {
         if let Some(sound) = &mut self.sound {
             sound.stop(Tween { duration: LOOP_FADE, ..Default::default() });
         }
-        // The track was built with `persist_until_sounds_finish`, so dropping it
+        // The voice's track was built with `persist_until_sounds_finish`, so dropping it
         // afterwards still lets the fade-out play.
     }
 }
@@ -198,10 +260,13 @@ impl Audio {
             engine: None,
             cache: HashMap::new(),
             loops: Vec::new(),
+            waiting: Vec::new(),
+            shots: Vec::new(),
             next_id: 0,
             master: 1.0,
             volumes: [1.0; 2],
-            listener: Vec3::ZERO,
+            ears: Ears::default(),
+            occlusion_turn: 0,
         }
     }
 
@@ -210,10 +275,13 @@ impl Audio {
     pub fn headless() -> Self {
         // A low mixing rate keeps the fake output cheap: kira steps through every
         // source frame, so at 1 Hz (the mock's default) each update costs millions of steps.
-        let settings = AudioManagerSettings {
+        Self::headless_with(AudioManagerSettings {
             backend_settings: MockBackendSettings { sample_rate: MOCK_SAMPLE_RATE },
             ..Default::default()
-        };
+        })
+    }
+
+    fn headless_with(settings: AudioManagerSettings<MockBackend>) -> Self {
         match AudioManager::<MockBackend>::new(settings) {
             Ok(manager) => Self::with_manager(Manager::Mock(Box::new(manager))),
             Err(()) => Self::silent(),
@@ -222,15 +290,37 @@ impl Audio {
 
     fn with_manager(mut manager: Manager) -> Self {
         let mut audio = Self::silent();
+        let mut filters = Vec::new();
         let tracks: Result<Vec<_>, _> = Category::ALL
             .iter()
-            .map(|_| manager.add_sub_track(TrackBuilder::new().sub_track_capacity(TRACK_CAPACITY)))
+            .map(|_| {
+                let mut track = TrackBuilder::new().sub_track_capacity(TRACK_CAPACITY);
+                filters.push(track.add_effect(FilterBuilder::new().cutoff(f64::from(OPEN_CUTOFF))));
+                manager.add_sub_track(track)
+            })
             .collect();
         match (tracks, manager.add_listener()) {
-            (Ok(tracks), Ok(listener)) => audio.engine = Some(Engine { manager, listener, tracks }),
+            (Ok(tracks), Ok(listener)) => {
+                audio.engine = Some(Engine { manager, listener, tracks, filters, muffled: 0.0 });
+            }
             _ => log::warn!("No audio: could not create mixer tracks"),
         }
         audio
+    }
+
+    /// Muffles everything, as heard under water: from 0 (not at all) to 1.
+    pub fn set_underwater(&mut self, amount: f32) {
+        let Some(engine) = &mut self.engine else { return };
+        if (engine.muffled - amount).abs() < 0.005 {
+            return;
+        }
+        engine.muffled = amount;
+        // Evenly in pitch, not in hertz, which is how ears hear a filter closing.
+        let open = f64::from(OPEN_CUTOFF);
+        let cutoff = open * (UNDERWATER_CUTOFF / open).powf(f64::from(amount.clamp(0.0, 1.0)));
+        for filter in &mut engine.filters {
+            filter.set_cutoff(cutoff, Tween { duration: Duration::from_millis(60), ..Default::default() });
+        }
     }
 
     /// Whether sound is actually being mixed (false when silent).
@@ -264,22 +354,19 @@ impl Audio {
 
     /// Plays a sound once from a point in the world.
     pub fn play_at(&mut self, path: impl AsRef<Path>, volume: f32, emitter: Emitter) {
+        self.play_pitched_at(path, volume, 1.0, emitter);
+    }
+
+    /// Like [`Audio::play_at`], with a playback rate. This is the way to play anything that
+    /// happens at a place, not to the player. The sound starts at the end of the frame
+    /// ([`Audio::update`]), once it's known what's in its way.
+    pub fn play_pitched_at(&mut self, path: impl AsRef<Path>, volume: f32, pitch: f32, emitter: Emitter) {
         if self.engine.is_none() {
             return;
         }
-        let gain = volume * emitter.gain_at(self.listener);
-        if gain <= 0.0 {
-            return; // out of earshot
-        }
         let Some(data) = self.sound(path.as_ref()) else { return };
-        let Some(engine) = &mut self.engine else { return };
-        // The track goes away by itself once the sound ends.
-        let track = spatial_track(engine, Category::Effects, &emitter, gain_to_db(gain));
-        if let Some(mut track) = track
-            && let Err(e) = track.play(data)
-        {
-            log::warn!("Can't play {}: {e}", path.as_ref().display());
-        }
+        let data = data.volume(gain_to_db(volume)).playback_rate(f64::from(pitch.max(0.01)));
+        self.waiting.push(Waiting { data, emitter, blocked: None });
     }
 
     /// Starts a loop heard everywhere at the same volume (ambience, music).
@@ -298,10 +385,41 @@ impl Audio {
         if let Some(emitter) = &mut l.emitter {
             emitter.position = position;
         }
-        if let Some(track) = &mut l.track {
-            track.set_position(position, Tween::default());
+        if let Some(voice) = &mut l.voice {
+            voice.track.set_position(position, Tween::default());
         }
-        l.follow_listener(self.listener);
+    }
+
+    /// Moves the listener and every sound in the world by `offset`, at once, as the world's
+    /// origin moves the other way: nothing is heard to change. Scene loops keep matching
+    /// the shifted [`SceneSound`]s, so they keep playing.
+    pub fn shift(&mut self, offset: Vec3) {
+        let now = Tween { duration: Duration::ZERO, ..Default::default() };
+        self.ears.position += offset;
+        if let Some(point) = &mut self.ears.hearing_point {
+            *point += offset;
+        }
+        if let Some(engine) = &mut self.engine {
+            engine.listener.set_position(self.ears.position, now);
+        }
+        for l in &mut self.loops {
+            if let Some(emitter) = &mut l.emitter {
+                emitter.position += offset;
+            }
+            if let Some(position) = l.scene.as_mut().and_then(|scene| scene.position.as_mut()) {
+                *position += offset;
+            }
+            if let (Some(voice), Some(emitter)) = (&mut l.voice, &l.emitter) {
+                voice.track.set_position(emitter.position, now);
+            }
+        }
+        for waiting in &mut self.waiting {
+            waiting.emitter.position += offset;
+        }
+        for shot in &mut self.shots {
+            shot.emitter.position += offset;
+            shot.voice.track.set_position(shot.emitter.position, now);
+        }
     }
 
     /// Changes a loop's volume with a short fade.
@@ -361,12 +479,29 @@ impl Audio {
     /// Places the listener: sounds to its right play in the right ear.
     /// `orientation` turns -Z (forward) into the facing direction, Y up.
     pub fn set_listener(&mut self, position: Vec3, orientation: Quat) {
-        self.listener = position;
+        self.ears.position = position;
+        self.ears.orientation = orientation;
         if let Some(engine) = &mut self.engine {
             engine.listener.set_position(position, Tween::default());
             engine.listener.set_orientation(orientation, Tween::default());
         }
-        self.loops.iter_mut().for_each(|l| l.follow_listener(position));
+    }
+
+    /// Where distances are measured from, when that isn't the listener. With a camera
+    /// behind a character, give it the character's head: direction still comes from the
+    /// camera, but what happens next to the character sounds close. `None` is the listener.
+    pub fn set_hearing_point(&mut self, point: Option<Vec3>) {
+        self.ears.hearing_point = point;
+    }
+
+    /// How a sound from `emitter` would reach the listener now, walls aside.
+    pub fn heard(&self, emitter: &Emitter) -> Heard {
+        self.ears.hear(emitter, 0.0)
+    }
+
+    /// The one-shots now sounding in the world, and how each one reaches the listener.
+    pub fn world_sounds(&self) -> impl Iterator<Item = (Emitter, Heard)> + '_ {
+        self.shots.iter().map(|shot| (shot.emitter, shot.voice.heard))
     }
 
     /// Puts the listener where the camera is, facing where it looks.
@@ -398,12 +533,70 @@ impl Audio {
         }
     }
 
-    /// Once per frame (the engine does it). Lets the headless mixer free finished sounds.
+    /// Finds what stands between the hearing point and the sounds in the world, once per
+    /// frame before [`Audio::update`] (the engine does it). `blocked` answers whether
+    /// anything is between two points. Sounds about to start always get an answer, and the
+    /// ones already playing take turns.
+    pub fn update_occlusion(&mut self, dt: f32, mut blocked: impl FnMut(Vec3, Vec3) -> bool) {
+        if self.engine.is_none() {
+            return;
+        }
+        let from = self.ears.hearing_from();
+        for waiting in &mut self.waiting {
+            if waiting.emitter.gain_at(from) > 0.0 {
+                waiting.blocked = Some(occlusion_between(from, waiting.emitter.position, &mut blocked));
+            }
+        }
+        let voices = (self.loops.iter().filter(|l| l.voice.is_some()).count() + self.shots.len()).max(1);
+        let turn = self.occlusion_turn % voices;
+        let loops = self.loops.iter_mut().filter_map(|l| Some((l.emitter?, l.voice.as_mut()?)));
+        let shots = self.shots.iter_mut().map(|s| (s.emitter, &mut s.voice));
+        for (i, (emitter, voice)) in loops.chain(shots).enumerate() {
+            let due = (i + voices - turn) % voices < OCCLUSION_CHECKS;
+            voice.look_for_walls(&emitter, from, due, dt, &mut blocked);
+        }
+        self.occlusion_turn = (turn + OCCLUSION_CHECKS) % voices;
+    }
+
+    /// Once per frame (the engine does it): starts the sounds played this frame, makes the
+    /// ones in the world follow the listener and lets the headless mixer free finished sounds.
     pub fn update(&mut self) {
+        self.start_waiting();
+        self.shots.retain(|shot| shot.sound.state() != PlaybackState::Stopped);
+        let ears = self.ears;
+        for shot in &mut self.shots {
+            shot.voice.follow(&ears, &shot.emitter);
+        }
+        for l in &mut self.loops {
+            if let (Some(emitter), Some(voice)) = (&l.emitter, &mut l.voice) {
+                voice.follow(&ears, emitter);
+            }
+        }
         if let Some(Engine { manager: Manager::Mock(manager), .. }) = &mut self.engine {
             let backend = manager.backend_mut();
             backend.on_start_processing();
             backend.process();
+        }
+    }
+
+    fn start_waiting(&mut self) {
+        let ears = self.ears;
+        for waiting in std::mem::take(&mut self.waiting) {
+            let Waiting { data, emitter, blocked } = waiting;
+            let heard = ears.hear(&emitter, blocked.unwrap_or(0.0));
+            let Some(engine) = &mut self.engine else { return };
+            if heard.gain <= 0.0 {
+                continue; // out of earshot
+            }
+            let Some(mut voice) = Voice::new(engine, Category::Effects, &emitter, heard) else { continue };
+            voice.blocked = blocked.unwrap_or(0.0);
+            voice.blocked_target = voice.blocked;
+            voice.checked = blocked.is_some();
+            let delay = Duration::try_from_secs_f32(heard.delay).unwrap_or_default();
+            match voice.track.play(data.start_time(StartTime::Delayed(delay))) {
+                Ok(sound) => self.shots.push(Shot { emitter, voice, sound }),
+                Err(e) => log::warn!("Can't play a sound: {e}"),
+            }
         }
     }
 
@@ -415,8 +608,8 @@ impl Audio {
         scene: Option<SceneSound>,
     ) -> Option<SoundId> {
         let id = SoundId(self.next_id);
-        let mut entry = Loop { id, sound: None, emitter, track: None, scene };
-        let listener = self.listener;
+        let mut entry = Loop { id, sound: None, emitter, voice: None, scene };
+        let ears = self.ears;
         if self.engine.is_some() {
             let data = self.sound(path)?;
             // Spread copies of the same loop over its length so four torches
@@ -430,10 +623,9 @@ impl Audio {
             let engine = self.engine.as_mut()?;
             let played = match emitter {
                 Some(emitter) => {
-                    let gain = gain_to_db(emitter.gain_at(listener));
-                    let mut track = spatial_track(engine, Category::Ambient, &emitter, gain)?;
-                    let sound = track.play(data);
-                    entry.track = Some(track);
+                    let mut voice = Voice::new(engine, Category::Ambient, &emitter, ears.hear(&emitter, 0.0))?;
+                    let sound = voice.track.play(data);
+                    entry.voice = Some(voice);
                     sound
                 }
                 None => engine.tracks[Category::Ambient.index()].play(data),
@@ -472,21 +664,6 @@ impl Audio {
         self.cache.insert(path.to_path_buf(), (modified, data.clone()));
         data
     }
-}
-
-fn spatial_track(
-    engine: &mut Engine,
-    category: Category,
-    emitter: &Emitter,
-    volume: Decibels,
-) -> Option<SpatialTrackHandle> {
-    // Kira only pans; the distance falloff is ours (`Emitter::gain_at`), set as the track volume.
-    let builder =
-        SpatialTrackBuilder::new().attenuation_function(None).volume(volume).persist_until_sounds_finish(true);
-    engine.tracks[category.index()]
-        .add_spatial_sub_track(&engine.listener, emitter.position, builder)
-        .map_err(|_| log::warn!("Too many sound emitters at once ({TRACK_CAPACITY} per category)"))
-        .ok()
 }
 
 /// Linear gain to kira's decibels; 0 is silence.

@@ -720,12 +720,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
-name = "font8x8"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "875488b8711a968268c7cf5d139578713097ca4635a76044e8fe8eedf831d07e"
-
-[[package]]
 name = "foreign-types"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1002,6 +996,7 @@ dependencies = [
  "grimora_physics",
  "grimora_render",
  "grimora_scene",
+ "grimora_world",
  "hecs",
  "log",
  "pollster",
@@ -1047,7 +1042,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytemuck",
- "font8x8",
  "glam 0.34.1",
  "grimora_core",
  "image",
@@ -1065,6 +1059,19 @@ dependencies = [
  "grimora_core",
  "image",
  "log",
+ "ron",
+ "serde",
+]
+
+[[package]]
+name = "grimora_world"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "glam 0.34.1",
+ "grimora_core",
+ "grimora_scene",
+ "image",
  "ron",
  "serde",
 ]
@@ -1136,6 +1143,15 @@ name = "hermit-abi"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e17592d60ebacc7d5e169f4663c5f84f9161cc90328abcfe8456f41e4dfcb284"
+
+[[package]]
+name = "icon_maker"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "grimora",
+ "image",
+]
 
 [[package]]
 name = "image"
@@ -3760,6 +3776,17 @@ name = "wit-bindgen"
 version = "0.57.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
+
+[[package]]
+name = "world_map"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "glam 0.34.1",
+ "grimora",
+ "grimora_world",
+ "image",
+]
 
 [[package]]
 name = "x11-dl"

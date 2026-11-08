@@ -1,0 +1,62 @@
+// A sardine: small, silver and never alone. Lengths in meters, speeds in meters per second.
+SpeciesDesc(
+    name: "sardinha",
+    description: "Sozinha, não é nada. Juntas, viram uma coisa só, que foge e se fecha em bola quando sente medo.",
+    model: "../models/animals/Sardinha.glb",
+    // Which way the model looks.
+    forward: (0.0, 0.0, 1.0),
+    size: (0.85, 1.2),
+    swim: (
+        cruise: 0.9,
+        sprint: 4.5,
+        turn: 4.5,
+        beats_per_meter: 2.2,
+        idle_beat: 1.6,
+        // The wave that runs down the body. Each joint adds to the ones before it, so these
+        // are small. `delay` is how far behind the head it is, in whole beats, and `bend`
+        // is how much of a turn this joint takes, in degrees.
+        wave: [
+            (joint: "Head", sway: -3.0, delay: 0.0, bend: -4.0),
+            (joint: "Spine.01", sway: 5.0, delay: 0.08, bend: 9.0),
+            (joint: "Spine.02", sway: 8.0, delay: 0.2, bend: 12.0),
+            (joint: "Tail", sway: 13.0, delay: 0.34, bend: 14.0),
+            (joint: "Caudal", sway: 19.0, delay: 0.5, bend: 8.0),
+        ],
+    ),
+    school: (
+        spacing: 0.38,
+        reach: 1.1,
+        neighbours: 7,
+        separation: 2.4,
+        alignment: 1.5,
+        cohesion: 0.55,
+        home: 0.5,
+        swirl: 3.0,
+        // At night a school loosens: it can't see its neighbours as well.
+        night_spread: 1.9,
+        roam: 0.55,
+        wander: 0.35,
+    ),
+    habitat: (
+        day_depth: 5.0,
+        night_depth: 1.6,
+        below_surface: 0.7,
+        above_floor: 0.5,
+        shallowest: 2.0,
+        // Every so often they come up to feed. Then the gulls can see them.
+        feeding: (depth: 1.2, every: (30.0, 90.0), lasts: (20.0, 50.0)),
+        flee_depth: 3.0,
+    ),
+    senses: (
+        // Fear goes from fish to fish faster than any one of them could see the danger.
+        fear_spread: 0.88,
+        calm_seconds: 5.0,
+        flee: 16.0,
+    ),
+    // In game days. Enough young that the gulls don't finish them, and little room for more.
+    cycle: (births: 0.35, lives: 30.0, room: 1.3, arrives_every: 2.0, newborn: 0.4, grows_in: 6.0),
+    sounds: (
+        death: "../sounds/squelch.wav",
+        volume: 0.5,
+    ),
+)

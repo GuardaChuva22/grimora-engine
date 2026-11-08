@@ -1,0 +1,491 @@
+{
+  "schema": "grimora.model-properties",
+  "version": 1,
+  "properties": {
+    "cacho": {
+      "type": "enum",
+      "values": [
+        "nenhum",
+        "verde",
+        "maduro"
+      ],
+      "default": "verde"
+    },
+    "broto": {
+      "type": "boolean",
+      "default": false
+    }
+  },
+  "assets": [
+    {
+      "schema": "grimora.model-properties",
+      "version": 1,
+      "type": "bananeira",
+      "id": "01",
+      "properties": {
+        "cacho": {
+          "type": "enum",
+          "values": [
+            "nenhum",
+            "verde",
+            "maduro"
+          ],
+          "default": "verde"
+        },
+        "broto": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "parts": {
+        "planta": 44,
+        "cacho_verde": 45,
+        "cacho_maduro": 52,
+        "broto": 46
+      },
+      "materials": {
+        "verde": 3,
+        "maduro": 4
+      },
+      "states": [
+        {
+          "properties": {
+            "cacho": "verde",
+            "broto": false
+          },
+          "scene": 0
+        },
+        {
+          "properties": {
+            "cacho": "maduro",
+            "broto": false
+          },
+          "scene": 1
+        },
+        {
+          "properties": {
+            "cacho": "nenhum",
+            "broto": false
+          },
+          "scene": 2
+        },
+        {
+          "properties": {
+            "cacho": "verde",
+            "broto": true
+          },
+          "scene": 3
+        },
+        {
+          "properties": {
+            "cacho": "maduro",
+            "broto": true
+          },
+          "scene": 4
+        },
+        {
+          "properties": {
+            "cacho": "nenhum",
+            "broto": true
+          },
+          "scene": 5
+        }
+      ],
+      "name": "Baixa e robusta",
+      "file": "Bananeira-01-Compacta.glb"
+    },
+    {
+      "schema": "grimora.model-properties",
+      "version": 1,
+      "type": "bananeira",
+      "id": "02",
+      "properties": {
+        "cacho": {
+          "type": "enum",
+          "values": [
+            "nenhum",
+            "verde",
+            "maduro"
+          ],
+          "default": "verde"
+        },
+        "broto": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "parts": {
+        "planta": 38,
+        "cacho_verde": 39,
+        "cacho_maduro": 46,
+        "broto": 40
+      },
+      "materials": {
+        "verde": 3,
+        "maduro": 4
+      },
+      "states": [
+        {
+          "properties": {
+            "cacho": "verde",
+            "broto": false
+          },
+          "scene": 0
+        },
+        {
+          "properties": {
+            "cacho": "maduro",
+            "broto": false
+          },
+          "scene": 1
+        },
+        {
+          "properties": {
+            "cacho": "nenhum",
+            "broto": false
+          },
+          "scene": 2
+        },
+        {
+          "properties": {
+            "cacho": "verde",
+            "broto": true
+          },
+          "scene": 3
+        },
+        {
+          "properties": {
+            "cacho": "maduro",
+            "broto": true
+          },
+          "scene": 4
+        },
+        {
+          "properties": {
+            "cacho": "nenhum",
+            "broto": true
+          },
+          "scene": 5
+        }
+      ],
+      "name": "Alta e fechada",
+      "file": "Bananeira-02-Ereta.glb"
+    },
+    {
+      "schema": "grimora.model-properties",
+      "version": 1,
+      "type": "bananeira",
+      "id": "03",
+      "properties": {
+        "cacho": {
+          "type": "enum",
+          "values": [
+            "nenhum",
+            "verde",
+            "maduro"
+          ],
+          "default": "verde"
+        },
+        "broto": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "parts": {
+        "planta": 47,
+        "cacho_verde": 48,
+        "cacho_maduro": 55,
+        "broto": 49
+      },
+      "materials": {
+        "verde": 3,
+        "maduro": 4
+      },
+      "states": [
+        {
+          "properties": {
+            "cacho": "verde",
+            "broto": false
+          },
+          "scene": 0
+        },
+        {
+          "properties": {
+            "cacho": "maduro",
+            "broto": false
+          },
+          "scene": 1
+        },
+        {
+          "properties": {
+            "cacho": "nenhum",
+            "broto": false
+          },
+          "scene": 2
+        },
+        {
+          "properties": {
+            "cacho": "verde",
+            "broto": true
+          },
+          "scene": 3
+        },
+        {
+          "properties": {
+            "cacho": "maduro",
+            "broto": true
+          },
+          "scene": 4
+        },
+        {
+          "properties": {
+            "cacho": "nenhum",
+            "broto": true
+          },
+          "scene": 5
+        }
+      ],
+      "name": "Copa larga",
+      "file": "Bananeira-03-Larga.glb"
+    },
+    {
+      "schema": "grimora.model-properties",
+      "version": 1,
+      "type": "bananeira",
+      "id": "04",
+      "properties": {
+        "cacho": {
+          "type": "enum",
+          "values": [
+            "nenhum",
+            "verde",
+            "maduro"
+          ],
+          "default": "verde"
+        },
+        "broto": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "parts": {
+        "planta": 41,
+        "cacho_verde": 42,
+        "cacho_maduro": 49,
+        "broto": 43
+      },
+      "materials": {
+        "verde": 3,
+        "maduro": 4
+      },
+      "states": [
+        {
+          "properties": {
+            "cacho": "verde",
+            "broto": false
+          },
+          "scene": 0
+        },
+        {
+          "properties": {
+            "cacho": "maduro",
+            "broto": false
+          },
+          "scene": 1
+        },
+        {
+          "properties": {
+            "cacho": "nenhum",
+            "broto": false
+          },
+          "scene": 2
+        },
+        {
+          "properties": {
+            "cacho": "verde",
+            "broto": true
+          },
+          "scene": 3
+        },
+        {
+          "properties": {
+            "cacho": "maduro",
+            "broto": true
+          },
+          "scene": 4
+        },
+        {
+          "properties": {
+            "cacho": "nenhum",
+            "broto": true
+          },
+          "scene": 5
+        }
+      ],
+      "name": "Caule inclinado",
+      "file": "Bananeira-04-Inclinada.glb"
+    },
+    {
+      "schema": "grimora.model-properties",
+      "version": 1,
+      "type": "bananeira",
+      "id": "05",
+      "properties": {
+        "cacho": {
+          "type": "enum",
+          "values": [
+            "nenhum",
+            "verde",
+            "maduro"
+          ],
+          "default": "verde"
+        },
+        "broto": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "parts": {
+        "planta": 41,
+        "cacho_verde": 42,
+        "cacho_maduro": 49,
+        "broto": 43
+      },
+      "materials": {
+        "verde": 3,
+        "maduro": 4
+      },
+      "states": [
+        {
+          "properties": {
+            "cacho": "verde",
+            "broto": false
+          },
+          "scene": 0
+        },
+        {
+          "properties": {
+            "cacho": "maduro",
+            "broto": false
+          },
+          "scene": 1
+        },
+        {
+          "properties": {
+            "cacho": "nenhum",
+            "broto": false
+          },
+          "scene": 2
+        },
+        {
+          "properties": {
+            "cacho": "verde",
+            "broto": true
+          },
+          "scene": 3
+        },
+        {
+          "properties": {
+            "cacho": "maduro",
+            "broto": true
+          },
+          "scene": 4
+        },
+        {
+          "properties": {
+            "cacho": "nenhum",
+            "broto": true
+          },
+          "scene": 5
+        }
+      ],
+      "name": "Copa assimétrica",
+      "file": "Bananeira-05-Assimetrica.glb"
+    },
+    {
+      "schema": "grimora.model-properties",
+      "version": 1,
+      "type": "bananeira",
+      "id": "06",
+      "properties": {
+        "cacho": {
+          "type": "enum",
+          "values": [
+            "nenhum",
+            "verde",
+            "maduro"
+          ],
+          "default": "verde"
+        },
+        "broto": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "parts": {
+        "planta": 41,
+        "cacho_verde": 42,
+        "cacho_maduro": 49,
+        "broto": 43
+      },
+      "materials": {
+        "verde": 3,
+        "maduro": 4
+      },
+      "states": [
+        {
+          "properties": {
+            "cacho": "verde",
+            "broto": false
+          },
+          "scene": 0
+        },
+        {
+          "properties": {
+            "cacho": "maduro",
+            "broto": false
+          },
+          "scene": 1
+        },
+        {
+          "properties": {
+            "cacho": "nenhum",
+            "broto": false
+          },
+          "scene": 2
+        },
+        {
+          "properties": {
+            "cacho": "verde",
+            "broto": true
+          },
+          "scene": 3
+        },
+        {
+          "properties": {
+            "cacho": "maduro",
+            "broto": true
+          },
+          "scene": 4
+        },
+        {
+          "properties": {
+            "cacho": "nenhum",
+            "broto": true
+          },
+          "scene": 5
+        }
+      ],
+      "name": "Copa arredondada",
+      "file": "Bananeira-06-Arredondada.glb"
+    }
+  ],
+  "selection": {
+    "method": "glTF scene",
+    "default": {
+      "cacho": "verde",
+      "broto": false
+    },
+    "requires_engine_property_selection": true
+  }
+}

@@ -20,7 +20,7 @@ FPS = 60
 DUTY = 0.60
 RUN_SPEED = 5.5
 RUN_DURATION = 2/3
-RUN_DUTY = .24
+RUN_DUTY = .26
 JUMP_DURATIONS = {'jump':.30,'jump_fall':.24,'jump_land':.40}
 NATIVE_CLIPS = ('sword_walk','sword_run','jump','jump_fall','jump_land','jump_land_walk','jump_land_run')
 FORWARD = np.array([0., 0., -1.])
@@ -158,12 +158,16 @@ def run_foot_cycle(phase, rest):
         tangent = RUN_SPEED*RUN_DURATION*(1-RUN_DUTY)
         # Keep the support velocity only close to lift-off/landing. A long
         # Hermite tangent sends the recovering heel beyond this rig's reach.
-        z = stroke*(.5-smooth(u))+tangent*u*(1-u)*(1-2*u)*np.exp(-20*u*(1-u))
-        pitch = -36+31*smooth(u)
-        lift = .40*np.sin(np.pi*u)**1.3
+        # The heel kicks up behind the body first, then the knee drives the foot through and
+        # out ahead, and it paws back a little before it lands.
+        through = smooth(np.clip((u-.12)/.68,0,1))
+        z = stroke*(.5-through) + .22*tangent*u*(1-u)**3 + .06*np.sin(np.pi*np.clip((u-.72)/.28,0,1))
+        pitch = keyed(u,[(0,-36),(.3,-24),(.62,9),(.86,4),(1,-5)])
+        lift = .42*np.sin(np.pi*np.clip(u/.78,0,1))**1.1*(1-.35*np.clip((u-.3)/.5,0,1))
     position = rest.copy()
-    position[0] = np.sign(rest[0])*.115
-    position[2] = .100+z
+    # Runners land almost on one line under the body, not on two rails.
+    position[0] = np.sign(rest[0])*.055
+    position[2] = .080+z
     pivot = np.array([0.,-rest[1],-.145])
     rotation = axis('x',pitch)
     position += pivot-rotation.apply(pivot)
@@ -228,11 +232,14 @@ def author(model, running=False, landing=False, motion=None):
         torso_delta = axis('y',-4*np.cos(w)) * axis('z',-1.1*np.sin(w)) * axis('x',-1.5)
         if running:
             half = phase % .5
-            drop = (-.095-.025*np.sin(np.pi*half/RUN_DUTY)**2 if half<RUN_DUTY else
-                    -.095+.12*np.sin(np.pi*(half-RUN_DUTY)/(.5-RUN_DUTY))**2)
-            hip_shift = np.array([.012*np.sin(w),drop,-.070])
-            hips_delta = axis('y',5*np.cos(w))*axis('z',1.5*np.sin(w))*axis('x',-6)
-            torso_delta = axis('y',-6*np.cos(w))*axis('z',-1.5*np.sin(w))*axis('x',-10)
+            # Lowest as the leg takes the weight, highest in flight: 7 cm, not a bounce.
+            drop = (-.085-.03*np.sin(np.pi*half/RUN_DUTY)**2 if half<RUN_DUTY else
+                    -.085+.045*np.sin(np.pi*(half-RUN_DUTY)/(.5-RUN_DUTY))**2)
+            hip_shift = np.array([.016*np.sin(w),drop,-.070])
+            # The pelvis turns with the swinging leg and drops on its side; the chest turns
+            # against it, and dips at each landing.
+            hips_delta = axis('y',10*np.cos(w))*axis('z',4*np.sin(w))*axis('x',-9-1.5*np.cos(2*w-.4))
+            torso_delta = axis('y',-13*np.cos(w-.3))*axis('z',-3*np.sin(w-.2))*axis('x',-14-3.5*np.cos(2*w-.9))
         if landing:
             absorption = keyed(time,[(0,0),(.09,.105),(.30,0)])
             hip_shift[1] -= absorption
@@ -259,9 +266,16 @@ def author(model, running=False, landing=False, motion=None):
             hips_delta,torso_delta = axis('x',pelvis_pitch),axis('x',lean)
         desired[n['hips']] = hips_delta*bq[n['hips']]
         desired[n['spine']] = axis('x',-8 if running else -1.5)*bq[n['spine']]
+        if running:
+            # The spine is the wave between the pelvis and the chest: it twists halfway, bends
+            # sideways against the pelvis, and folds a little more at each landing, a beat after it.
+            desired[n['spine']] = (axis('y',-2*np.cos(w-.15))*axis('z',-1.5*np.sin(w-.1))
+                                   *axis('x',-12-2.5*np.cos(2*w-.6))*bq[n['spine']])
         desired[n['chest']] = torso_delta*bq[n['chest']]
-        desired[n['neck']] = axis('x',-4 if running else 0)*bq[n['neck']]
-        desired[n['head']] = axis('x',-3 if running else 0)*bq[n['head']]
+        # Leaning into the run, the head stays level, looking ahead.
+        # These are turns in the world: the head stays nearly level and still while the chest works.
+        desired[n['neck']] = axis('x',-6 if running else 0)*bq[n['neck']]
+        desired[n['head']] = axis('x',-2+1.5*np.cos(2*w-1.2) if running else 0)*bq[n['head']]
         if motion:
             desired[n['spine']] = axis('x',lean*.55)*bq[n['spine']]
             desired[n['neck']] = axis('x',head_pitch*1.4)*bq[n['neck']]
@@ -271,7 +285,7 @@ def author(model, running=False, landing=False, motion=None):
             # exactly its idle rotation relative to the forearm.
             swing = axis('x',-sign*(6 if side == 'R' else 17)*np.cos(w-.15))
             if running:
-                swing = axis('x',-sign*(20 if side=='R' else 30)*np.cos(w-.12))
+                swing = axis('x',-sign*(30 if side=='R' else 44)*np.cos(w-.25))
             if motion:
                 if motion=='jump':
                     arm = keyed(time,[(0,-8 if side=='R' else -18),(.14,27 if side=='R' else 40),(.30,17 if side=='R' else 28)])
@@ -283,12 +297,20 @@ def author(model, running=False, landing=False, motion=None):
                     arm = keyed(time,[(0,14 if side=='R' else 20),(.12,6 if side=='R' else 8),(.40,0)])
                     flex = keyed(time,[(0,18 if side=='R' else 28),(.14,24 if side=='R' else 34),(.40,0)])
                 swing = axis('x',arm)
+            if running:
+                # Forward, the arm comes in across the chest; back, it opens a little.
+                forward = -sign*np.cos(w-.25)
+                swing = swing*axis('z',-sign*(14*max(forward,0)-4*max(-forward,0)))
             arm_delta = swing*torso_delta
             for part in ('clavicle','upper_arm','forearm','hand'):
                 i = n[f'{part}.{side}']
                 desired[i] = (torso_delta if part=='clavicle' else arm_delta)*iq[i]
+                if running and part=='clavicle':
+                    # The shoulder goes forward with its arm and back with it.
+                    desired[i] = torso_delta*axis('y',sign*7*(-sign*np.cos(w-.25)))*iq[i]
                 if running and part in ('forearm','hand'):
-                    flex = (32 if side=='R' else 48)+5*np.sin(w-sign*.4)
+                    # Bent near a right angle, more on the way forward than back.
+                    flex = (78 if side=='R' else 86)-sign*(15 if side=='R' else 20)*np.cos(w-.25)
                     desired[i] = arm_delta*R.from_rotvec(elbow_axes[side]*np.radians(flex))*iq[i]
                 elif motion and part in ('forearm','hand'):
                     desired[i] = arm_delta*R.from_rotvec(elbow_axes[side]*np.radians(flex))*iq[i]

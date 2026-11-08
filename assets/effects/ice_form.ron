@@ -1,0 +1,51 @@
+// A spear of ice coming together in the hand: cold drawn in from the air, and a glint as it sets.
+[
+    // what gathers
+    (
+        rate: 0.0,
+        burst: 34,
+        lifetime: (0.3, 0.46),
+        area: (0.42, 0.42, 0.42),
+        speed: (0.0, 0.2),
+        attract: 16.0,
+        drag: 3.0,
+        trail: 0.09,
+        trail_points: 4,
+        sizes: [0.0, 0.026, 0.012],
+        size_jitter: 0.4,
+        colors: [(1.0, 1.0, 1.0, 0.0), (1.0, 1.0, 1.0, 1.0), (1.0, 1.0, 1.0, 0.6)],
+        ramp: [(0.1, 0.3, 0.8, 0.8), (0.36, 0.72, 1.0, 2.2), (0.88, 0.98, 1.0, 7.0)],
+        emissive: 1.0,
+        additive: 1.0,
+        shape: Diamond,
+    ),
+    // the glint
+    (
+        rate: 0.0,
+        burst: 1,
+        delay: 0.3,
+        lifetime: (0.26, 0.26),
+        sizes: [0.1, 0.62, 0.3],
+        colors: [(1.0, 1.0, 1.0, 0.0), (1.0, 1.0, 1.0, 1.0), (1.0, 1.0, 1.0, 0.0)],
+        ramp: [(0.1, 0.3, 0.8, 0.8), (0.36, 0.72, 1.0, 2.2), (0.88, 0.98, 1.0, 7.0)],
+        emissive: 1.0,
+        additive: 1.0,
+        shape: Star,
+    ),
+    // breath of cold over it
+    (
+        rate: 0.0,
+        burst: 9,
+        delay: 0.2,
+        lifetime: (0.7, 1.2),
+        area: (0.1, 0.1, 0.1),
+        speed: (0.1, 0.4),
+        acceleration: (0.0, -0.25, 0.0),
+        drag: 1.8,
+        sizes: [0.08, 0.2, 0.3],
+        size_jitter: 0.3,
+        colors: [(0.8, 0.92, 1.0, 0.0), (0.8, 0.92, 1.0, 0.3), (0.8, 0.92, 1.0, 0.0)],
+        lit: 0.8,
+        emissive: 0.3,
+    ),
+]

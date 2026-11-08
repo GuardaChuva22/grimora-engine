@@ -726,11 +726,11 @@ Sons em loop fazem parte da cena. Sem `position`, o som é ambiente (igual em to
 
 ```ron
 sounds: [
-    (path: "../sounds/wind.wav", volume: 0.35),
+    (path: "../sounds/wind.ogg", volume: 0.35),
     (path: "../sounds/hum.wav", position: (0.0, 1.6, 0.0), volume: 0.4, min_distance: 2.0, max_distance: 14.0),
 ],
 objects: [
-    (mesh: Cone(segments: 5), position: (4.5, 1.7, 6.0), sound: (path: "../sounds/fire.wav", position: (0.0, 0.3, 0.0))),
+    (mesh: Cone(segments: 5), position: (4.5, 1.7, 6.0), sound: (path: "../sounds/fire.ogg", position: (0.0, 0.3, 0.0))),
 ],
 ```
 
@@ -738,9 +738,9 @@ No jogo, use `ctx.audio` (volumes são ganhos lineares, 1 = como gravado):
 
 ```rust
 ctx.audio.play("assets/sounds/step_1.wav", 0.5);                       // efeito único
-ctx.audio.play_at("assets/sounds/fire.wav", 1.0, Emitter::at(posicao)); // efeito único no mundo
-let vento = ctx.audio.play_loop("assets/sounds/wind.wav", 0.3);         // loop ambiente
-let tocha = ctx.audio.play_loop_at("assets/sounds/fire.wav", 0.8, Emitter::at(posicao));
+ctx.audio.play_at("assets/sounds/fire.ogg", 1.0, Emitter::at(posicao)); // efeito único no mundo
+let vento = ctx.audio.play_loop("assets/sounds/wind.ogg", 0.3);         // loop ambiente
+let tocha = ctx.audio.play_loop_at("assets/sounds/fire.ogg", 0.8, Emitter::at(posicao));
 if let Some(id) = tocha { ctx.audio.set_position(id, nova_posicao); }   // e ctx.audio.stop(id)
 ctx.audio.set_volume(Category::Ambient, 0.5);                           // e set_master_volume
 ```

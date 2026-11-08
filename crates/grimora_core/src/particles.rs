@@ -2,12 +2,14 @@
 //! simulated in world space by a [`ParticleSystem`], handed to the renderer as
 //! [`ParticleInstance`]s.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
-use glam::{Quat, Vec3, Vec4};
+use glam::{Quat, Vec2, Vec3, Vec4};
 use serde::{Deserialize, Serialize};
 
+use crate::environment::Environment;
 use crate::{Rng, Transform};
 
 /// One emitter of an effect, as written in effect files. Colors are sRGB 0..1,
@@ -58,6 +60,59 @@ pub struct ParticleDesc {
     /// Stretches particles along their motion by this many seconds of travel (sparks).
     pub stretch: f32,
     pub shape: ParticleShape,
+    /// Seconds to wait before starting, to put the parts of an effect in sequence.
+    pub delay: f32,
+    /// Releases the `burst` again every this many seconds: a heartbeat. It then never ends.
+    pub repeat: f32,
+    /// Lies flat on the ground instead of facing the camera: shockwaves, rune circles.
+    /// `rotation` and `spin` turn it around the up axis.
+    pub flat: bool,
+    /// Seconds of its path each particle draws behind it, thinning and burning away towards
+    /// the tail: energy, comets, the arc of a blade. It takes the particle's look.
+    pub trail: f32,
+    /// How many pieces that trail is made of; more is smoother around curves.
+    pub trail_points: u32,
+    /// How much of the emitter's own motion its particles share, `0..1`: 0 stays where it
+    /// was released, 1 goes along, as a flame on a carried torch.
+    pub local: f32,
+    /// Strength of a swirling flow, in m/s². Unlike `turbulence`, neighbors move together,
+    /// so it makes curls instead of jitter.
+    pub curl: f32,
+    /// Size of those curls, in meters.
+    pub curl_scale: f32,
+    /// Pushes around the emitter's `direction`, in m/s²: a vortex.
+    pub orbit: f32,
+    /// Pulls towards the emitter, in m/s². Negative pushes away.
+    pub attract: f32,
+    /// Stands along the world's up, this much taller than wide: 1 is twice as tall. It stands
+    /// on its position instead of being centered there, so it stays rooted as it grows.
+    pub upright: f32,
+    /// How much each particle flickers on its own, `0..1`.
+    pub twinkle: f32,
+    /// sRGB colors and intensity `(r, g, b, glow)`, from the rim of the particle to its
+    /// heart. They replace a flat color, and `colors` then only tints them and sets the
+    /// opacity. Remember `emissive` or `lit`, without which they stay black.
+    pub ramp: Vec<Vec4>,
+    /// How much of the particle has burned away over life, keys evenly spaced, `0..1`. The
+    /// heart goes first, then the rest eats in from the rim, along the noise.
+    pub erode: Vec<f32>,
+    /// How many times the noise repeats across a particle.
+    pub noise: f32,
+    /// How much the noise bites into the shape, `0..1`.
+    pub grain: f32,
+    /// How far the noise bends the shape, as a share of the particle's size.
+    pub warp: f32,
+    /// Particle sizes per second the noise moves by: a flame's runs downwards, so it rises.
+    pub flow: Vec2,
+    /// Hard steps of color from rim to heart; 0 is a smooth gradient.
+    pub bands: f32,
+    /// Square pixels per meter, fixed in the world as the particle grows; 0 is smooth.
+    pub pixels: f32,
+    /// Meters over which it fades into the scenery it touches, instead of cutting through.
+    pub soft: f32,
+    /// Bends what is behind it instead of drawing, as heat haze: meters of bending at one
+    /// meter from the camera. Colors don't count, only the shape, `colors`' opacity and `erode`.
+    pub distort: f32,
     /// Beyond this distance from the camera the emitter sleeps and holds no particles.
     pub max_distance: f32,
     /// Mixed with the entity's position; equal emitters don't move in step.
@@ -89,13 +144,36 @@ impl Default for ParticleDesc {
             spin: 0.0,
             stretch: 0.0,
             shape: ParticleShape::Soft,
+            delay: 0.0,
+            repeat: 0.0,
+            flat: false,
+            trail: 0.0,
+            trail_points: 12,
+            local: 0.0,
+            curl: 0.0,
+            curl_scale: 1.0,
+            orbit: 0.0,
+            attract: 0.0,
+            upright: 0.0,
+            twinkle: 0.0,
+            ramp: Vec::new(),
+            erode: Vec::new(),
+            noise: 1.0,
+            grain: 0.0,
+            warp: 0.0,
+            flow: Vec2::ZERO,
+            bands: 0.0,
+            pixels: 0.0,
+            soft: 0.0,
+            distort: 0.0,
             max_distance: 60.0,
             seed: 0,
         }
     }
 }
 
-/// What a particle looks like; no textures, so the look stays low poly and cheap.
+/// The form of a particle, drawn by the shader. With a `ramp` or `erode` it is a field
+/// of heat, from 0 at the outline to 1 inside, rather than a mere outline.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ParticleShape {
     /// A blob that fades towards its edge: fire, smoke, mist.
@@ -103,12 +181,38 @@ pub enum ParticleShape {
     Soft,
     /// A hard-edged rhombus: sparks, embers, crystal shards.
     Diamond,
+    /// A tongue, round at the bottom and pointed at the top. Goes with `upright`.
+    Flame,
+    /// A circle's outline: shockwaves, runes.
+    Ring,
+    /// A four-pointed glint.
+    Star,
+    /// A circle of strokes like an unknown script, between two thin rings. Goes with `flat`.
+    Runes,
+    /// A shockwave: a sharp front and a long tail dying away behind it. Goes with `flat`.
+    Wave,
+}
+
+impl ParticleShape {
+    /// The number `particle_field` in scene.wgsl knows this shape by. 5 is a piece of a
+    /// trail, which has no name here because the trail draws it.
+    fn index(self) -> f32 {
+        match self {
+            Self::Soft => 0.0,
+            Self::Diamond => 1.0,
+            Self::Flame => 2.0,
+            Self::Ring => 3.0,
+            Self::Star => 4.0,
+            Self::Runes => 6.0,
+            Self::Wave => 7.0,
+        }
+    }
 }
 
 impl ParticleDesc {
     /// Keeps emitting for as long as it lives.
     pub fn looping(&self) -> bool {
-        self.rate > 0.0 && self.duration.is_none()
+        (self.rate > 0.0 && self.duration.is_none()) || self.repeat > 0.0
     }
 
     fn longest_life(&self) -> f32 {
@@ -130,13 +234,211 @@ pub struct ParticleInstance {
     pub color: [f32; 4],
     /// Length and direction to stretch along; zero for a round particle.
     pub stretch: [f32; 3],
-    /// Radians, on screen.
+    /// Radians, on screen. For a piece of a trail, the meters from the head to it.
     pub rotation: f32,
     pub emissive: f32,
     pub lit: f32,
     pub additive: f32,
-    /// 0 [`ParticleShape::Soft`], 1 [`ParticleShape::Diamond`].
+    /// See [`ParticleShape::index`], plus 10 if it lies flat.
     pub shape: f32,
+    /// x how much burned away, y pixels per meter, z meters of soft contact, w bending.
+    pub look: [f32; 4],
+    /// xy the noise's motion, z its repeats, w how far it bends the shape.
+    pub flow: [f32; 4],
+    /// x hard steps of color, y a random number, z the noise's bite, w 1 to use all of this.
+    pub detail: [f32; 4],
+    /// sRGB colors and glow, rim to heart.
+    pub rim: [f32; 4],
+    pub body: [f32; 4],
+    pub heart: [f32; 4],
+}
+
+impl ParticleInstance {
+    /// A flat particle, the fields of the fuller look left out.
+    const PLAIN: Self = Self {
+        position: [0.0; 3],
+        size: 0.0,
+        color: [0.0; 4],
+        stretch: [0.0; 3],
+        rotation: 0.0,
+        emissive: 0.0,
+        lit: 0.0,
+        additive: 0.0,
+        shape: 0.0,
+        look: [0.0; 4],
+        flow: [0.0; 4],
+        detail: [0.0; 4],
+        rim: [0.0; 4],
+        body: [0.0; 4],
+        heart: [0.0; 4],
+    };
+
+    /// Bends what is behind it, instead of being drawn over it.
+    pub fn bends(&self) -> bool {
+        self.look[3] > 0.0
+    }
+}
+
+/// The most raindrops and snowflakes there can be at a time.
+const RAINDROPS: usize = 2600;
+const SNOWFLAKES: usize = 2200;
+/// The specks that hang in the water around a camera under it.
+const MOTES: usize = 1400;
+/// Half the size of the box around the camera that rain and snow fall in.
+const FALL_REACH: Vec3 = Vec3::new(22.0, 10.0, 22.0);
+/// How far above the camera the middle of that box is.
+const FALL_ABOVE: f32 = 5.0;
+
+/// Rain and snow around the camera, as [`Environment::precipitation`] asks. Each drop
+/// has a fixed place in a repeating world-space pattern that falls with the wind and
+/// wraps around a box centered on the camera, so none is born or dies, and they cost the
+/// same wherever the camera goes.
+#[derive(Debug, Clone, Default)]
+pub struct WeatherParticles {
+    /// x, y, z from 0 to 1, and w a random number of its own.
+    places: Vec<Vec4>,
+    rain_fall: Vec3,
+    snow_fall: Vec3,
+    mote_fall: Vec3,
+    /// Where the pattern is, as the world's origin moves: see [`WeatherParticles::shift`].
+    moved: Vec3,
+    clock: f32,
+    instances: Vec<ParticleInstance>,
+}
+
+impl WeatherParticles {
+    /// Keeps every drop where it is in the world as the origin moves and local positions
+    /// change by `offset`.
+    pub fn shift(&mut self, offset: Vec3) {
+        self.moved = (self.moved + offset).rem_euclid(FALL_REACH * 2.0);
+    }
+
+    pub fn update(&mut self, dt: f32, camera: Vec3, env: &Environment) {
+        self.instances.clear();
+        let under = env.water.submerged.clamp(0.0, 1.0);
+        let (rain, snow) = (env.precipitation.rain.clamp(0.0, 1.0), env.precipitation.snow.clamp(0.0, 1.0));
+        // From under the water, it doesn't rain.
+        let (rain, snow) = (rain * (1.0 - under), snow * (1.0 - under));
+        if rain <= 0.0 && snow <= 0.0 && under <= 0.0 {
+            return;
+        }
+        if self.places.is_empty() {
+            let mut rng = Rng::new(0x7261696e);
+            self.places =
+                (0..RAINDROPS.max(SNOWFLAKES)).map(|_| Vec4::new(rng.f32(), rng.f32(), rng.f32(), rng.f32())).collect();
+        }
+        let dir = env.wind.direction.normalize_or(glam::Vec2::X);
+        let wind = Vec3::new(dir.x, 0.0, dir.y) * env.wind.strength * env.wind.scale;
+        let rain_velocity = wind * 1.6 + Vec3::NEG_Y * 17.0;
+        let snow_velocity = wind * 0.7 + Vec3::NEG_Y * 1.3;
+        self.rain_fall += rain_velocity * dt;
+        self.snow_fall += snow_velocity * dt;
+        self.clock += dt;
+
+        let center = camera + Vec3::Y * FALL_ABOVE;
+        let drops = (rain * RAINDROPS as f32) as usize;
+        for place in &self.places[..drops] {
+            let speed = 0.85 + 0.3 * place.w;
+            let Some((position, fade)) =
+                fall_position(*place, self.rain_fall * speed + self.moved, center, camera, 2.5)
+            else {
+                continue;
+            };
+            self.instances.push(ParticleInstance {
+                position: position.to_array(),
+                size: 0.035,
+                color: [0.72, 0.8, 0.95, 0.3 * fade],
+                stretch: (rain_velocity * speed * 0.03).to_array(),
+                rotation: 0.0,
+                emissive: 0.15,
+                lit: 0.85,
+                additive: 0.35,
+                shape: 0.0,
+                ..ParticleInstance::PLAIN
+            });
+        }
+        let flakes = (snow * SNOWFLAKES as f32) as usize;
+        for place in &self.places[..flakes] {
+            let speed = 0.75 + 0.5 * place.w;
+            let phase = place.w * 40.0;
+            let sway = Vec3::new((self.clock * 0.7 + phase).sin(), 0.0, (self.clock * 0.53 + phase * 1.7).cos()) * 0.5;
+            let Some((position, fade)) =
+                fall_position(*place, self.snow_fall * speed + sway + self.moved, center, camera, 0.4)
+            else {
+                continue;
+            };
+            self.instances.push(ParticleInstance {
+                position: position.to_array(),
+                size: 0.07 + 0.07 * place.w,
+                color: [0.92, 0.95, 1.0, 0.9 * fade],
+                stretch: [0.0; 3],
+                rotation: phase,
+                emissive: 0.1,
+                lit: 0.9,
+                additive: 0.1,
+                shape: 1.0,
+                ..ParticleInstance::PLAIN
+            });
+        }
+        if under <= 0.0 {
+            return;
+        }
+        self.mote_fall += (wind * 0.04 + Vec3::NEG_Y * 0.07) * dt;
+        let tint = env.water.look.shallow.lerp(Vec3::ONE, 0.5);
+        for place in &self.places[..MOTES] {
+            let phase = place.w * 40.0;
+            let sway = Vec3::new((self.clock * 0.3 + phase).sin(), (self.clock * 0.2 + phase).cos(), 0.0) * 0.2;
+            let Some((position, fade)) = fall_position(*place, self.mote_fall + sway + self.moved, camera, camera, 0.4)
+            else {
+                continue;
+            };
+            if position.y > env.water.level {
+                continue;
+            }
+            self.instances.push(ParticleInstance {
+                position: position.to_array(),
+                size: 0.02 + 0.04 * place.w,
+                color: [tint.x, tint.y, tint.z, 0.4 * fade * under],
+                stretch: [0.0; 3],
+                rotation: phase,
+                emissive: 0.2,
+                lit: 0.6,
+                additive: 0.3,
+                shape: 1.0,
+                ..ParticleInstance::PLAIN
+            });
+        }
+    }
+
+    /// Everything falling now, for the renderer.
+    pub fn collect(&self, out: &mut Vec<ParticleInstance>) {
+        out.extend_from_slice(&self.instances);
+    }
+}
+
+/// Where a falling particle is in the box around `center`, and how much it shows: it
+/// fades out at the sides, so none pop as they wrap, and within `clear` of the camera, where
+/// it would look huge.
+fn fall_position(place: Vec4, fall: Vec3, center: Vec3, camera: Vec3, clear: f32) -> Option<(Vec3, f32)> {
+    let size = FALL_REACH * 2.0;
+    let offset = (place.truncate() * size + fall - center + FALL_REACH).rem_euclid(size) - FALL_REACH;
+    let edge = (offset.x.abs() / FALL_REACH.x).max(offset.z.abs() / FALL_REACH.z);
+    let side_fade = ((1.0 - edge) / 0.2).clamp(0.0, 1.0);
+    let position = center + offset;
+    let near_fade = ((position.distance(camera) - clear) / 2.0).clamp(0.0, 1.0);
+    let fade = side_fade * near_fade;
+    (fade > 0.0).then_some((position, fade))
+}
+
+/// The part of `ParticleDesc::max_distance`, at its far end, over which an effect fades out.
+const DISTANCE_FADE: f32 = 0.25;
+
+/// How much of an effect shows at `distance` from the camera: all of it up to the last
+/// `DISTANCE_FADE` of `max_distance`, and nothing from there on, smoothly.
+fn distance_fade(distance: f32, max_distance: f32) -> f32 {
+    let from = max_distance * (1.0 - DISTANCE_FADE);
+    let t = ((distance - from) / (max_distance - from).max(1e-4)).clamp(0.0, 1.0);
+    1.0 - t * t * (3.0 - 2.0 * t)
 }
 
 const MIN_LIFE: f32 = 0.01;
@@ -144,6 +446,12 @@ const MIN_LIFE: f32 = 0.01;
 const MAX_STEP: f32 = 0.1;
 /// Step of the catch-up that makes a looping effect already burning when it starts.
 const PREWARM_STEP: f32 = 1.0 / 20.0;
+/// The last part of every particle's life, over which it fades to nothing.
+const LAST_FADE: f32 = 0.2;
+/// How much of a trail has burned away at its tail, on top of the particle itself.
+const TRAIL_BURN: f32 = 0.5;
+/// Radians per second of `ParticleDesc::twinkle`.
+const TWINKLE_RATE: f32 = 23.0;
 
 #[derive(Debug, Clone)]
 struct Particle {
@@ -156,6 +464,10 @@ struct Particle {
     spin: f32,
     /// Offsets its wander from the other particles'.
     phase: f32,
+    /// Where it has been, newest first.
+    trail: VecDeque<Vec3>,
+    /// Seconds since the last point of the trail.
+    trail_clock: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -165,8 +477,15 @@ struct Emitter {
     /// Particles owed by `rate` that didn't add up to a whole one yet.
     owed: f32,
     elapsed: f32,
+    /// Seconds of `ParticleDesc::delay` gone by.
+    waited: f32,
+    /// Seconds since the last `ParticleDesc::repeat`.
+    since_burst: f32,
     started: bool,
     last_origin: Vec3,
+    /// How much it shows at the camera's distance: it fades out before `max_distance`,
+    /// where it sleeps, so it never vanishes in one frame.
+    fade: f32,
 }
 
 /// The running effect of an entity, which it follows through its
@@ -185,6 +504,9 @@ pub struct ParticleSystem {
     pub emitting: bool,
     /// Remove the entity once nothing is left (only for effects that end).
     pub despawn_when_done: bool,
+    /// How far the world's origin has moved since this began, so the curls it swirls in stay
+    /// fixed in the world: see [`ParticleSystem::shift`].
+    moved: Vec3,
 }
 
 impl ParticleSystem {
@@ -197,11 +519,22 @@ impl ParticleSystem {
                 rng: Rng::new(seed.wrapping_add(desc.seed).wrapping_add(i as u64)),
                 owed: 0.0,
                 elapsed: 0.0,
+                waited: 0.0,
+                since_burst: 0.0,
                 started: false,
                 last_origin: Vec3::ZERO,
+                fade: 1.0,
             })
             .collect();
-        Self { effect, emitters, offset, scale: scale.max(0.0), emitting: true, despawn_when_done: false }
+        Self {
+            effect,
+            emitters,
+            offset,
+            scale: scale.max(0.0),
+            emitting: true,
+            despawn_when_done: false,
+            moved: Vec3::ZERO,
+        }
     }
 
     /// Advances the simulation. `allowed` is false for entities that are hidden,
@@ -212,7 +545,9 @@ impl ParticleSystem {
         let base = transform.position + transform.rotation * self.offset;
         for (desc, emitter) in self.effect.iter().zip(&mut self.emitters) {
             let origin = base + transform.rotation * (desc.position * self.scale);
-            let step = Step { desc, scale: self.scale, rotation: transform.rotation, origin, emitting };
+            let step =
+                Step { desc, scale: self.scale, rotation: transform.rotation, origin, emitting, moved: self.moved };
+            emitter.fade = distance_fade(origin.distance(camera), desc.max_distance);
             if origin.distance(camera) > desc.max_distance {
                 emitter.particles.clear();
                 emitter.owed = 0.0;
@@ -220,10 +555,28 @@ impl ParticleSystem {
                 emitter.started = !desc.looping();
                 continue;
             }
+            if emitter.waited < desc.delay {
+                emitter.waited += dt;
+                continue;
+            }
             if !emitter.started {
                 emitter.start(&step);
             }
             emitter.step(&step, dt);
+        }
+    }
+
+    /// Moves every live particle by `offset`, as the world's origin moves the other way.
+    pub fn shift(&mut self, offset: Vec3) {
+        self.moved -= offset;
+        for emitter in &mut self.emitters {
+            emitter.last_origin += offset;
+            for p in &mut emitter.particles {
+                p.position += offset;
+                for point in &mut p.trail {
+                    *point += offset;
+                }
+            }
         }
     }
 
@@ -245,27 +598,81 @@ impl ParticleSystem {
     /// Adds every live particle to `out`, as it looks now.
     pub fn collect(&self, out: &mut Vec<ParticleInstance>) {
         for (desc, emitter) in self.effect.iter().zip(&self.emitters) {
-            let shape = match desc.shape {
-                ParticleShape::Soft => 0.0,
-                ParticleShape::Diamond => 1.0,
-            };
-            out.extend(emitter.particles.iter().map(|p| {
+            let key = |t| sample(&desc.ramp, t, Vec4::lerp, Vec4::ONE).to_array();
+            let (rim, body, heart) = (key(0.0), key(0.5), key(1.0));
+            let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
+            let full = !desc.ramp.is_empty()
+                || !desc.erode.is_empty()
+                || desc.grain > 0.0
+                || desc.warp > 0.0
+                || desc.pixels > 0.0
+                || desc.soft > 0.0
+                || desc.distort > 0.0
+                || !matches!(desc.shape, ParticleShape::Soft | ParticleShape::Diamond);
+            let flat = if desc.flat { 10.0 } else { 0.0 };
+            for p in &emitter.particles {
                 let t = p.age / p.life;
-                let color = sample(&desc.colors, t, Vec4::lerp, Vec4::ONE);
-                ParticleInstance {
-                    position: p.position.into(),
-                    size: p.size * sample(&desc.sizes, t, |a, b, t| a + (b - a) * t, 0.2) * self.scale,
+                let mut color = sample(&desc.colors, t, Vec4::lerp, Vec4::ONE);
+                color.w *= emitter.fade;
+                color.w *= 1.0 - desc.twinkle * (0.5 + 0.5 * (p.age * TWINKLE_RATE + p.phase * 5.0).sin());
+                color.w *= last_fade(t);
+                let size = p.size * sample(&desc.sizes, t, lerp, 0.2) * self.scale;
+                let upright = desc.upright > 0.0;
+                let stretch = if upright { Vec3::Y * size * 0.5 * desc.upright } else { p.velocity * desc.stretch };
+                let rooted = if upright { stretch + Vec3::Y * size * 0.5 } else { Vec3::ZERO };
+                let burned = sample(&desc.erode, t, lerp, 0.0);
+                let flag = f32::from(u8::from(full));
+                let seed = p.phase / std::f32::consts::TAU;
+                let head = ParticleInstance {
+                    position: (p.position + rooted).into(),
+                    size,
                     color: color.into(),
-                    stretch: (p.velocity * desc.stretch).into(),
-                    rotation: p.rotation,
+                    stretch: stretch.into(),
+                    rotation: if upright { std::f32::consts::FRAC_PI_2 } else { p.rotation },
                     emissive: desc.emissive,
                     lit: desc.lit,
                     additive: desc.additive,
-                    shape,
+                    shape: desc.shape.index() + flat,
+                    look: [burned, desc.pixels, desc.soft * self.scale, desc.distort],
+                    flow: [desc.flow.x, desc.flow.y, desc.noise, desc.warp],
+                    detail: [desc.bands, seed, desc.grain, flag],
+                    rim,
+                    body,
+                    heart,
+                };
+                out.push(head);
+
+                let mut from = p.position;
+                let mut meters = 0.0;
+                let pieces = p.trail.len().max(1) as f32;
+                for (i, &to) in p.trail.iter().enumerate() {
+                    let s = (i as f32 + 0.5) / pieces;
+                    let half = (to - from) * 0.5;
+                    let length = half.length();
+                    out.push(ParticleInstance {
+                        position: (from + half).into(),
+                        size: size * (1.0 - s),
+                        color: [color.x, color.y, color.z, color.w * (1.0 - s)],
+                        stretch: half.into(),
+                        rotation: meters + length,
+                        shape: 5.0,
+                        look: [burned + s * TRAIL_BURN, desc.pixels, desc.soft * self.scale, 0.0],
+                        detail: [desc.bands, seed, desc.grain, 1.0],
+                        ..head
+                    });
+                    meters += length * 2.0;
+                    from = to;
                 }
-            }));
+            }
         }
     }
+}
+
+/// How much is left of a particle `t` (0..1) through its life. A particle dying while it can
+/// still be seen would blink out, so a file that forgets to fade one doesn't get to show that.
+fn last_fade(t: f32) -> f32 {
+    let left = ((1.0 - t) / LAST_FADE).clamp(0.0, 1.0);
+    left * left * (3.0 - 2.0 * left)
 }
 
 /// The value at `t` (0..1) of `keys` evenly spaced over 0..1.
@@ -279,6 +686,16 @@ fn sample<T: Copy>(keys: &[T], t: f32, lerp: impl Fn(T, T, f32) -> T, empty: T) 
     }
 }
 
+/// A flow that neither gathers nor spreads, so particles carried by it swirl around each
+/// other: the curl of a few sine waves that slowly move. `p` is in units of the curls' size.
+fn curl_flow(p: Vec3, t: f32) -> Vec3 {
+    // Derivatives of the potential (a, b, c), where each depends on the other two axes.
+    let (ay, az) = ((p.y * 1.1 + t * 0.6).cos() * 1.1, (p.z * 2.3 - t * 0.4).cos() * 1.15);
+    let (bz, bx) = ((p.z * 1.3 + t * 0.5).cos() * 1.3, (p.x * 2.1 + t * 0.3).cos() * 1.05);
+    let (cx, cy) = ((p.x * 0.9 - t * 0.7).cos() * 0.9, (p.y * 1.9 + t * 0.2).cos() * 0.95);
+    Vec3::new(cy - bz, az - cx, bx - ay)
+}
+
 /// What one emitter needs to know this frame.
 struct Step<'a> {
     desc: &'a ParticleDesc,
@@ -286,6 +703,8 @@ struct Step<'a> {
     rotation: Quat,
     origin: Vec3,
     emitting: bool,
+    /// [`ParticleSystem::moved`].
+    moved: Vec3,
 }
 
 impl Emitter {
@@ -312,6 +731,11 @@ impl Emitter {
         let wander = desc.turbulence * step.scale * dt;
         let friction = (-desc.drag * dt).exp();
         let acceleration = desc.acceleration * step.scale * dt;
+        let carried = (step.origin - self.last_origin) * desc.local;
+        let (curl, curl_size) = (desc.curl * step.scale * dt, (desc.curl_scale * step.scale).max(1e-3));
+        let (orbit, attract) = (desc.orbit * step.scale * dt, desc.attract * step.scale * dt);
+        let axis = step.rotation * desc.direction.normalize_or(Vec3::Y);
+        let clock = self.elapsed;
         self.particles.retain_mut(|p| {
             p.age += dt;
             if p.age >= p.life {
@@ -320,13 +744,42 @@ impl Emitter {
             let (a, phase) = (p.age, p.phase);
             let drift =
                 Vec3::new((a * 4.1 + phase).sin(), (a * 3.3 + phase * 2.0).sin(), (a * 5.3 + phase * 3.0).cos());
-            p.velocity = (p.velocity + acceleration + drift * wander) * friction;
-            p.position += p.velocity * dt;
+            let mut push = acceleration + drift * wander;
+            if curl != 0.0 {
+                push += curl_flow((p.position + step.moved) / curl_size, clock) * curl;
+            }
+            if orbit != 0.0 || attract != 0.0 {
+                let to_center = (step.origin - p.position).normalize_or_zero();
+                push += to_center * attract + to_center.cross(axis).normalize_or_zero() * orbit;
+            }
+            p.velocity = (p.velocity + push) * friction;
+            // Where it was: a point at the head itself would be a piece with no length.
+            let before = p.position;
+            p.position += p.velocity * dt + carried;
+            if desc.trail > 0.0 {
+                let points = desc.trail_points.max(1) as usize;
+                let spacing = desc.trail / points as f32;
+                p.trail_clock += dt;
+                if p.trail_clock >= spacing {
+                    p.trail_clock %= spacing;
+                    p.trail.push_front(before);
+                    p.trail.truncate(points);
+                }
+            }
             p.rotation += p.spin * dt;
             true
         });
 
         self.elapsed += dt;
+        if desc.repeat > 0.0 && step.emitting {
+            self.since_burst += dt;
+            if self.since_burst >= desc.repeat {
+                self.since_burst -= desc.repeat;
+                for _ in 0..desc.burst {
+                    self.spawn(step, step.origin);
+                }
+            }
+        }
         if !step.emitting || desc.duration.is_some_and(|duration| self.elapsed > duration) {
             self.owed = 0.0;
         } else {
@@ -362,6 +815,8 @@ impl Emitter {
             rotation,
             spin,
             phase: rng.range(0.0, std::f32::consts::TAU),
+            trail: VecDeque::new(),
+            trail_clock: 0.0,
         });
     }
 }
@@ -379,7 +834,223 @@ fn cone_direction(rng: &mut Rng, axis: Vec3, spread: f32) -> Vec3 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn what_falls_follows_the_weather_and_the_camera() {
+        let falling = |rain: f32, snow: f32, camera: Vec3, seconds: u32| {
+            let mut env = Environment::default();
+            env.precipitation.rain = rain;
+            env.precipitation.snow = snow;
+            let mut field = WeatherParticles::default();
+            for _ in 0..seconds {
+                field.update(1.0, camera, &env);
+            }
+            let mut out = Vec::new();
+            field.collect(&mut out);
+            out
+        };
+        assert!(falling(0.0, 0.0, Vec3::ZERO, 3).is_empty());
+        let (light, heavy) = (falling(0.25, 0.0, Vec3::ZERO, 3), falling(1.0, 0.0, Vec3::ZERO, 3));
+        assert!(light.len() > 200 && heavy.len() > light.len() * 3, "{} {}", light.len(), heavy.len());
+        assert!(heavy.iter().all(|p| p.stretch[1] < 0.0), "rain is drawn along its fall");
+        let flakes = falling(0.0, 1.0, Vec3::ZERO, 3);
+        assert!(flakes.len() > 500 && flakes.iter().all(|p| p.stretch == [0.0; 3] && p.shape == 1.0));
+
+        let far = Vec3::new(5000.0, 80.0, -3000.0);
+        for p in falling(1.0, 1.0, far, 7) {
+            let offset = Vec3::from(p.position) - far - Vec3::Y * FALL_ABOVE;
+            assert!(offset.abs().cmple(FALL_REACH + Vec3::splat(0.01)).all(), "{offset} is out of the box");
+            assert!(p.color[3] > 0.0);
+        }
+    }
+
     use super::*;
+
+    #[test]
+    fn a_trail_follows_the_path_and_thins_out() {
+        let desc = ParticleDesc {
+            rate: 0.0,
+            burst: 1,
+            lifetime: (9.0, 9.0),
+            speed: (2.0, 2.0),
+            direction: Vec3::X,
+            spread: 0.0,
+            sizes: vec![0.5],
+            trail: 0.5,
+            trail_points: 5,
+            ..Default::default()
+        };
+        let mut comet = system(desc);
+        run(&mut comet, &Transform::IDENTITY, 2.0);
+        let all = instances(&comet);
+        assert_eq!(all.len(), 6, "the head and five pieces");
+        let (head, pieces) = all.split_first().unwrap();
+        assert!(pieces.iter().all(|p| p.shape == 5.0 && p.detail[3] == 1.0));
+        assert!(pieces.iter().all(|p| p.position[0] < head.position[0]), "behind it");
+        // Each piece starts where the one before it ends, and is thinner and fainter.
+        for pair in pieces.windows(2) {
+            let end = Vec3::from(pair[0].position) + Vec3::from(pair[0].stretch);
+            let start = Vec3::from(pair[1].position) - Vec3::from(pair[1].stretch);
+            assert!(end.distance(start) < 1e-4, "{end} {start}");
+            assert!(pair[1].size < pair[0].size && pair[1].color[3] < pair[0].color[3]);
+            assert!(pair[1].look[0] > pair[0].look[0], "and more burned");
+            assert!(pair[1].rotation > pair[0].rotation, "counting the meters from the head");
+        }
+    }
+
+    #[test]
+    fn nothing_blinks_out_at_the_end_of_its_life() {
+        // Solid to the end as far as its file goes, and hard edged.
+        let desc = ParticleDesc {
+            rate: 0.0,
+            burst: 1,
+            lifetime: (1.0, 1.0),
+            sizes: vec![1.0],
+            shape: ParticleShape::Ring,
+            bands: 3.0,
+            ..Default::default()
+        };
+        let mut wave = system(desc);
+        let mut last = 1.0;
+        loop {
+            wave.update(&Transform::IDENTITY, DT, NEAR, true);
+            let Some(now) = instances(&wave).first().map(|p| p.color[3]) else { break };
+            assert!(last - now < 0.15, "dropped from {last} to {now} in one frame");
+            last = now;
+        }
+        assert!(last < 0.02, "still at {last} on its last frame");
+    }
+
+    #[test]
+    fn repeat_beats_until_it_is_switched_off() {
+        let desc = ParticleDesc { rate: 0.0, burst: 2, repeat: 0.5, lifetime: (0.1, 0.1), ..Default::default() };
+        let mut heart = system(desc);
+        let mut beats = 0;
+        let mut before = 0;
+        for _ in 0..130 {
+            heart.update(&Transform::IDENTITY, DT, NEAR, true);
+            let now = heart.particle_count();
+            beats += usize::from(now > before);
+            before = now;
+        }
+        assert!((4..=7).contains(&beats), "{beats} beats in about two seconds");
+        assert!(!heart.finished(), "it never ends");
+        heart.emitting = false;
+        run(&mut heart, &Transform::IDENTITY, 1.0);
+        assert_eq!(heart.particle_count(), 0);
+    }
+
+    #[test]
+    fn flat_is_marked_on_the_shape() {
+        let desc = ParticleDesc { rate: 0.0, burst: 1, flat: true, shape: ParticleShape::Ring, ..Default::default() };
+        let mut ring = system(desc);
+        ring.update(&Transform::IDENTITY, DT, NEAR, true);
+        assert_eq!(instances(&ring)[0].shape, 13.0);
+    }
+
+    #[test]
+    fn delay_holds_an_emitter_back() {
+        let desc = ParticleDesc { rate: 0.0, burst: 3, delay: 0.5, ..Default::default() };
+        let mut late = system(desc);
+        run(&mut late, &Transform::IDENTITY, 0.4);
+        assert_eq!(late.particle_count(), 0);
+        assert!(!late.finished(), "hasn't played yet");
+        run(&mut late, &Transform::IDENTITY, 0.2);
+        assert_eq!(late.particle_count(), 3);
+    }
+
+    #[test]
+    fn local_particles_go_along_with_the_emitter() {
+        let desc = ParticleDesc { rate: 0.0, burst: 1, lifetime: (9.0, 9.0), local: 1.0, ..Default::default() };
+        let mut flame = system(desc);
+        run(&mut flame, &Transform::IDENTITY, 0.1);
+        run(&mut flame, &Transform::from_position(Vec3::X * 5.0), 0.1);
+        assert!((instances(&flame)[0].position[0] - 5.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn the_curl_flow_turns_without_gathering() {
+        // A field without divergence neither piles particles up nor scatters them.
+        let e = 1e-2;
+        for p in [Vec3::ZERO, Vec3::new(1.3, -0.4, 2.2), Vec3::new(-3.0, 5.0, 0.7)] {
+            let d = |axis: Vec3| (curl_flow(p + axis * e, 0.4) - curl_flow(p - axis * e, 0.4)) / (2.0 * e);
+            let divergence = d(Vec3::X).x + d(Vec3::Y).y + d(Vec3::Z).z;
+            assert!(divergence.abs() < 1e-2, "{divergence} at {p}");
+            assert!(curl_flow(p, 0.4).length() > 0.0);
+        }
+    }
+
+    #[test]
+    fn orbit_circles_and_attract_gathers() {
+        let around = ParticleDesc {
+            rate: 0.0,
+            burst: 1,
+            lifetime: (9.0, 9.0),
+            position: Vec3::ZERO,
+            area: Vec3::ZERO,
+            orbit: 4.0,
+            ..Default::default()
+        };
+        let start = Transform::from_position(Vec3::X);
+        let mut vortex = system(around.clone());
+        vortex.update(&start, DT, NEAR, true);
+        // The emitter moves away, leaving the particle off to one side of it.
+        run(&mut vortex, &Transform::IDENTITY, 0.5);
+        let p = Vec3::from(instances(&vortex)[0].position);
+        assert!(p.z.abs() > 0.05, "pushed sideways: {p}");
+        assert!(p.y.abs() < 1e-3, "and around the up axis only: {p}");
+
+        let mut pull = system(ParticleDesc { orbit: 0.0, attract: 4.0, ..around });
+        pull.update(&start, DT, NEAR, true);
+        run(&mut pull, &Transform::IDENTITY, 0.4);
+        assert!(instances(&pull)[0].position[0] < 0.9, "drawn in");
+    }
+
+    #[test]
+    fn plain_particles_stay_plain_and_a_ramp_turns_on_the_full_look() {
+        let plain = system(ParticleDesc { rate: 0.0, burst: 1, ..Default::default() });
+        let full = ParticleDesc {
+            rate: 0.0,
+            burst: 1,
+            lifetime: (1.0, 1.0),
+            ramp: vec![Vec4::X, Vec4::Y, Vec4::Z],
+            erode: vec![0.0, 1.0],
+            pixels: 40.0,
+            distort: 0.1,
+            ..Default::default()
+        };
+        let mut burn = system(full);
+        let mut flat = plain;
+        flat.update(&Transform::IDENTITY, DT, NEAR, true);
+        assert_eq!(instances(&flat)[0].detail[3], 0.0);
+        run(&mut burn, &Transform::IDENTITY, 0.5);
+        let p = instances(&burn)[0];
+        assert_eq!(p.detail[3], 1.0);
+        assert_eq!((p.rim, p.body, p.heart), (Vec4::X.to_array(), Vec4::Y.to_array(), Vec4::Z.to_array()));
+        assert!((p.look[0] - 0.5).abs() < 0.05, "half burned at half its life: {}", p.look[0]);
+        assert!(p.bends());
+    }
+
+    #[test]
+    fn upright_particles_stand_up_whatever_their_motion() {
+        let desc = ParticleDesc {
+            rate: 0.0,
+            burst: 1,
+            lifetime: (9.0, 9.0),
+            speed: (3.0, 3.0),
+            direction: Vec3::X,
+            spread: 0.0,
+            sizes: vec![2.0],
+            upright: 1.0,
+            spin: 90.0,
+            ..Default::default()
+        };
+        let mut flame = system(desc);
+        run(&mut flame, &Transform::IDENTITY, 0.2);
+        let p = instances(&flame)[0];
+        assert_eq!(p.stretch, [0.0, 1.0, 0.0]);
+        assert!(p.position[1] > 1.9, "stands on its position: {}", p.position[1]);
+        assert_eq!(p.rotation, std::f32::consts::FRAC_PI_2);
+    }
 
     const DT: f32 = 1.0 / 60.0;
     const NEAR: Vec3 = Vec3::ZERO;
@@ -465,6 +1136,24 @@ mod tests {
         assert_eq!(fire.particle_count(), 0);
         fire.update(&Transform::IDENTITY, DT, NEAR, true);
         assert!(fire.particle_count() > 50, "prewarmed again");
+    }
+
+    #[test]
+    fn far_emitters_fade_out_before_they_sleep() {
+        let desc = ParticleDesc { rate: 60.0, lifetime: (1.0, 1.0), max_distance: 40.0, ..Default::default() };
+        let mut fire = system(desc);
+        // The most any particle shows, as the camera backs away a step at a time.
+        let mut last = 1.0f32;
+        for step in 0..=80 {
+            let camera = Vec3::new(20.0 + step as f32 * 0.25, 0.0, 0.0);
+            fire.update(&Transform::IDENTITY, DT, camera, true);
+            let mut out = Vec::new();
+            fire.collect(&mut out);
+            let shown = out.iter().map(|p| p.color[3]).fold(0.0, f32::max);
+            assert!(last - shown < 0.08, "it jumped from {last} to {shown} at {}", camera.x);
+            last = shown;
+        }
+        assert_eq!(last, 0.0, "asleep past its distance");
     }
 
     #[test]

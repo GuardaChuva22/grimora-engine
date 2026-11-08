@@ -1,0 +1,71 @@
+// A jellyfish: it has no brain, and goes where the water takes it. It beats to stay at its depth
+// and turns from the shallows while it can, and a storm throws it on the beach for the crabs.
+SpeciesDesc(
+    name: "agua_viva",
+    description: "Sobe e desce sem cérebro nem pressa. Queima o que encosta, mesmo morta na areia.",
+    life: Drifting,
+    model: "../models/animals/Agua-Viva.glb",
+    forward: (0.0, 0.0, 1.0),
+    size: (0.8, 1.5),
+    // Its own light at night: 1 glows at its color.
+    glow: 0.9,
+    swim: (
+        // `delay` is in whole beats. The bell closes on `squeeze`, and the arms and tentacles
+        // follow out and in, each a little later.
+        wave: [
+            (joint: "Crown", delay: 0.0, squeeze: (0.86, 1.12, 0.86)),
+            (joint: "Rim", delay: 0.02, squeeze: (0.72, 1.0, 0.72)),
+            (joint: "Tentacle.01.Upper", radial: true, sway: 14.0, delay: 0.08),
+            (joint: "Tentacle.01.Lower", radial: true, sway: -18.0, delay: 0.2),
+            (joint: "Tentacle.02.Upper", radial: true, sway: 11.0, delay: 0.12),
+            (joint: "Tentacle.02.Lower", radial: true, sway: -15.0, delay: 0.26),
+            (joint: "Tentacle.03.Upper", radial: true, sway: 15.0, delay: 0.1),
+            (joint: "Tentacle.03.Lower", radial: true, sway: -20.0, delay: 0.24),
+            (joint: "Tentacle.04.Upper", radial: true, sway: 12.0, delay: 0.14),
+            (joint: "Tentacle.04.Lower", radial: true, sway: -16.0, delay: 0.3),
+            (joint: "Tentacle.05.Upper", radial: true, sway: 14.0, delay: 0.09),
+            (joint: "Tentacle.05.Lower", radial: true, sway: -19.0, delay: 0.22),
+            (joint: "Tentacle.06.Upper", radial: true, sway: 10.0, delay: 0.13),
+            (joint: "Tentacle.06.Lower", radial: true, sway: -14.0, delay: 0.28),
+            (joint: "Arm.01.Upper", radial: true, sway: 8.0, delay: 0.1),
+            (joint: "Arm.01.Lower", radial: true, sway: -10.0, delay: 0.22),
+            (joint: "Arm.02.Upper", radial: true, sway: 8.0, delay: 0.14),
+            (joint: "Arm.02.Lower", radial: true, sway: -10.0, delay: 0.28),
+            (joint: "Arm.03.Upper", radial: true, sway: 8.0, delay: 0.12),
+            (joint: "Arm.03.Lower", radial: true, sway: -10.0, delay: 0.25),
+        ],
+    ),
+    drift: (
+        beat: 0.42,
+        // In m/s: what each beat adds, and how fast it would sink if it stopped. It holds still
+        // when `thrust * beat = sink * drag`.
+        thrust: 0.6,
+        sink: 0.19,
+        drag: 1.3,
+        // The current it's in, in m/s, and how much harder a storm's wind pushes it.
+        current: 0.14,
+        storm_push: 1.1,
+        day_depth: 5.0,
+        night_depth: 2.0,
+        // It starts turning back at this depth of water, and it's on the sand at the second.
+        shallowest: 3.0,
+        stranded: 0.3,
+        // Seconds on the sand before there's nothing left, and how much eating that's worth.
+        rots_in: 240.0,
+        food: 30.0,
+    ),
+    // In game days. A bloom comes and goes fast, and a storm can end it.
+    cycle: (births: 0.5, lives: 8.0, room: 1.5, arrives_every: 1.0, newborn: 0.25, grows_in: 3.0),
+    // Anything its tentacles touch, and it doesn't know it did.
+    harm: (
+        damage: 3.0,
+        reach: 0.45,
+        every: 1.2,
+        message: "Uma água-viva queimou você",
+    ),
+    sounds: (
+        harm: "../sounds/jelly_sting.wav",
+        death: "../sounds/squelch.wav",
+        volume: 0.8,
+    ),
+)

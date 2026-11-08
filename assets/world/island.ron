@@ -1,0 +1,31 @@
+// The first generated world: a small island 138 km off the Korhal coast (WorldDesc, read by
+// grimora_world). Map units: x east, y south; 1 unit = 2109.7 m. Paths are relative to here.
+(
+    map: "nyraldar/legend.ron",
+    // Empty loads every layer: Topography, Climate, Political, Water.
+    layers: [],
+    // The coast follows the base painting, which draws the island smaller than the topography.
+    coasts: [(file: "nyraldar/coast_island.png", x: 4468, y: 1673, texel: 0.5)],
+    window: (x: 4472, y: 1677, width: 8, height: 8),
+    start: (4476, 1681),
+    seed: 1,
+    // The ground's pictures (grass is tinted by the map's biome) and how far the land is drawn,
+    // in meters. Run it with `cargo run --release -p sandbox -- --world assets/world/island.ron`.
+    ground: (grass: "../textures/grama_baixa_savana.png", sand: "../textures/areia_de_praia.png",
+             rock: "../textures/rocha_laterita.png", tile: 1.8,
+             // Under the streams and ponds: pebbles, and mud where they near the sea.
+             bed: Some("../textures/leito_seixos.png"), mud: Some("../textures/lama_estuario.png")),
+    view: 16000.0,
+    // The streams and ponds are found in the ground (grimora_world's hydro.rs); this is only
+    // how they look. Pictures relative to this file; `look`s as in a scene's `rivers`. The
+    // streams' colors are close to the sea's, so a mouth runs into it without a seam.
+    fresh_water: (texture: Some("../textures/agua.png"), tile: 3.0, waves: 0.03,
+                  stream: (deep: (0.05, 0.36, 0.5), shallow: (0.3, 0.88, 0.8), clarity: 7.0, murk: 0.25,
+                           foam: 0.1, foam_color: (0.72, 0.8, 0.74)),
+                  pond: (deep: (0.04, 0.26, 0.34), shallow: (0.28, 0.66, 0.6), clarity: 5.0, murk: 0.35,
+                         foam: 0.08, foam_color: (0.72, 0.8, 0.74)),
+                  // The sea's colors (as in world.ron), which a stream takes on near its mouth.
+                  sea: Some((deep: (0.06, 0.42, 0.72), shallow: (0.3, 1.0, 0.9), clarity: 16.0))),
+    // Plants, ambience and animals by biome.
+    life: Some("life.ron"),
+)

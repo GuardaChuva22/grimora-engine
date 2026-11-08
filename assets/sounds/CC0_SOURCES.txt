@@ -1,0 +1,30 @@
+These files are recordings dedicated to the public domain (CC0 1.0 Universal,
+https://creativecommons.org/publicdomain/zero/1.0/). They were trimmed, made mono,
+matched in loudness to the sounds they replaced, and loops were given a seamless seam.
+Every other file in this folder is made by tools/gen_sounds.py.
+
+Collections they came from:
+  - "500 Game Sound Effects" (CC0 compilation; per-file sources below)
+  - "RPG Audio" by Kenney Vleugels (Kenney.nl), CC0
+
+clang_1.wav, clang_2.wav, draw_sword.wav
+    sword_clash 02 / 01 / 03 - Vehicle, "Fantasy Sound Effects (Tinysized SFX)"
+    https://opengameart.org/content/fantasy-sound-effects-tinysized-sfx
+draw_knife.wav
+    sword_unsheathe 01 - artisticdude, "RPG Sound Pack"
+    https://opengameart.org/content/rpg-sound-pack
+squelch.wav
+    slime 01 - artisticdude, "RPG Sound Pack"
+    https://opengameart.org/content/rpg-sound-pack
+fire.ogg
+    fire_loop - PagDev, "Fireplace Sound loop"
+    https://opengameart.org/content/fireplace-sound-loop
+wind.ogg
+    wind 01, 02 and 03 joined with crossfades - Luke.RUSTLTD, "wind1"
+    https://opengameart.org/content/wind1
+river.wav
+    loop_water_loop 03 - rubberduck, "100 CC0 SFX #2"
+    https://opengameart.org/content/100-cc0-sfx-2
+gun_dry.wav
+    metalLatch - Kenney, "RPG Audio"
+    https://kenney.nl/assets/rpg-audio

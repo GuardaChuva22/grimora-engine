@@ -1,0 +1,51 @@
+// A crab: it lives in a hole near the waterline, comes out mostly at night, eats what the sea
+// leaves on the sand, and defends what's around its hole. It walks sideways.
+SpeciesDesc(
+    name: "caranguejo",
+    description: "Cava uma toca e briga por ela. Só belisca quando não tem para onde fugir.",
+    life: Crawling,
+    model: "../models/animals/Caranguejo.glb",
+    forward: (0.0, 0.0, 1.0),
+    size: (0.8, 1.15),
+    shadow: true,
+    puff: "../effects/sand_puff.ron",
+    crawl: (
+        walk: 0.32,
+        run: 1.7,
+        // Radians per second it can turn its body.
+        turn: 2.4,
+        // How far a foot may be left behind before it takes a step, and how high it lifts.
+        step: 0.045,
+        lift: 0.035,
+        // Over the water and under it: where a hole can be, in meters from the level.
+        shore: (-1.4, 1.8),
+        // How far it goes from its hole, calm and hungry.
+        roam: 7.0,
+        // How far it smells something dead on the sand.
+        smell: 14.0,
+        // It stands its ground against what's closer than this, if its hole is too far.
+        cornered: 1.6,
+        // Others it will face down over its patch of sand.
+        territory: 0.75,
+        // How many of them come out by day, when the rest stay in.
+        bold: 0.25,
+    ),
+    needs: (hungry_after: 200.0, tired_after: 200.0, rested_after: 60.0),
+    senses: (notice: 2.2, calm_seconds: 8.0),
+    // In game days. Young start in a hole, out of sight.
+    cycle: (births: 0.9, lives: 25.0, room: 1.5, arrives_every: 2.0, newborn: 0.45, grows_in: 8.0),
+    // Only when it's cornered, and it doesn't stop anyone in their tracks.
+    harm: (
+        damage: 2.0,
+        reach: 0.3,
+        every: 1.4,
+        message: "Um caranguejo beliscou você",
+    ),
+    sounds: (
+        harm: "../sounds/pinch.wav",
+        death: "../sounds/crunch.wav",
+        dig: "../sounds/sand_dig.wav",
+        facing: "../sounds/crab_click.wav",
+        volume: 0.8,
+    ),
+)

@@ -84,7 +84,7 @@ fn a_saved_game_puts_pushed_crates_and_the_player_back() {
     let scene_objects = world.ecs.query::<&SceneIndex>().iter().count();
     assert!(state.objects.len() < scene_objects / 2, "only changed objects are saved: {}", state.objects.len());
     let (store, dir) = temp_store("round_trip");
-    let file = SaveFile::new(Some(SCENE.as_ref()), state, player.state());
+    let file = SaveFile::new(Some(SCENE.as_ref()), state, player.state(world.origin()));
     let path = store.write("slot_1", &file).unwrap();
     assert!(path.ends_with("slot_1.ron") && !path.with_extension("ron.tmp").exists());
     let read: SaveFile<CharacterState> = store.read("slot_1").unwrap();
@@ -101,13 +101,13 @@ fn a_saved_game_puts_pushed_crates_and_the_player_back() {
 
     // Loading puts everything back, the physics bodies included.
     let unmatched = read.world.restore(&mut world, &mut physics, &mut camera);
-    player.restore(&read.game);
+    player.restore(&read.game, world.origin());
     assert_eq!(unmatched, 0);
     assert_eq!(transform(&world, crate_entity), pushed, "entities keep their ids across a load");
     assert_eq!(transform(&world, stone), stone_at_save, "the stone rolled after saving; it goes back");
     assert!(!world.get::<Renderable>(altar).unwrap().visible);
-    assert_eq!(camera.position, saved_camera.position);
-    assert_eq!(player.state(), read.game);
+    assert_eq!(world.origin().to_world(camera.position), saved_camera.position);
+    assert_eq!(player.state(world.origin()), read.game);
     settle(&mut physics, &mut world, 1.0);
     assert!(transform(&world, crate_entity).position.distance(pushed.position) < 0.05);
     assert!(transform(&world, stone).position.distance(stone_at_save.position) < 0.05);
@@ -219,4 +219,38 @@ fn a_saved_game_keeps_the_hour() {
     world.set_time_of_day(15.0);
     old.restore(&mut world, &mut physics, &mut camera);
     assert_eq!(world.time_of_day(), Some(15.0));
+}
+
+#[test]
+fn saves_hold_world_positions_whatever_the_origin() {
+    let (mut physics, mut world) = sandbox();
+    settle(&mut physics, &mut world, 0.5);
+    let crate_entity = entity(&world, "crate");
+    let mut camera = Camera { position: Vec3::new(3.0, 6.0, 20.0), ..Camera::default() };
+    let mut player = ThirdPersonController::new(Vec3::new(-2.75, world.ground_height(-2.75, 14.0) + 0.1, 14.0), 0.0);
+    walk(&mut physics, &mut world, &mut player, &mut camera, 2.0);
+    settle(&mut physics, &mut world, 2.0);
+    let pushed = world.origin().to_world(transform(&world, crate_entity).position);
+
+    // The origin goes a long way off, as it would after a long walk, and everything goes with it.
+    let delta = Vec3::new(4096.0, 0.0, -2048.0);
+    world.shift_origin(delta, &mut physics);
+    camera.position -= delta;
+    player.shift(-delta);
+    let state = WorldState::capture(&world, &physics, &camera);
+    let saved = player.state(world.origin());
+    let crate_index = scene_index(&world, crate_entity);
+    let crate_state = state.objects.iter().find(|o| o.index == crate_index).unwrap();
+    assert!(crate_state.transform.position.distance(pushed) < 1e-3, "{} {pushed}", crate_state.transform.position);
+
+    // A fresh world, with the origin at zero again, puts it all where it was in the world.
+    let (mut physics, mut world) = sandbox();
+    let mut camera = Camera::default();
+    state.restore(&mut world, &mut physics, &mut camera);
+    let mut player = ThirdPersonController::new(Vec3::ZERO, 0.0);
+    player.restore(&saved, world.origin());
+    let crate_entity = entity(&world, "crate");
+    assert!(world.origin().to_world(transform(&world, crate_entity).position).distance(pushed) < 1e-3);
+    assert!(world.origin().to_world(camera.position).distance(state.camera.position) < 1e-3);
+    assert!(world.origin().to_world(player.body.position).distance(saved.position) < 1e-3);
 }

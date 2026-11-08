@@ -122,3 +122,49 @@ fn regions_load_in_the_background_and_unload_when_left() {
     assert_eq!(mesh_count(&world), meshes);
     std::fs::remove_dir_all(Path::new(&dir)).ok();
 }
+
+/// A region's lake and river answer `water_at` while the region is loaded, follow an origin
+/// shift, and go away with it.
+#[test]
+fn a_region_s_water_is_there_to_swim_in_while_it_is_loaded() {
+    let dir = std::env::temp_dir().join(format!("grimora_region_water_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("lake.ron"),
+        "(water: [(position: (100.0, 1.0, 0.0), size: (20.0, 20.0))],
+          rivers: [(points: [(80.0, 2.0, 30.0), (120.0, 1.5, 30.0)], width: 4.0)])",
+    )
+    .unwrap();
+    let desc = SceneDesc::parse(
+        "(streaming: (cell_size: 32.0, load_distance: 40.0),
+          water: [(position: (-300.0, 0.0, 0.0), size: (10.0, 10.0))],
+          regions: [(path: \"lake.ron\", center: (100.0, 0.0, 0.0), radius: 5.0)])",
+    )
+    .unwrap();
+    let scene = Scene::build_in(&desc, &dir);
+    let mut physics = Physics::new();
+    let mut world = World::from_scene(scene, &mut physics);
+    let lake = Vec3::new(100.0, 0.0, 0.0);
+    world.load_around(Vec3::ZERO, &mut physics);
+    assert!(world.water_at(lake.x, lake.z).is_none(), "not loaded yet");
+    assert!(world.water_at(-300.0, 0.0).is_some(), "the scene's own lake is always there");
+
+    stream_until(&mut world, &mut physics, lake, |w| w.water_at(lake.x, lake.z).is_some());
+    assert!((world.water_at(lake.x, lake.z).unwrap().level - 1.0).abs() < 0.2);
+    let river = world.water_at(100.0, 30.0).expect("the region's river");
+    assert!(river.flow.x > 0.5, "{river:?}");
+    assert!(world.water_at(-300.0, 0.0).is_some());
+
+    let delta = Vec3::new(-512.0, 0.0, 256.0);
+    world.shift_origin(delta, &mut physics);
+    let moved = lake - delta;
+    assert!((world.water_at(moved.x, moved.z).unwrap().level - 1.0).abs() < 0.2, "moved with the origin");
+    assert!(world.water_at(lake.x, lake.z).is_none());
+
+    let away = Vec3::new(-300.0, 0.0, 0.0) - delta;
+    stream_until(&mut world, &mut physics, away, |w| w.streaming_stats().unwrap().loaded_regions == 0);
+    assert!(world.water_at(moved.x, moved.z).is_none(), "unloaded with its region");
+    assert!(world.water_at(away.x, away.z).is_some());
+    assert_eq!(world.waters.bodies.len(), 1);
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -1,7 +1,8 @@
 //! The hand on the handle, measured on the skinned mesh: the skin must close around the handle
 //! without sinking into it. `cargo test -p grimora_scene --test grip -- --nocapture` prints it.
 
-use glam::{Mat4, Quat, Vec3};
+use glam::{EulerRot, Mat4, Quat, Vec3};
+use grimora_core::Animator;
 use grimora_scene::{DEFAULT_MAX_TEXTURE_SIZE, load_model};
 
 const MODEL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/models/chartest/chartest.gltf");
@@ -118,7 +119,7 @@ fn the_blade_is_carried_where_the_file_says() {
     let skeleton = mesh.skeleton.as_ref().unwrap();
     let joint = |name: &str| skeleton.joint(name).unwrap();
     let (forearm, hand, weapon) = (joint("forearm.R"), joint("hand.R"), joint("weapon.R"));
-    let aim = Vec3::new(0.3, -0.42, -0.86).normalize();
+    let aim = Vec3::new(0.3, -0.34, -0.89).normalize();
     let rest_hand = skeleton.rest_pose()[hand].rotation;
     for name in ["sword_idle", "sword_walk", "sword_run"] {
         let clip = skeleton.clips.iter().find(|clip| clip.name == name).unwrap();
@@ -140,5 +141,103 @@ fn the_blade_is_carried_where_the_file_says() {
         if name == "sword_idle" {
             assert!(off < 15.0, "{name}: the blade strays {off:.0} deg from where it's carried");
         }
+        assert!(bent < 32.0, "{name}: the wrist bends {bent:.0} deg just to carry the sword");
     }
+}
+
+/// Plays `clip` for a moment with the right hand empty: the animator and the joints' places.
+fn empty_handed(clip: &str, placed: bool) -> (Animator, Vec<Mat4>) {
+    let mesh = load_model(MODEL.as_ref(), DEFAULT_MAX_TEXTURE_SIZE).unwrap();
+    let mut animator = Animator::new(mesh.skeleton.clone().unwrap());
+    assert!(animator.play(clip, 0.0), "no clip {clip}");
+    animator.set_hand_empty(true);
+    animator.set_hand_placed(placed);
+    animator.update(1.0);
+    let mut globals = Vec::new();
+    animator.skeleton().global_transforms(animator.pose(), &mut globals);
+    (animator, globals)
+}
+
+#[test]
+fn an_empty_hand_lets_go_and_hangs_in_line_with_the_forearm() {
+    for clip in ["sword_idle", "sword_walk", "sword_back", "sword_strafe_l"] {
+        let (mut animator, globals) = empty_handed(clip, false);
+        let skeleton = animator.skeleton().clone();
+        let at = |name: &str| globals[skeleton.joint(name).unwrap()].w_axis.truncate();
+        let bend = (at("hand.R") - at("forearm.R")).angle_between(at("fingers.R") - at("hand.R")).to_degrees();
+        println!("[empty] {clip}: the wrist bends {bend:.0} deg");
+        assert!(bend < 22.0, "{clip}: the empty hand bends {bend:.0} deg at the wrist");
+
+        // Something in it: the fingers close again, the way the clip has them.
+        let fingers = skeleton.joint("fingers.R").unwrap();
+        let open = animator.pose()[fingers].rotation;
+        animator.set_hand_empty(false);
+        animator.update(1.0);
+        let closed = animator.pose()[fingers].rotation;
+        assert!(open.angle_between(closed).to_degrees() > 20.0, "{clip}: the hand doesn't close");
+        assert!(closed.angle_between(skeleton.joints[fingers].rest.rotation).to_degrees() < 1.0);
+    }
+}
+
+#[test]
+fn the_reading_hand_lies_on_the_page_with_both_elbows_bent() {
+    /// The open book at this scale, on the left hand, from `items.ron`.
+    const SCALE: f32 = 1.25;
+    /// In the book's own units: the top of the pages, and the right page.
+    const PAGE_TOP: f32 = 0.027;
+    const PAGE_ACROSS: (f32, f32) = (-0.086, 0.087);
+    const PAGE_DEEP: f32 = 0.122;
+    let (animator, globals) = empty_handed("book_hold", true);
+    let skeleton = animator.skeleton();
+    let joint = |name: &str| skeleton.joint(name).unwrap();
+    let at = |name: &str| globals[joint(name)].w_axis.truncate();
+    for (side, upper, forearm, hand) in
+        [("right", "upper_arm.R", "forearm.R", "hand.R"), ("left", "upper_arm.L", "forearm.L", "hand.L")]
+    {
+        let elbow = (at(upper) - at(forearm)).angle_between(at(hand) - at(forearm)).to_degrees();
+        println!("[book] {side} elbow {elbow:.0} deg");
+        assert!((70.0..135.0).contains(&elbow), "the {side} elbow is at {elbow:.0} deg");
+    }
+
+    let hold = Mat4::from_scale_rotation_translation(
+        Vec3::splat(SCALE),
+        Quat::from_euler(EulerRot::YXZ, -121.3f32.to_radians(), 74.8f32.to_radians(), 98.2f32.to_radians()),
+        Vec3::new(-0.069, 0.133, -0.091),
+    );
+    let to_book = (globals[joint("hand.L")] * hold).inverse();
+    let skin: Vec<Mat4> = globals.iter().zip(&skeleton.joints).map(|(g, j)| *g * j.inverse_bind).collect();
+    let (hand, mesh) = (joint("hand.R"), load_model(MODEL.as_ref(), DEFAULT_MAX_TEXTURE_SIZE).unwrap());
+    let under_hand = |mut j: usize| loop {
+        if j == hand {
+            return true;
+        }
+        match skeleton.joints[j].parent {
+            Some(parent) => j = parent,
+            None => return false,
+        }
+    };
+    let (mut lowest, mut on_page, mut total) = (f32::INFINITY, 0, 0);
+    for vertex in &mesh.vertices {
+        let (k, _) = vertex.weights.iter().enumerate().max_by_key(|(_, w)| **w).unwrap();
+        if !under_hand(vertex.joints[k] as usize) {
+            continue;
+        }
+        let mut point = Vec3::ZERO;
+        for (j, w) in vertex.joints.iter().zip(vertex.weights) {
+            point += skin[*j as usize].transform_point3(Vec3::from(vertex.position)) * (w as f32 / 255.0);
+        }
+        let local = to_book.transform_point3(point);
+        total += 1;
+        if local.x > PAGE_ACROSS.0 && local.x < PAGE_ACROSS.1 && local.z.abs() < PAGE_DEEP {
+            on_page += 1;
+            lowest = lowest.min((local.y - PAGE_TOP) * SCALE);
+        }
+    }
+    println!(
+        "[book] {on_page} of {total} hand vertices over the right page, the lowest {:.1} mm off it",
+        lowest * 1000.0
+    );
+    assert!(on_page * 2 > total, "the hand isn't over the page: {on_page} of {total}");
+    assert!(lowest > -0.006, "the hand sinks {:.1} mm into the page", -lowest * 1000.0);
+    assert!(lowest < 0.02, "the hand floats {:.1} mm over the page", lowest * 1000.0);
 }

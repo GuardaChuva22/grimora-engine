@@ -1,0 +1,59 @@
+// A gull: it wanders the coast until it's hungry, and then looks for fish near the surface
+// or for another gull going down. Lengths in meters, speeds in meters per second.
+SpeciesDesc(
+    name: "gaivota",
+    description: "Grita, circula e mergulha quando vê um cardume subir. Erra quase sempre, e nem assim desiste.",
+    life: Flying,
+    model: "../models/animals/Gaivota.glb",
+    forward: (0.0, 0.0, 1.0),
+    size: (0.9, 1.1),
+    shadow: true,
+    diet: ["sardinha"],
+    flight: (
+        cruise: 8.5,
+        dive_speed: 15.0,
+        walk: 0.55,
+        // Radians per second.
+        turn: 1.1,
+        bank: 34.0,
+        flare: 32.0,
+        altitude: (10.0, 24.0),
+        body_height: 0.23,
+        // Seconds of gliding between bouts of beating its wings, and how long a bout is.
+        glide: 6.0,
+        beat_bout: 1.6,
+        take_off: 1.8,
+        // What it can see: how far around, and how deep a fish can be to be seen from up there.
+        sight: 70.0,
+        sees_down: 2.6,
+        circle: 11.0,
+        // How far to the side of it a fish can be to dive on it, and how keen it is, per look.
+        dive_reach: 13.0,
+        dive_chance: 0.22,
+        catch_radius: 0.8,
+        plunge: 0.8,
+        under: 0.35,
+        // How much hunger one fish takes away.
+        meal: 0.9,
+        // Seconds on the water after missing, and after eating.
+        swim: (1.5, 5.0),
+    ),
+    needs: (
+        hungry_after: 420.0,
+        tired_after: 240.0,
+        rested_after: 90.0,
+    ),
+    senses: (
+        // It takes off when someone is this many times as close as a fish would notice them.
+        notice: 2.5,
+    ),
+    // In game days. Young are raised somewhere else: they arrive grown. With nothing to eat it
+    // goes away.
+    cycle: (births: 0.25, lives: 20.0, room: 1.3, starves_in: 6.0, arrives_every: 2.0),
+    sounds: (
+        calls: ["../sounds/gull_1.wav", "../sounds/gull_2.wav", "../sounds/gull_3.wav"],
+        call_every: (14.0, 40.0),
+        death: "../sounds/squelch.wav",
+        volume: 0.55,
+    ),
+)

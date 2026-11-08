@@ -20,6 +20,9 @@ const BLADE_TRAIL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/eff
 const HIT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/effects/hit.ron");
 /// The sword's scale, as in the game.
 const SWORD_SCALE: f32 = 0.263;
+/// What the `heavy_*` clips are written for, and where along its model the sword hand goes.
+const HEAVY_SWORD: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/models/weapons/zweihander.glb");
+const HEAVY_GRIP: f32 = 0.05;
 /// Where along the weapon joint the blade runs, as the combat data says.
 const BLADE: (f32, f32) = (0.11, 0.79);
 /// The target's capsule: its height and radius.
@@ -157,8 +160,11 @@ fn control_name(control: Control) -> &'static str {
         Control::Edge => "Fio",
         Control::ElbowR => "Cotovelo espada",
         Control::HandL => "Mão livre",
+        Control::HandLRot => "Giro da mão livre",
         Control::ElbowL => "Cotovelo livre",
         Control::Tuck => "Encolher (rolar)",
+        Control::GripL => "Duas mãos",
+        Control::CurlL => "Fechar mão livre",
     }
 }
 
@@ -171,11 +177,14 @@ fn control_sliders(control: Control) -> (&'static [(usize, &'static str)], f32, 
     match control {
         Control::Root => (FLOOR, 6.0, 0.005),
         Control::Hips | Control::FootL | Control::FootR | Control::HandR | Control::HandL => (POSITION, 3.0, 0.005),
-        Control::HipsRot | Control::Torso | Control::Head | Control::FootLRot | Control::FootRRot => {
-            (ANGLES, 400.0, 1.0)
-        }
+        Control::HipsRot
+        | Control::Torso
+        | Control::Head
+        | Control::FootLRot
+        | Control::FootRRot
+        | Control::HandLRot => (ANGLES, 400.0, 1.0),
         Control::ToeL | Control::ToeR => (ONE, 60.0, 1.0),
-        Control::Tuck => (ONE, 1.0, 0.01),
+        Control::Tuck | Control::GripL | Control::CurlL => (ONE, 1.0, 0.01),
         _ => (POSITION, 1.0, 0.01),
     }
 }
@@ -305,6 +314,8 @@ struct Tool {
     solved: SolvedPose,
     /// `--menu clip@seconds`, for captures.
     open_at: Option<(String, f32)>,
+    /// In the character's hand: the sword, and the big one its `heavy_*` clips show instead.
+    props: Option<(Entity, Entity)>,
     /// `--menu clip@seconds/joint`: the joint a capture looks at.
     focus: Option<String>,
 }
@@ -350,6 +361,7 @@ impl Tool {
             controls: Controls::default(),
             solved: SolvedPose::default(),
             open_at: None,
+            props: None,
             focus: None,
         }
     }
@@ -1307,8 +1319,16 @@ impl Game for Tool {
                     rotation: Quat::from_rotation_y(-std::f32::consts::FRAC_PI_2),
                     scale: Vec3::splat(SWORD_SCALE),
                 };
-                for entity in [self.avatar, self.target].into_iter().flatten() {
-                    ctx.world.attach(entity, "weapon.R", sword, hold);
+                if let Some(target) = self.target {
+                    ctx.world.attach(target, "weapon.R", sword, hold);
+                }
+                if let (Some(avatar), Ok(heavy)) =
+                    (self.avatar, load_model(HEAVY_SWORD.as_ref(), DEFAULT_MAX_TEXTURE_SIZE))
+                {
+                    let light = ctx.world.attach(avatar, "weapon.R", sword, hold);
+                    let heavy = ctx.world.add_mesh(heavy);
+                    let hold = Transform { position: Vec3::NEG_Y * HEAVY_GRIP * SWORD_SCALE, ..hold };
+                    self.props = Some((light, ctx.world.attach(avatar, "weapon.R", heavy, hold)));
                 }
             }
             Err(err) => eprintln!("[animator] {err:#}"),
@@ -1335,6 +1355,15 @@ impl Game for Tool {
         // A capture shows what its arguments ask for, whatever the real keys and mouse do.
         if ctx.config().screenshot.is_some() {
             ctx.input.clear();
+        }
+        if let Some((light, heavy)) = self.props {
+            let big = self.doc().is_some_and(|doc| doc.name.starts_with("heavy"));
+            for (prop, shown) in [(light, !big), (heavy, big)] {
+                // A joint's child copies its visibility from the character, so it goes by size.
+                if let Some(attached) = ctx.world.get_mut::<grimora::Attached>(prop) {
+                    attached.offset.scale = Vec3::splat(if shown { SWORD_SCALE } else { 1e-4 });
+                }
+            }
         }
         // The keyboard belongs to the shortcuts here, not to moving a menu's focus.
         ctx.ui.theme.text_size = 13.0;
@@ -1413,10 +1442,12 @@ fn short_name(control: Control) -> &'static str {
         Control::FootR | Control::FootRRot => "Pé dir.",
         Control::ToeL | Control::ToeR => "Dedos",
         Control::KneeL | Control::KneeR => "Joelho",
-        Control::HandR | Control::HandL => "Mão",
+        Control::HandR | Control::HandL | Control::HandLRot => "Mão",
         Control::Blade | Control::Edge => "Lâmina",
         Control::ElbowR | Control::ElbowL => "Cotov.",
         Control::Tuck => "Encolhe",
+        Control::GripL => "2 mãos",
+        Control::CurlL => "Fecha",
     }
 }
 

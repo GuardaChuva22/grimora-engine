@@ -19,7 +19,7 @@ use glam::{Vec2, Vec4};
 use grimora_core::environment::srgb_to_linear_vec;
 use grimora_core::{Input, KeyCode, MouseButton, PadButton};
 
-use crate::font::{FONT, GLYPH, Glyph, LINE};
+use crate::font::{FONT, GLYPH, Glyph, LINE, ROWS, TOP, UNIT_SIZE};
 
 /// A point of a box (or of the screen): corners, edge midpoints or centre.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -93,7 +93,8 @@ impl Rect {
 /// How [`Ui::text`] draws a string.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TextStyle {
-    /// Glyph height in logical pixels. Multiples of 8 are the crispest.
+    /// Text size in logical pixels: 8 is one logical pixel per font pixel, and multiples
+    /// of 8 are the crispest.
     pub size: f32,
     pub color: Vec4,
     /// One-pixel outline (in font pixels) around each glyph, which keeps text
@@ -142,7 +143,7 @@ impl TextStyle {
 
     /// Logical pixels per font pixel.
     fn unit(&self) -> f32 {
-        self.size.max(1.0) / GLYPH as f32
+        self.size.max(1.0) / UNIT_SIZE
     }
 }
 
@@ -157,6 +158,60 @@ pub(crate) struct UiQuad {
     /// Linear RGB and alpha.
     pub color: [f32; 4],
     pub outline: [f32; 4],
+}
+
+/// Logical pixels in one pixel of the art: dither patterns are drawn on this grid, and a
+/// window scaled by [`pixel_scale`] makes it a whole number of real pixels.
+pub const ART_PIXEL: f32 = 2.0;
+/// The side of an item's picture, in logical pixels at one pixel of art each.
+const ICON_ART: f32 = 48.0;
+
+/// The UI scale that keeps the art's pixels whole on a window this many physical pixels tall:
+/// the art is drawn for a screen 360 pixels tall, and 720 logical pixels are that screen.
+pub fn pixel_scale(height: f32) -> f32 {
+    ((height / 360.0).floor() * 0.5).max(1.0)
+}
+
+/// Texels on each side of the texture that holds the pictures of [`Ui::add_image`].
+pub(crate) const IMAGE_ATLAS: u32 = 1024;
+
+/// A picture that [`Ui::add_image`] took in, to show with [`Ui::image`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ImageId(u32);
+
+/// Every picture the UI has, side by side in one texture.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ImageAtlas {
+    /// RGBA, once there is a picture.
+    pub pixels: Vec<u8>,
+    /// Goes up with each picture added, so the renderer knows to send them again.
+    pub version: u64,
+    /// Texels of each picture: x, y, width, height.
+    rects: Vec<[u32; 4]>,
+    /// Where the next one goes, and the bottom of the row it's in.
+    pen: (u32, u32),
+    row_bottom: u32,
+}
+
+/// What a [`Ui::slot`] shows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Slot<'a> {
+    pub image: Option<ImageId>,
+    /// Shown in place of the picture, if there is none.
+    pub short: &'a str,
+    /// Shown in its corner when above 1.
+    pub count: u32,
+    /// Drawn with a bright frame: the one in use, or being moved.
+    pub marked: bool,
+}
+
+/// What happened to a [`Ui::slot`] this frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SlotResponse {
+    /// Clicked, or Enter or Space with the focus.
+    pub used: bool,
+    pub focused: bool,
+    pub hovered: bool,
 }
 
 /// What the widgets see of the mouse and keyboard this frame. The engine fills
@@ -219,20 +274,27 @@ pub struct Theme {
     pub border: Vec4,
     /// Background of slider tracks and toggle boxes.
     pub track: Vec4,
+    /// Widgets have a box around them. Without it they're lines of text on the screen, and
+    /// the one with the focus has a band that fades to the right and a pointer.
+    pub frames: bool,
+    /// Widgets write in capitals. What identifies them is still the label as given.
+    pub upper: bool,
 }
 
 impl Default for Theme {
     fn default() -> Self {
         Self {
             text_size: 24.0,
-            text: Vec4::new(0.95, 0.92, 0.86, 1.0),
-            accent: Vec4::new(1.0, 0.78, 0.42, 1.0),
-            disabled: Vec4::new(0.62, 0.59, 0.55, 0.6),
-            fill: Vec4::new(0.05, 0.04, 0.06, 0.82),
-            hover: Vec4::new(0.17, 0.13, 0.1, 0.92),
-            pressed: Vec4::new(0.3, 0.2, 0.1, 0.96),
-            border: Vec4::new(0.55, 0.43, 0.28, 0.9),
-            track: Vec4::new(0.0, 0.0, 0.0, 0.6),
+            text: Vec4::new(0.9, 0.87, 0.76, 1.0),
+            accent: Vec4::new(0.98, 0.95, 0.84, 1.0),
+            disabled: Vec4::new(0.6, 0.6, 0.58, 0.6),
+            fill: Vec4::new(0.015, 0.018, 0.05, 0.86),
+            hover: Vec4::new(0.12, 0.13, 0.22, 0.92),
+            pressed: Vec4::new(0.22, 0.22, 0.3, 0.96),
+            border: Vec4::new(0.62, 0.46, 0.58, 1.0),
+            track: Vec4::new(0.0, 0.0, 0.03, 0.6),
+            frames: true,
+            upper: false,
         }
     }
 }
@@ -256,6 +318,9 @@ struct WidgetState {
     /// keyboard moves the focus through last frame's, since this frame's aren't known yet.
     drawn: Vec<(u64, bool)>,
     drawn_before: Vec<(u64, bool)>,
+    /// Those drawn are a grid with this many columns, if not 0. Like `drawn`, this frame's and the last.
+    columns: usize,
+    columns_before: usize,
 }
 
 /// How a widget stands this frame.
@@ -283,6 +348,7 @@ pub struct Ui {
     /// How widgets are drawn; change it any time.
     pub theme: Theme,
     widgets: WidgetState,
+    images: ImageAtlas,
 }
 
 impl Default for Ui {
@@ -300,6 +366,7 @@ impl Ui {
             quads: Vec::new(),
             theme: Theme::default(),
             widgets: WidgetState::default(),
+            images: ImageAtlas::default(),
         }
     }
 
@@ -312,6 +379,7 @@ impl Ui {
         let widgets = &mut self.widgets;
         std::mem::swap(&mut widgets.drawn, &mut widgets.drawn_before);
         widgets.drawn.clear();
+        widgets.columns_before = std::mem::take(&mut widgets.columns);
         widgets.input = UiInput::default();
     }
 
@@ -321,6 +389,11 @@ impl Ui {
     }
 
     /// Gives the widgets this frame's input and moves the focus for it.
+    /// What was given to [Ui::set_input] this frame.
+    pub fn input(&self) -> UiInput {
+        self.widgets.input
+    }
+
     pub fn set_input(&mut self, input: UiInput) {
         let widgets = &mut self.widgets;
         widgets.cursor_moved = matches!((widgets.last_cursor, input.cursor), (Some(a), Some(b)) if a != b);
@@ -339,9 +412,22 @@ impl Ui {
         widgets.focus_settled = at.is_some();
         if let Some(at) = at {
             let count = enabled().count();
-            let step = usize::from(input.down) + (count - 1) * usize::from(input.up);
-            widgets.focus = enabled().nth((at + step) % count);
+            let next = match widgets.columns_before {
+                0 => (at + usize::from(input.down) + (count - 1) * usize::from(input.up)) % count,
+                columns => {
+                    let across = i32::from(input.right) - i32::from(input.left);
+                    let wanted = at as i32 + across + (i32::from(input.down) - i32::from(input.up)) * columns as i32;
+                    usize::try_from(wanted).ok().filter(|&wanted| wanted < count).unwrap_or(at)
+                }
+            };
+            widgets.focus = enabled().nth(next);
         }
+    }
+
+    /// Says that the widgets of this frame are a grid with this many columns, for the
+    /// keys to move through it the next frame: in all four directions, stopping at its ends.
+    pub fn grid(&mut self, columns: usize) {
+        self.widgets.columns = columns;
     }
 
     /// Whether the widget with this label has the focus.
@@ -393,13 +479,71 @@ impl Ui {
         &self.quads
     }
 
+    pub(crate) fn images(&self) -> &ImageAtlas {
+        &self.images
+    }
+
+    /// Takes in a picture of `width` x `height` texels (RGBA, sRGB) to show with
+    /// [`Ui::image`]. `None` if there's no more room for pictures.
+    pub fn add_image(&mut self, width: u32, height: u32, rgba: &[u8]) -> Option<ImageId> {
+        // A clear texel between them, so that one doesn't bleed into the next.
+        const GAP: u32 = 1;
+        let atlas = &mut self.images;
+        if rgba.len() != (width * height * 4) as usize {
+            return None;
+        }
+        if atlas.pen.0 + width + GAP > IMAGE_ATLAS {
+            atlas.pen = (0, atlas.row_bottom);
+        }
+        let (x, y) = atlas.pen;
+        if x + width + GAP > IMAGE_ATLAS || y + height + GAP > IMAGE_ATLAS {
+            return None;
+        }
+        atlas.pixels.resize((IMAGE_ATLAS * IMAGE_ATLAS * 4) as usize, 0);
+        for (row, line) in rgba.chunks_exact((width * 4) as usize).enumerate() {
+            let start = ((y + GAP + row as u32) * IMAGE_ATLAS + x + GAP) as usize * 4;
+            atlas.pixels[start..start + line.len()].copy_from_slice(line);
+        }
+        atlas.rects.push([x + GAP, y + GAP, width, height]);
+        atlas.pen.0 += width + GAP;
+        atlas.row_bottom = atlas.row_bottom.max(y + height + GAP);
+        atlas.version += 1;
+        Some(ImageId(atlas.rects.len() as u32 - 1))
+    }
+
+    /// Room for a picture that something else draws, such as a
+    /// [`Portrait`](crate::Portrait). It's clear until then.
+    pub fn reserve_image(&mut self, width: u32, height: u32) -> Option<ImageId> {
+        self.add_image(width, height, &vec![0; (width * height * 4) as usize])
+    }
+
+    /// Where a picture is among the pictures: x, y, width and height.
+    pub(crate) fn image_rect(&self, image: ImageId) -> Option<[u32; 4]> {
+        self.images.rects.get(image.0 as usize).copied()
+    }
+
+    /// A picture from [`Ui::add_image`] over `rect`, its colors multiplied by `tint`. Its
+    /// texels stay sharp, whatever the size.
+    pub fn image(&mut self, rect: Rect, image: ImageId, tint: Vec4) {
+        let Some(&[x, y, width, height]) = self.images.rects.get(image.0 as usize) else { return };
+        let (min, size) = (rect.min * self.scale, rect.size * self.scale);
+        self.quads.push(UiQuad {
+            rect: [min.x, min.y, size.x, size.y],
+            uv: [x as f32, y as f32, width as f32, height as f32],
+            color: linear(tint),
+            outline: [0.0, 0.0, 0.0, -1.0],
+        });
+    }
+
     /// A filled rectangle.
     pub fn rect(&mut self, rect: Rect, color: Vec4) {
         if rect.size.x <= 0.0 || rect.size.y <= 0.0 || color.w <= 0.0 {
             return;
         }
         let [sx, sy] = FONT.solid;
-        let (min, size) = (rect.min * self.scale, rect.size * self.scale);
+        // On whole pixels, or two lines of the same width come out different.
+        let min = (rect.min * self.scale).round();
+        let size = ((rect.max() * self.scale).round() - min).max(Vec2::ONE);
         self.quads.push(UiQuad {
             rect: [min.x, min.y, size.x, size.y],
             uv: [sx, sy, 0.0, 0.0],
@@ -408,9 +552,57 @@ impl Ui {
         });
     }
 
-    /// A filled rectangle with a one-pixel border inside its edge.
+    /// A translucent area made of an ordered dither on the art's grid, as on a PlayStation:
+    /// `color`'s alpha at its start, going to `end_alpha` at its other end, across or `down`.
+    pub fn dither(&mut self, rect: Rect, color: Vec4, end_alpha: f32, down: bool) {
+        if rect.size.x <= 0.0 || rect.size.y <= 0.0 || (color.w <= 0.0 && end_alpha <= 0.0) {
+            return;
+        }
+        let min = (rect.min * self.scale).round();
+        let size = ((rect.max() * self.scale).round() - min).max(Vec2::ONE);
+        let art = (ART_PIXEL * self.scale).round().max(1.0);
+        let grid = size / art;
+        self.quads.push(UiQuad {
+            rect: [min.x, min.y, size.x, size.y],
+            uv: [0.0, 0.0, grid.x, grid.y],
+            color: linear(color),
+            outline: [end_alpha.clamp(0.0, 1.0), if down { grid.y } else { grid.x }, f32::from(u8::from(down)), -2.0],
+        });
+    }
+
+    /// A rectangle going from `left` to `right`, in visible bands, as a low color depth would.
+    /// The alpha is `left`'s.
+    pub fn gradient(&mut self, rect: Rect, left: Vec4, right: Vec4) {
+        if rect.size.x <= 0.0 || rect.size.y <= 0.0 || left.w <= 0.0 {
+            return;
+        }
+        let min = (rect.min * self.scale).round();
+        let size = ((rect.max() * self.scale).round() - min).max(Vec2::ONE);
+        let end = linear(right);
+        self.quads.push(UiQuad {
+            rect: [min.x, min.y, size.x, size.y],
+            uv: [0.0, 0.0, 1.0, 1.0],
+            color: linear(left),
+            outline: [end[0], end[1], end[2], -3.0],
+        });
+    }
+
+    /// A panel of the game's style: dithered `fill` from the theme with a thin line around it.
+    pub fn sheet(&mut self, rect: Rect) {
+        let (fill, border) = (self.theme.fill, self.theme.border);
+        let line = self.line();
+        self.dither(rect.expand(-line), fill, fill.w, false);
+        self.panel(rect, Vec4::ZERO, border);
+    }
+
+    /// The width of the thinnest line, in logical pixels: a whole number of real pixels.
+    pub fn line(&self) -> f32 {
+        self.scale.ceil().max(1.0) / self.scale
+    }
+
+    /// A filled rectangle with a thin border inside its edge.
     pub fn panel(&mut self, rect: Rect, fill: Vec4, border: Vec4) {
-        let line = 1.0_f32.max(1.0 / self.scale);
+        let line = self.line();
         self.rect(rect.expand(-line), fill);
         let (min, max, size) = (rect.min, rect.max(), rect.size);
         self.rect(Rect::new(min, Vec2::new(size.x, line)), border);
@@ -461,8 +653,8 @@ impl Ui {
     fn glyph(&mut self, glyph: Glyph, at: Vec2, unit: f32, color: [f32; 4], outline: [f32; 4]) {
         // One font pixel of margin on every side holds the outline.
         let cols = glyph.width + 2;
-        let rows = GLYPH + 2;
-        let min = (at - unit) * self.scale;
+        let rows = ROWS + 2;
+        let min = (at - Vec2::new(unit, (TOP + 1) as f32 * unit)) * self.scale;
         let size = Vec2::new(cols as f32, rows as f32) * unit * self.scale;
         self.quads.push(UiQuad {
             rect: [min.x, min.y, size.x, size.y],
@@ -482,19 +674,77 @@ impl Ui {
     pub fn button_if(&mut self, enabled: bool, rect: Rect, label: &str) -> bool {
         let response = self.widget(rect, label, enabled);
         let color = self.widget_frame(rect, &response);
-        let center = rect.point(Anchor::Center) + press_shift(&response);
-        self.text(center, label, &TextStyle::new(self.theme.text_size).color(color).anchor(Anchor::Center));
+        let size = self.theme.text_size;
+        let shift = press_shift(&response);
+        let label = self.written(label);
+        if self.theme.frames {
+            self.text(
+                rect.point(Anchor::Center) + shift,
+                &label,
+                &TextStyle::new(size).color(color).anchor(Anchor::Center),
+            );
+        } else {
+            let at = rect.point(Anchor::Left) + Vec2::X * POINTER_ROOM + shift;
+            self.text(at, &label, &TextStyle::new(size).color(color).anchor(Anchor::Left));
+        }
         response.clicked || response.keyed
+    }
+
+    /// A square that shows an item, used like a button. `label` identifies it, and isn't drawn.
+    pub fn slot(&mut self, rect: Rect, label: &str, slot: Slot<'_>) -> SlotResponse {
+        let response = self.widget(rect, label, true);
+        let theme = self.theme;
+        let line = self.line();
+        let fill = match () {
+            _ if response.pressed => theme.pressed,
+            _ if response.focused || response.hovered => theme.hover,
+            _ => theme.fill,
+        };
+        // The focus is a double line in the brightest color; a slot that's marked has a single one.
+        let border = if response.focused || slot.marked { theme.accent } else { theme.border };
+        self.panel(rect, fill, border);
+        if response.focused {
+            self.panel(rect.expand(line), Vec4::ZERO, theme.accent);
+        }
+        let color = if response.focused { theme.accent } else { theme.text };
+        self.slot_contents(rect, slot, color, press_shift(&response));
+        SlotResponse { used: response.clicked || response.keyed, focused: response.focused, hovered: response.hovered }
+    }
+
+    /// What goes inside a [`Ui::slot`], for drawing it somewhere else: a slot that can't be
+    /// used, or a stack being moved.
+    pub fn slot_contents(&mut self, rect: Rect, slot: Slot<'_>, color: Vec4, shift: Vec2) {
+        let inner = Rect::new(rect.min + shift, rect.size).expand(-rect.size.x * 0.06);
+        if let Some(image) = slot.image {
+            // Item pictures are drawn at 48 pixels: a whole number of them per pixel of art.
+            let side =
+                if inner.size.x >= ICON_ART { (inner.size.x / ICON_ART).floor() * ICON_ART } else { inner.size.x };
+            let centered = Rect::anchored(inner.point(Anchor::Center), Vec2::splat(side), Anchor::Center);
+            self.image(centered, image, Vec4::ONE);
+        } else if !slot.short.is_empty() {
+            let style = TextStyle::new(16.0).color(color).anchor(Anchor::Center);
+            self.text(inner.point(Anchor::Center), slot.short, &style);
+        }
+        if slot.count > 1 {
+            let style = TextStyle::new(16.0).color(self.theme.text).anchor(Anchor::BottomRight);
+            self.text(inner.point(Anchor::BottomRight), &slot.count.to_string(), &style);
+        }
     }
 
     /// A row with `label` on the left and `value` on the right, used like a button.
     /// The label alone identifies it, so the focus stays when the value changes.
     pub fn button_row(&mut self, rect: Rect, label: &str, value: &str) -> bool {
-        let response = self.widget(rect, label, true);
+        self.button_row_if(true, rect, label, value)
+    }
+
+    /// A [`Ui::button_row`] that is greyed out and does nothing unless `enabled`.
+    pub fn button_row_if(&mut self, enabled: bool, rect: Rect, label: &str, value: &str) -> bool {
+        let response = self.widget(rect, label, enabled);
         let color = self.row_frame(rect, label, &response);
         let area = value_area(rect, self.theme.text_size);
         let at = Vec2::new(area.max().x, area.point(Anchor::Center).y) + press_shift(&response);
-        self.text(at, value, &TextStyle::new(self.theme.text_size).color(color).anchor(Anchor::Right));
+        let value = self.written(value);
+        self.text(at, &value, &TextStyle::new(self.theme.text_size).color(color).anchor(Anchor::Right));
         response.clicked || response.keyed
     }
 
@@ -569,7 +819,7 @@ impl Ui {
         let fill = if response.focused { self.theme.accent } else { self.theme.border };
         self.bar(track, fraction, fill, self.theme.track);
         let handle = Vec2::new(track.min.x + track.size.x * fraction, track.point(Anchor::Center).y);
-        let handle_size = Vec2::new(height * 0.8, height * 2.0);
+        let handle_size = Vec2::new((height * 0.8).round(), height * 2.0);
         self.rect(Rect::anchored(handle, handle_size, Anchor::Center), color);
         let right = Vec2::new(area.max().x, area.point(Anchor::Center).y) + press_shift(&response);
         self.text(right, &shown(*value, fraction), &style);
@@ -622,7 +872,8 @@ impl Ui {
         self.text(area.point(Anchor::Left) + shift, "<", &at(Anchor::Left));
         self.text(area.point(Anchor::Right) + shift, ">", &at(Anchor::Right));
         if let Some(option) = options.get(*selected) {
-            self.text(center + shift, option, &at(Anchor::Center));
+            let option = self.written(option);
+            self.text(center + shift, &option, &at(Anchor::Center));
         }
         changed
     }
@@ -663,6 +914,9 @@ impl Ui {
     /// The widget's background and border. Returns the color for what goes on it.
     fn widget_frame(&mut self, rect: Rect, response: &Response) -> Vec4 {
         let theme = self.theme;
+        if !theme.frames {
+            return self.bare_frame(rect, response);
+        }
         let faded = |color: Vec4, alpha: f32| Vec4::new(color.x, color.y, color.z, color.w * alpha);
         let (fill, border, color) = if !response.enabled {
             (faded(theme.fill, 0.6), faded(theme.border, 0.35), theme.disabled)
@@ -683,15 +937,48 @@ impl Ui {
         color
     }
 
+    /// [`Ui::widget_frame`] with no box: a band and a pointer where the focus is.
+    fn bare_frame(&mut self, rect: Rect, response: &Response) -> Vec4 {
+        let theme = self.theme;
+        if response.enabled && (response.focused || response.hovered) {
+            self.dither(rect, if response.pressed { theme.pressed } else { theme.hover }, 0.0, false);
+        }
+        if response.focused {
+            let middle = rect.point(Anchor::Center).y;
+            for column in 0..POINTER_COLUMNS {
+                let tall = ART_PIXEL * (2 * (POINTER_COLUMNS - column) - 1) as f32;
+                let at = Vec2::new(rect.min.x + ART_PIXEL * (2 + column) as f32, middle - tall * 0.5);
+                self.rect(Rect::new(at, Vec2::new(ART_PIXEL, tall)), theme.accent);
+            }
+        }
+        match () {
+            _ if !response.enabled => theme.disabled,
+            _ if response.focused => theme.accent,
+            _ => theme.text,
+        }
+    }
+
     /// The frame of a widget with its label on the left and its value on the right.
     fn row_frame(&mut self, rect: Rect, label: &str, response: &Response) -> Vec4 {
         let color = self.widget_frame(rect, response);
         let size = self.theme.text_size;
-        let at = rect.point(Anchor::Left) + Vec2::X * size * 0.75 + press_shift(response);
-        self.text(at, label, &TextStyle::new(size).color(color).anchor(Anchor::Left));
+        let pad = if self.theme.frames { size * 0.75 } else { POINTER_ROOM };
+        let at = rect.point(Anchor::Left) + Vec2::X * pad + press_shift(response);
+        let label = self.written(label);
+        self.text(at, &label, &TextStyle::new(size).color(color).anchor(Anchor::Left));
         color
     }
+
+    /// `text` as the widgets write it.
+    fn written(&self, text: &str) -> String {
+        if self.theme.upper { text.to_uppercase() } else { text.to_owned() }
+    }
 }
+
+/// How far a widget with no box keeps its text from the edge, for the pointer.
+const POINTER_ROOM: f32 = 20.0;
+/// How wide the pointer is, in pixels of art.
+const POINTER_COLUMNS: u32 = 4;
 
 /// A widget's value part: the right of its row, inside the padding. The rest is the label's.
 fn value_area(rect: Rect, text_size: f32) -> Rect {
@@ -789,6 +1076,73 @@ mod tests {
     /// The background color the widget got, the first thing it draws.
     fn background(ui: &Ui) -> [f32; 4] {
         ui.quads()[0].color
+    }
+
+    #[test]
+    fn pictures_take_their_own_place_in_the_atlas() {
+        let mut ui = Ui::new(Vec2::new(1280.0, 720.0), 1.0);
+        let version = ui.images().version;
+        assert_eq!(ui.add_image(2, 2, &[255; 3]), None, "too few bytes for that size");
+        let a = ui.add_image(2, 2, &[255; 16]).unwrap();
+        let b = ui.add_image(3, 1, &[128; 12]).unwrap();
+        assert!(ui.images().version > version, "the renderer has to know there's more to upload");
+        let [ax, ay, aw, _] = ui.images().rects[a.0 as usize];
+        let [bx, by, _, _] = ui.images().rects[b.0 as usize];
+        assert_eq!(ay, by);
+        assert!(bx > ax + aw, "a clear texel between them");
+        let at = |x: u32, y: u32| ui.images().pixels[((y * IMAGE_ATLAS + x) * 4) as usize];
+        assert_eq!((at(ax, ay), at(bx, by)), (255, 128));
+        assert_eq!(at(ax + aw, ay), 0);
+
+        let image_count = |ui: &Ui| ui.quads().iter().filter(|quad| quad.outline[3] < 0.0).count();
+        frame(&mut ui, UiInput::default(), |ui| ui.image(row(0), b, Vec4::ONE));
+        assert_eq!(image_count(&ui), 1);
+        assert_eq!(ui.quads()[0].uv, [bx as f32, by as f32, 3.0, 1.0]);
+        frame(&mut ui, UiInput::default(), |ui| ui.image(row(0), ImageId(99), Vec4::ONE));
+        assert!(ui.is_empty(), "an id that doesn't exist draws nothing");
+    }
+
+    #[test]
+    fn a_picture_that_does_not_fit_is_refused() {
+        let mut ui = Ui::new(Vec2::new(1280.0, 720.0), 1.0);
+        let big = vec![0; (IMAGE_ATLAS * IMAGE_ATLAS * 4) as usize];
+        assert_eq!(ui.add_image(IMAGE_ATLAS, IMAGE_ATLAS, &big), None);
+        assert!(ui.add_image(1, 1, &[0; 4]).is_some());
+    }
+
+    /// A grid of 3 by 2. Returns which of its slots has the focus.
+    fn grid_frame(ui: &mut Ui, input: UiInput) -> Option<usize> {
+        frame(ui, input, |ui| {
+            let focused = (0..6).map(|at| ui.slot(row(at), &format!("slot {at}"), Slot::default()).focused);
+            let focused = focused.collect::<Vec<_>>().iter().position(|&focused| focused);
+            ui.grid(3);
+            focused
+        })
+    }
+
+    #[test]
+    fn the_keys_move_through_a_grid_and_stop_at_its_ends() {
+        let mut ui = Ui::new(Vec2::new(1280.0, 720.0), 1.0);
+        assert_eq!(grid_frame(&mut ui, UiInput::default()), Some(0));
+        assert_eq!(grid_frame(&mut ui, UiInput { up: true, ..Default::default() }), Some(0));
+        assert_eq!(grid_frame(&mut ui, UiInput { left: true, ..Default::default() }), Some(0));
+        assert_eq!(grid_frame(&mut ui, UiInput { down: true, ..Default::default() }), Some(3));
+        assert_eq!(grid_frame(&mut ui, UiInput { right: true, ..Default::default() }), Some(4));
+        assert_eq!(grid_frame(&mut ui, UiInput { down: true, ..Default::default() }), Some(4));
+        assert_eq!(grid_frame(&mut ui, UiInput { up: true, ..Default::default() }), Some(1));
+    }
+
+    #[test]
+    fn a_slot_is_used_like_a_button_and_shows_what_it_holds() {
+        let mut ui = Ui::new(Vec2::new(1280.0, 720.0), 1.0);
+        let draw = |ui: &mut Ui, input, count| {
+            frame(ui, input, |ui| ui.slot(row(0), "slot", Slot { short: "mac", count, ..Default::default() }))
+        };
+        assert!(!draw(&mut ui, UiInput::default(), 1).used);
+        let one = ui.quads().len();
+        assert!(draw(&mut ui, UiInput { activate: true, ..Default::default() }, 1).used);
+        assert!(draw(&mut ui, UiInput::default(), 12).focused);
+        assert!(ui.quads().len() > one, "a stack of many says how many");
     }
 
     #[test]
@@ -1073,12 +1427,12 @@ mod tests {
     fn text_is_measured_in_font_pixels() {
         let ui = Ui::default();
         let one = ui.measure("I", &style());
-        assert_eq!(one.y, 16.0, "one line is the glyph height");
+        assert_eq!(one.y, GLYPH as f32 * 2.0, "one line is the height of the text's box");
         assert_eq!(one.x, FONT.glyph('I').width as f32 * 2.0, "no trailing spacing");
         let two = ui.measure("I\nI", &style());
         assert_eq!(two, Vec2::new(one.x, (LINE + GLYPH) as f32 * 2.0));
-        assert!(ui.measure("mmm", &style()).x > ui.measure("iii", &style()).x, "proportional");
-        assert_eq!(ui.measure("", &style()), Vec2::new(0.0, 16.0));
+        assert!(ui.measure("mmm", &style()).x > ui.measure("...", &style()).x, "proportional");
+        assert_eq!(ui.measure("", &style()), Vec2::new(0.0, GLYPH as f32 * 2.0));
     }
 
     #[test]
@@ -1118,12 +1472,47 @@ mod tests {
         let a = ui.quads()[0];
         let unit = 2.0 * 2.0; // 16 px text is 2 logical px per font pixel, at scale 2
         assert_eq!(a.rect[0], 10.0 * 2.0 - unit, "one font pixel of outline margin");
-        assert_eq!(a.rect[1], 20.0 * 2.0 - unit);
-        assert_eq!(a.rect[3], (GLYPH + 2) as f32 * unit);
+        assert_eq!(a.rect[1], 20.0 * 2.0 - (TOP + 1) as f32 * unit, "the rows above the box, and the margin");
+        assert_eq!(a.rect[3], (ROWS + 2) as f32 * unit);
         assert_eq!(a.uv[2] * unit, a.rect[2], "atlas texels map to whole font pixels");
 
         ui.begin(Vec2::new(640.0, 360.0), 1.0);
         assert!(ui.is_empty(), "begin clears the frame");
+    }
+
+    #[test]
+    fn the_art_keeps_whole_pixels_on_any_window() {
+        let art = |height: f32| ART_PIXEL * pixel_scale(height);
+        assert_eq!((art(720.0), art(1080.0), art(1440.0), art(2160.0)), (2.0, 3.0, 4.0, 6.0));
+        assert_eq!(pixel_scale(400.0), 1.0, "small windows don't shrink it further");
+    }
+
+    #[test]
+    fn rectangles_land_on_whole_pixels_and_a_line_stays_visible() {
+        let mut ui = Ui::new(Vec2::new(1280.0, 720.0), 1.5);
+        assert!((ui.line() - 2.0 / 1.5).abs() < 1e-6, "two real pixels at this scale");
+        ui.rect(Rect::new(Vec2::new(10.3, 0.0), Vec2::new(0.1, 10.0)), Vec4::ONE);
+        let [x, _, width, _] = ui.quads()[0].rect;
+        assert_eq!(x.fract(), 0.0);
+        assert_eq!(width, 1.0, "never thinner than a pixel");
+    }
+
+    #[test]
+    fn a_dither_counts_the_art_pixels_and_says_how_it_fades() {
+        let mut ui = Ui::new(Vec2::new(1280.0, 720.0), 1.0);
+        ui.dither(Rect::new(Vec2::ZERO, Vec2::new(40.0, 10.0)), Vec4::new(0.0, 0.0, 0.0, 0.8), 0.2, true);
+        let quad = ui.quads()[0];
+        assert_eq!(quad.uv, [0.0, 0.0, 20.0, 5.0]);
+        assert_eq!(quad.outline, [0.2, 5.0, 1.0, -2.0]);
+    }
+
+    #[test]
+    fn a_gradient_carries_both_ends() {
+        let mut ui = Ui::default();
+        ui.gradient(Rect::new(Vec2::ZERO, Vec2::new(40.0, 10.0)), Vec4::new(0.0, 0.0, 0.0, 0.5), Vec4::ONE);
+        let quad = ui.quads()[0];
+        assert_eq!(quad.color[3], 0.5);
+        assert_eq!(quad.outline, [1.0, 1.0, 1.0, -3.0]);
     }
 
     #[test]

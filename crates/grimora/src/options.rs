@@ -52,6 +52,8 @@ pub struct Options {
     pub resolution: Option<(u32, u32)>,
     pub vsync: bool,
     pub shadows: ShadowQuality,
+    /// Filters pixel art textures (bilinear, as on the PS2); off shows hard texels.
+    pub smooth_textures: bool,
     /// MSAA. Takes effect the next time the game starts (see [`Options::apply_at_startup`]).
     pub antialiasing: bool,
     /// Multiplies mouse and stick look: 1 is the engine's default.
@@ -72,6 +74,7 @@ impl Default for Options {
             resolution: None,
             vsync: true,
             shadows: ShadowQuality::Medium,
+            smooth_textures: true,
             antialiasing: true,
             look_sensitivity: 1.0,
             invert_look_y: false,
@@ -142,6 +145,7 @@ impl Options {
         ctx.set_fullscreen(self.fullscreen);
         ctx.set_vsync(self.vsync);
         ctx.set_shadow_quality(self.shadows);
+        ctx.set_smooth_textures(self.smooth_textures);
         if let Some((width, height)) = self.resolution {
             ctx.set_window_size(width, height);
         }

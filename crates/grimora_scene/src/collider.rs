@@ -128,8 +128,17 @@ impl ColliderDesc {
                 }
                 MeshDesc::Sphere { .. } => ColliderShape::Ball { center: Vec3::Y * 0.5, radius: 0.5 },
                 // Trees block at the trunk and the dense lower foliage, not the branch tips.
+                MeshDesc::Pine { branches, .. } if !branches.is_empty() => {
+                    ColliderShape::Cylinder { center: Vec3::Y * 2.0, radius: 0.2, half_height: 2.0 }
+                }
                 MeshDesc::Pine { .. } => {
                     ColliderShape::Cylinder { center: Vec3::Y * 1.5, radius: 0.35, half_height: 1.5 }
+                }
+                MeshDesc::Acacia { .. } => {
+                    ColliderShape::Cylinder { center: Vec3::Y * 1.0, radius: 0.25, half_height: 1.0 }
+                }
+                MeshDesc::Baobab { .. } => {
+                    ColliderShape::Cylinder { center: Vec3::Y * 2.5, radius: 1.3, half_height: 2.5 }
                 }
                 MeshDesc::DeadTree { .. } => {
                     ColliderShape::Cylinder { center: Vec3::Y * 1.2, radius: 0.22, half_height: 1.2 }
@@ -137,9 +146,17 @@ impl ColliderDesc {
                 MeshDesc::Wanderer | MeshDesc::Sprite { .. } | MeshDesc::Decal { .. } => return None,
                 MeshDesc::Cone { .. }
                 | MeshDesc::Rock { .. }
+                | MeshDesc::Mound { .. }
                 | MeshDesc::Crystal { .. }
-                | MeshDesc::Pillar { .. }
-                | MeshDesc::Model { .. } => ColliderShape::hull(mesh),
+                | MeshDesc::IceSpear
+                | MeshDesc::IceShard { .. }
+                | MeshDesc::Pillar { .. } => ColliderShape::hull(mesh),
+                MeshDesc::Model { .. } => match &mesh.collision {
+                    Some(shape) => {
+                        ColliderShape::TriMesh { vertices: shape.vertices.clone(), indices: shape.indices.clone() }
+                    }
+                    None => ColliderShape::hull(mesh),
+                },
             }),
         }
     }

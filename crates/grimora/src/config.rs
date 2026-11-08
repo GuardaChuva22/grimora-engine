@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context as _, Result, bail};
-use grimora_core::Vec3;
+use grimora_core::{DVec2, DVec3, Vec3, Weather};
 
 /// How the engine starts. Every field can also be set from the command line,
 /// which is how automated tools (and AI assistants) drive the engine.
@@ -28,6 +28,8 @@ pub struct EngineConfig {
     pub audio: bool,
     /// Draw [`crate::Context::ui`]; off for clean scene screenshots.
     pub ui: bool,
+    /// Bilinear filtering for pixel art textures; off, `--pixel-textures` wins over the options.
+    pub smooth_textures: bool,
     /// Folder for saved games; defaults to the user's data folder (see
     /// [`crate::SaveStore::for_game`], named after `title`).
     pub save_dir: Option<PathBuf>,
@@ -42,6 +44,19 @@ pub struct EngineConfig {
     pub escape_quits: bool,
     /// Stops the scene's clock at this hour, for repeatable captures.
     pub time_of_day: Option<f32>,
+    /// Replaces the weather of the scene's day when it loads, at once. The game can still
+    /// change it after that.
+    pub weather: Option<Weather>,
+    /// Where in the world the scene's zero lies, in meters (`f64`): to try it far from the
+    /// world's origin, where `f32` alone would shake.
+    pub origin_offset: Option<DVec3>,
+    /// Moves the origin this far, in the scene's meters, right after it loads, as walking that
+    /// far would: to check that nothing changes when it does.
+    pub origin_shift: Option<Vec3>,
+    /// Generated world to run (a `WorldDesc` `.ron`, read by `grimora_world`), beside the scene.
+    pub world: Option<PathBuf>,
+    /// Where to start in that world, in map units (x east, y south), instead of its `start`.
+    pub at: Option<DVec2>,
 }
 
 impl Default for EngineConfig {
@@ -60,11 +75,17 @@ impl Default for EngineConfig {
             hot_reload: true,
             audio: true,
             ui: true,
+            smooth_textures: true,
             save_dir: None,
             load: None,
             menu: None,
             escape_quits: true,
             time_of_day: None,
+            weather: None,
+            origin_offset: None,
+            origin_shift: None,
+            world: None,
+            at: None,
         }
     }
 }
@@ -82,11 +103,17 @@ Options:
   --no-hot-reload           Do not watch the scene file
   --no-audio                No sound (screenshots are always silent)
   --no-ui                   Hide the game's HUD
+  --pixel-textures          Hard texels instead of filtered textures
   --save-dir <folder>       Where saved games go
   --load <slot>             Ask the game to load this saved game at startup
   --menu <name>             Ask the game to open this menu at startup, to capture it
                             (the sandbox has title, pause, options, video and controls)
   --time <hour>             Stop the scene's day at this hour, from 0 to 24
+  --weather <kind>          Start with this weather: clear, overcast, rain, storm or snow
+  --origin-offset <x,z>     Put the scene this many meters from the world's origin (f64)
+  --origin-shift <x,z>      Move the origin this far right after loading, as walking would
+  --world <file.ron>        Generated world to use (a grimora_world WorldDesc)
+  --at <x,z>                Start there in the world, in map units (x east, z south)
   --help                    Show this message
 
 Controls: hold right mouse + move to look, WASD move, E/Q up/down,
@@ -114,11 +141,35 @@ impl EngineConfig {
                 "--no-msaa" => self.msaa = 1,
                 "--no-hot-reload" => self.hot_reload = false,
                 "--no-ui" => self.ui = false,
+                "--pixel-textures" => self.smooth_textures = false,
                 "--no-audio" => self.audio = false,
                 "--save-dir" => self.save_dir = Some(value()?.into()),
                 "--load" => self.load = Some(value()?),
                 "--menu" => self.menu = Some(value()?),
+                "--origin-offset" => {
+                    let (x, z) = parse_xz(&value()?)?;
+                    self.origin_offset = Some(DVec3::new(x, 0.0, z));
+                }
+                "--origin-shift" => {
+                    let (x, z) = parse_xz(&value()?)?;
+                    self.origin_shift = Some(Vec3::new(x as f32, 0.0, z as f32));
+                }
+                "--world" => self.world = Some(value()?.into()),
+                "--at" => {
+                    let (x, z) = parse_xz(&value()?)?;
+                    self.at = Some(DVec2::new(x, z));
+                }
                 "--time" => self.time_of_day = Some(value()?.parse().context("--time expects an hour")?),
+                "--weather" => {
+                    self.weather = Some(match value()?.as_str() {
+                        "clear" => Weather::Clear,
+                        "overcast" => Weather::Overcast,
+                        "rain" => Weather::Rain,
+                        "storm" => Weather::Storm,
+                        "snow" => Weather::Snow,
+                        other => bail!("--weather expects clear, overcast, rain, storm or snow, not {other}"),
+                    })
+                }
                 "--help" | "-h" => {
                     println!("{USAGE}");
                     std::process::exit(0);
@@ -136,6 +187,14 @@ impl EngineConfig {
 
     pub(crate) fn frame_limit(&self) -> Option<u64> {
         self.frames.or(self.screenshot.as_ref().map(|_| 90))
+    }
+}
+
+fn parse_xz(s: &str) -> Result<(f64, f64)> {
+    let parts: Vec<f64> = s.split(',').map(|p| p.trim().parse::<f64>()).collect::<Result<_, _>>()?;
+    match parts[..] {
+        [x, z] => Ok((x, z)),
+        _ => bail!("expected x,z but got `{s}`"),
     }
 }
 
@@ -165,6 +224,15 @@ mod tests {
         assert_eq!(config.menu.as_deref(), Some("pause"));
         let config = EngineConfig::default().with_args(["--time", "21.5"].map(String::from)).unwrap();
         assert_eq!(config.time_of_day, Some(21.5));
+        let config = EngineConfig::default().with_args(["--weather", "overcast"].map(String::from)).unwrap();
+        assert_eq!(config.weather, Some(Weather::Overcast));
+        let config = EngineConfig::default().with_args(["--weather", "snow"].map(String::from)).unwrap();
+        assert_eq!(config.weather, Some(Weather::Snow));
+        let config =
+            EngineConfig::default().with_args(["--world", "w.ron", "--at", "4476,1681.5"].map(String::from)).unwrap();
+        assert_eq!(config.world.unwrap().to_str(), Some("w.ron"));
+        assert_eq!(config.at, Some(DVec2::new(4476.0, 1681.5)));
+        assert!(EngineConfig::default().with_args(["--weather", "hail"].map(String::from)).is_err());
         assert_eq!(EngineConfig { screenshot: Some("x".into()), ..Default::default() }.frame_limit(), Some(90));
     }
 

@@ -15,6 +15,9 @@ use crate::combat::Health;
 use crate::npc::Agent;
 use crate::world::{Body, Collider, Name, Renderable};
 
+/// Meters short of an object that the line of sight to it stops.
+const SIGHT_MARGIN: f32 = 0.25;
+
 /// What [`World::update_triggers`] noticed this frame.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TriggerEvent {
@@ -120,6 +123,8 @@ impl World {
             (_, Some(body)) => physics.body_collider(body.0),
             _ => self.get::<Agent>(entity).map(|agent| agent.collider()),
         };
-        physics.raycast(from, target - from, from.distance(target)).is_none_or(|hit| Some(hit.collider) == own)
+        // Stops short of it: something lying on the ground is about as far as the ground.
+        let reach = (from.distance(target) - SIGHT_MARGIN).max(0.0);
+        physics.raycast(from, target - from, reach).is_none_or(|hit| Some(hit.collider) == own)
     }
 }

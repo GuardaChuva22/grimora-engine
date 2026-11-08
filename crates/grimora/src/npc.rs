@@ -8,7 +8,7 @@ use grimora_scene::{Behavior, Notice, NpcDesc, Reaction};
 use hecs::Entity;
 
 use crate::World;
-use crate::combat::{Fighter, Health};
+use crate::combat::{Fighter, Frozen, Health};
 use crate::third_person::lerp_angle;
 
 /// New paths searched per update at most, so a crowd never stalls a frame.
@@ -89,6 +89,22 @@ pub struct Agent {
     replan_in: f32,
     stuck: f32,
     attempts: u32,
+}
+
+impl Agent {
+    /// Moves it and where it's going by `offset`, as the world's origin moves the other way.
+    pub(crate) fn shift(&mut self, offset: Vec3) {
+        self.body.position += offset;
+        if let Some(target) = &mut self.target {
+            *target += offset;
+        }
+        if let Some(look) = &mut self.look_at {
+            *look += offset;
+        }
+        for point in &mut self.path {
+            *point += offset;
+        }
+    }
 }
 
 /// Someone to keep clear of.
@@ -549,15 +565,17 @@ impl Brain {
 }
 
 /// The agent and brain of a scene object with `npc:`, seeded by where it stands.
-pub(crate) fn from_desc(desc: &NpcDesc, transform: &Transform, physics: &mut Physics) -> (Agent, Brain) {
-    let position = transform.position;
+/// `transform` is where the scene placed it, which also picks its seed, and `offset` how far
+/// the world's origin has moved that since.
+pub(crate) fn from_desc(desc: &NpcDesc, transform: &Transform, offset: Vec3, physics: &mut Physics) -> (Agent, Brain) {
+    let position = transform.position + offset;
     let facing = yaw_of(transform.rotation);
     let mut agent = Agent::new(physics, position, facing, desc.radius, desc.height);
     agent.walk_speed = desc.walk_speed;
     agent.run_speed = desc.run_speed;
     agent.clip_speeds = desc.clip_speeds.unwrap_or((desc.walk_speed, desc.run_speed));
     agent.clip_prefix = desc.clip_prefix.clone();
-    let [x, y, z] = position.to_array().map(|v| u64::from(v.to_bits()));
+    let [x, y, z] = transform.position.to_array().map(|v| u64::from(v.to_bits()));
     let seed = x ^ y.rotate_left(21) ^ z.rotate_left(42);
     (agent, Brain::new(desc.behavior.clone(), desc.notice.clone(), position, facing, seed))
 }
@@ -590,7 +608,7 @@ impl World {
 
         let mut events = Vec::new();
         let mut budget = PATHS_PER_UPDATE;
-        for (entity, agent, transform, brain, animator, mut fighter, health) in self.ecs.query_mut::<(
+        for (entity, agent, transform, brain, animator, mut fighter, health, frozen) in self.ecs.query_mut::<(
             Entity,
             &mut Agent,
             &mut Transform,
@@ -598,13 +616,14 @@ impl World {
             Option<&mut Animator>,
             Option<&mut Fighter>,
             Option<&Health>,
+            Option<&Frozen>,
         )>() {
             if flat(agent.body.position - player).length() > ACTIVE_DISTANCE
                 || health.is_some_and(|health| health.is_dead())
             {
                 continue;
             }
-            let staggered = health.is_some_and(|health| health.staggered());
+            let staggered = health.is_some_and(|health| health.staggered()) || frozen.is_some();
             if staggered || fighter.as_ref().is_some_and(|fighter| fighter.busy()) {
                 // It keeps its feet, and its last idea of where to look, until it can act.
                 agent.stop();

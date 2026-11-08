@@ -16,7 +16,7 @@ use hecs::Entity;
 
 use crate::World;
 use crate::npc::{Agent, Brain};
-use crate::world::despawn;
+use crate::world::{Renderable, despawn};
 
 /// Seconds a flinch keeps a character from acting.
 const STAGGER: f32 = 0.35;
@@ -48,12 +48,43 @@ const EVENT_HIT_OFF: &str = "hit_off";
 const EVENT_COMBO: &str = "combo";
 const EVENT_CANCEL: &str = "cancel";
 
+/// How much of its own color something frozen keeps, per channel.
+const FROZEN_TINT: Vec3 = Vec3::new(0.78, 0.9, 1.0);
+/// Seconds to seize up.
+const FREEZE_IN: f32 = 0.22;
+/// Seconds at the end in which it comes back to itself.
+const THAW: f32 = 0.45;
+
+/// Held in ice: it stops where it is and can't act until this runs out, its clips run down to
+/// a halt and its color cools. Put on with [`World::freeze`].
+#[derive(Debug, Clone)]
+pub struct Frozen {
+    /// Seconds left.
+    pub left: f32,
+    since: f32,
+    /// Its color before.
+    color: Vec3,
+}
+
+impl Frozen {
+    /// From 0, itself, to 1, all ice.
+    fn amount(&self) -> f32 {
+        let smooth = |t: f32| {
+            let t = t.clamp(0.0, 1.0);
+            t * t * (3.0 - 2.0 * t)
+        };
+        smooth(self.since / FREEZE_IN).min(smooth(self.left / THAW))
+    }
+}
+
 /// What can be hurt. At zero it plays its `die` clip and stays there; without
 /// that clip, it is despawned (a barrel that breaks).
 #[derive(Debug, Clone)]
 pub struct Health {
     pub current: f32,
     pub max: f32,
+    /// Taken off each blow, leaving at least [`LEAST_OF_A_BLOW`] of it.
+    pub armor: f32,
     /// Blows only land on other teams.
     pub team: u32,
     /// How wide it is, in meters: a blow reaches this much further to hit it.
@@ -64,7 +95,7 @@ pub struct Health {
 
 impl Health {
     pub fn new(max: f32, team: u32) -> Self {
-        Self { current: max, max, team, radius: 0.4, stagger: 0.0, untouchable: 0.0 }
+        Self { current: max, max, armor: 0.0, team, radius: 0.4, stagger: 0.0, untouchable: 0.0 }
     }
 
     pub fn is_dead(&self) -> bool {
@@ -79,6 +110,16 @@ impl Health {
     /// Still flinching from a blow, and unable to act.
     pub fn staggered(&self) -> bool {
         self.stagger > 0.0
+    }
+
+    /// Loses this much without flinching: a burn, not a blow. It won't be what kills: `false`
+    /// means the rest should go through [`World::damage`], if it's to land at all.
+    pub fn wear(&mut self, amount: f32) -> bool {
+        if self.is_dead() || self.untouchable() || self.current <= amount {
+            return false;
+        }
+        self.current -= amount;
+        true
     }
 
     /// Nothing can hurt it for this many seconds: the heart of a roll.
@@ -367,6 +408,16 @@ pub enum CombatEvent {
     },
 }
 
+impl Fighter {
+    /// Moves where its blade was by `offset`, as the world's origin moves the other way.
+    pub(crate) fn shift(&mut self, offset: Vec3) {
+        if let Some((base, tip)) = &mut self.last_blade {
+            *base += offset;
+            *tip += offset;
+        }
+    }
+}
+
 /// A blow about to land, with what it needs from its attacker.
 struct Strike {
     attacker: Entity,
@@ -405,6 +456,17 @@ struct Sweep {
 }
 
 impl Sweep {
+    /// Whether the blade gets to something small at this height, or any way above it: nobody has
+    /// to aim at the ground to get what's running around their feet.
+    fn touches_small(&self, at: Vec3, radius: f32) -> bool {
+        (0..=SWEEP_STEPS).any(|k| {
+            let t = k as f32 / SWEEP_STEPS as f32;
+            let (base, tip) = (self.from.0.lerp(self.to.0, t), self.from.1.lerp(self.to.1, t));
+            let (on_blade, on_body) = closest_points(base, tip, at, at + Vec3::Y * SMALL_THINGS_HEIGHT);
+            on_blade.distance(on_body) <= radius + self.radius
+        })
+    }
+
     /// The point of the blade that touches a standing capsule at `feet`, if any.
     fn touches(&self, feet: Vec3, radius: f32) -> Option<Vec3> {
         let bottom = feet + Vec3::Y * radius.min(TARGET_HEIGHT * 0.5);
@@ -436,6 +498,14 @@ fn closest_points(a0: Vec3, a1: Vec3, b0: Vec3, b1: Vec3) -> (Vec3, Vec3) {
     (a0 + d1 * s, b0 + d2 * t)
 }
 
+/// How far above something small a blade still gets it, and how far from the one swinging
+/// anything is looked at.
+const SMALL_THINGS_HEIGHT: f32 = 1.0;
+const SMALL_THINGS_REACH: f32 = 4.0;
+
+/// The share of a blow that gets through any armor.
+const LEAST_OF_A_BLOW: f32 = 0.2;
+
 /// Clips run slowly for this many more seconds, while a hit lands.
 struct HitStop(f32);
 
@@ -456,6 +526,11 @@ pub(crate) fn revive(ecs: &mut hecs::World, entity: Entity, physics: &mut Physic
     }
     if let Some(agent) = agent {
         physics.set_enabled(agent.collider(), true);
+    }
+    if let Ok(frozen) = ecs.remove_one::<Frozen>(entity)
+        && let Ok(renderable) = ecs.query_one_mut::<&mut Renderable>(entity)
+    {
+        renderable.color = frozen.color;
     }
 }
 
@@ -527,6 +602,7 @@ impl World {
             self.land_blade(sweep, physics, &mut events);
         }
         self.run_hit_stops(dt);
+        self.run_frozen(dt);
         events
     }
 
@@ -575,6 +651,10 @@ impl World {
 
     /// Hurts what the blade touched this frame, once a swing.
     fn land_blade(&mut self, sweep: &Sweep, physics: &mut Physics, events: &mut Vec<CombatEvent>) {
+        let origin = sweep.origin;
+        self.strike_fauna_by(&mut |at, radius| {
+            at.distance(origin) < SMALL_THINGS_REACH && sweep.touches_small(at, radius)
+        });
         let targets: Vec<(Entity, Vec3, Vec3)> = self
             .ecs
             .query::<(Entity, &Transform, &Health)>()
@@ -680,6 +760,65 @@ impl World {
         }
     }
 
+    /// Stops `target` where it is for `seconds`: see [`Frozen`]. It doesn't notice who did it,
+    /// and being hurt doesn't free it. Returns false for what isn't there or is already dead.
+    pub fn freeze(&mut self, target: Entity, seconds: f32) -> bool {
+        let query = self.ecs.query_one_mut::<(
+            Option<&Health>,
+            Option<&mut Fighter>,
+            Option<&mut Agent>,
+            Option<&Renderable>,
+            Option<&mut Frozen>,
+        )>(target);
+        let Ok((health, fighter, agent, renderable, frozen)) = query else { return false };
+        if health.is_some_and(Health::is_dead) {
+            return false;
+        }
+        if let Some(frozen) = frozen {
+            frozen.left = frozen.left.max(seconds);
+            return true;
+        }
+        if let Some(fighter) = fighter {
+            fighter.interrupt();
+        }
+        if let Some(agent) = agent {
+            agent.stop();
+        }
+        let color = renderable.map_or(Vec3::ONE, |renderable| renderable.color);
+        let _ = self.ecs.insert_one(target, Frozen { left: seconds, since: 0.0, color });
+        true
+    }
+
+    /// Whether `entity` is held in ice.
+    pub fn is_frozen(&self, entity: Entity) -> bool {
+        self.ecs.get::<&Frozen>(entity).is_ok()
+    }
+
+    fn run_frozen(&mut self, dt: f32) {
+        let mut over = Vec::new();
+        for (entity, frozen, animator, renderable, health) in
+            self.ecs
+                .query_mut::<(Entity, &mut Frozen, Option<&mut Animator>, Option<&mut Renderable>, Option<&Health>)>()
+        {
+            frozen.since += dt;
+            frozen.left -= dt;
+            let done = frozen.left <= 0.0 || health.is_some_and(Health::is_dead);
+            let amount = if done { 0.0 } else { frozen.amount() };
+            if let Some(animator) = animator {
+                animator.speed = 1.0 - amount;
+            }
+            if let Some(renderable) = renderable {
+                renderable.color = frozen.color.lerp(frozen.color * FROZEN_TINT, amount);
+            }
+            if done {
+                over.push(entity);
+            }
+        }
+        for entity in over {
+            let _ = self.ecs.remove_one::<Frozen>(entity);
+        }
+    }
+
     fn run_hit_stops(&mut self, dt: f32) {
         let mut over = Vec::new();
         for (entity, stop, animator) in self.ecs.query_mut::<(Entity, &mut HitStop, Option<&mut Animator>)>() {
@@ -702,6 +841,7 @@ impl World {
     /// spells can call this directly. Returns whether it died, or `None` if it
     /// can't be hurt, was already dead or is in the middle of a roll.
     pub fn damage(&mut self, target: Entity, amount: f32, physics: &mut Physics) -> Option<bool> {
+        let frozen = self.is_frozen(target);
         let (health, animator, agent, fighter, brain) = self
             .ecs
             .query_one_mut::<(
@@ -715,18 +855,22 @@ impl World {
         if health.is_dead() || health.untouchable() {
             return None;
         }
+        let amount = (amount - health.armor).max(amount * LEAST_OF_A_BLOW);
         health.current = (health.current - amount).max(0.0);
         if let Some(brain) = brain {
             brain.alert(!health.is_dead());
         }
         let clip = if health.is_dead() { "die" } else { "hurt" };
-        let played = animator.is_some_and(|animator| {
-            let played = animator.replay_once(clip, FADE_IN);
-            if played {
-                animator.speed = 1.0;
-            }
-            played
-        });
+        // What's held in ice can't flinch.
+        let flinches = !(frozen && !health.is_dead());
+        let played = flinches
+            && animator.is_some_and(|animator| {
+                let played = animator.replay_once(clip, FADE_IN);
+                if played {
+                    animator.speed = 1.0;
+                }
+                played
+            });
         if !health.is_dead() {
             if played {
                 health.stagger = STAGGER;

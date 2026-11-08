@@ -1,0 +1,207 @@
+// The gull's clips. In the model's space: +X is its left, +Y up, +Z ahead.
+// `aim` is where a bone points, and a joint ending in .L also moves its .R, mirrored.
+// Look at a pose alone with `animation: "pose:wings_top"` on an object.
+(
+    poses: {
+        // ---- the wings. Three joints: shoulder to wrist, wrist to the hand, the hand.
+        "wings_spread": {
+            "Wing.L": (aim: (1.0, 0.14, 0.12)),
+            "Forewing.L": (aim: (1.0, 0.03, -0.02)),
+            "Primaries.L": (aim: (1.0, -0.1, -0.22)),
+        },
+        "wings_spread_b": {
+            "Wing.L": (aim: (1.0, 0.2, 0.12)),
+            "Forewing.L": (aim: (1.0, 0.0, -0.02)),
+            "Primaries.L": (aim: (1.0, -0.16, -0.22)),
+        },
+        // The top of a beat: the arm up, the hand still hanging behind it.
+        "wings_top": {
+            "Wing.L": (aim: (0.72, 0.68, 0.02)),
+            "Forewing.L": (aim: (0.95, 0.4, -0.12)),
+            "Primaries.L": (aim: (0.95, 0.08, -0.42)),
+        },
+        // Halfway down, flat and as wide as it goes.
+        "wings_pull": {
+            "Wing.L": (aim: (1.0, -0.02, 0.22)),
+            "Forewing.L": (aim: (1.0, 0.06, 0.12)),
+            "Primaries.L": (aim: (1.0, 0.16, -0.02)),
+        },
+        // The bottom: the tips bent up by the air they push on.
+        "wings_bottom": {
+            "Wing.L": (aim: (0.9, -0.52, 0.2)),
+            "Forewing.L": (aim: (0.95, -0.34, 0.14)),
+            "Primaries.L": (aim: (1.0, -0.12, 0.04)),
+        },
+        // On the way up it folds at the wrist, to push on less air.
+        "wings_rise": {
+            "Wing.L": (aim: (0.86, 0.3, -0.02)),
+            "Forewing.L": (aim: (0.6, 0.3, -0.72)),
+            "Primaries.L": (aim: (0.24, -0.1, -0.98)),
+        },
+        // Falling on a fish: pulled back along the body.
+        "wings_dive": {
+            "Wing.L": (aim: (0.62, 0.22, -0.72)),
+            "Forewing.L": (aim: (0.04, 0.1, -1.0)),
+            "Primaries.L": (aim: (-0.06, 0.04, -1.0)),
+        },
+        // Coming down to land: wide and forward, catching the air.
+        "wings_flare": {
+            "Wing.L": (aim: (0.9, 0.42, 0.42)),
+            "Forewing.L": (aim: (1.0, 0.3, 0.3)),
+            "Primaries.L": (aim: (1.0, 0.12, 0.08)),
+        },
+
+        // ---- the legs
+        "legs_tucked": {
+            "Thigh.L": (aim: (0.1, -0.3, -1.0)),
+            "Shin.L": (aim: (0.04, -0.06, -1.0)),
+            "Foot.L": (aim: (0.02, -0.14, -1.0)),
+        },
+        "legs_reaching": {
+            "Thigh.L": (aim: (0.14, -0.86, 0.38)),
+            "Shin.L": (aim: (0.05, -0.92, 0.34)),
+            "Foot.L": (aim: (0.05, -0.3, 1.0)),
+        },
+        "legs_dangling": {
+            "Thigh.L": (aim: (0.14, -0.8, -0.55)),
+            "Shin.L": (aim: (0.05, -0.8, -0.6)),
+            "Foot.L": (aim: (0.04, -0.7, -0.7)),
+        },
+        // Swimming, the legs are under it and out of sight.
+        "legs_folded": {
+            "Thigh.L": (aim: (0.2, -0.3, -0.9)),
+            "Shin.L": (aim: (0.1, -0.1, -1.0)),
+            "Foot.L": (aim: (0.05, -0.1, -1.0)),
+        },
+        // A step: the left leg ahead and the right behind.
+        "step_left": {
+            "Thigh.L": (aim: (0.14, -0.96, 0.05)),
+            "Shin.L": (aim: (0.05, -0.96, 0.32)),
+            "Foot.L": (aim: (0.06, -0.02, 1.0)),
+            "Thigh.R": (aim: (-0.14, -0.8, -0.62)),
+            "Shin.R": (aim: (-0.05, -0.98, 0.05)),
+            "Foot.R": (aim: (-0.06, -0.5, 0.86)),
+        },
+        "step_right": {
+            "Thigh.R": (aim: (-0.14, -0.96, 0.05)),
+            "Shin.R": (aim: (-0.05, -0.96, 0.32)),
+            "Foot.R": (aim: (-0.06, -0.02, 1.0)),
+            "Thigh.L": (aim: (0.14, -0.8, -0.62)),
+            "Shin.L": (aim: (0.05, -0.98, 0.05)),
+            "Foot.L": (aim: (0.06, -0.5, 0.86)),
+        },
+
+        // ---- the neck and head
+        "neck_out": {
+            "Neck": (aim: (0.0, 0.2, 0.98)),
+            "Head": (aim: (0.0, 0.0, 1.0)),
+            "Jaw": (aim: (0.0, -0.1, 1.0)),
+            "Tail": (aim: (0.0, 0.0, -1.0)),
+        },
+        "neck_dive": {
+            "Neck": (aim: (0.0, -0.3, 0.95)),
+            "Head": (aim: (0.0, -0.5, 0.87)),
+            "Jaw": (aim: (0.0, -0.55, 0.84)),
+            "Tail": (aim: (0.0, 0.1, -1.0)),
+        },
+        "neck_flare": {
+            "Neck": (aim: (0.0, 0.62, 0.78)),
+            "Head": (aim: (0.0, 0.0, 1.0)),
+            "Jaw": (aim: (0.0, -0.1, 1.0)),
+            "Tail": (aim: (0.0, -0.45, -0.9)),
+        },
+        "stand": {
+            "Neck": (aim: (0.0, 0.63, 0.77)),
+            "Head": (aim: (0.0, 0.3, 0.95)),
+            "Jaw": (aim: (0.0, -0.11, 0.99)),
+        },
+        "look_left": {
+            "Neck": (aim: (0.1, 0.66, 0.74)),
+            "Head": (aim: (0.72, 0.24, 0.65)),
+            "Jaw": (aim: (0.74, -0.12, 0.66)),
+        },
+        "look_right": {
+            "Neck": (aim: (-0.1, 0.66, 0.74)),
+            "Head": (aim: (-0.72, 0.24, 0.65)),
+            "Jaw": (aim: (-0.74, -0.12, 0.66)),
+        },
+        "head_down": {
+            "Neck": (aim: (0.0, 0.3, 0.95)),
+            "Head": (aim: (0.0, -0.3, 0.95)),
+            "Jaw": (aim: (0.0, -0.45, 0.89)),
+        },
+        // Swallowing: the head thrown back, the beak open.
+        "throw_back": {
+            "Neck": (aim: (0.0, 0.95, 0.3)),
+            "Head": (aim: (0.0, 0.8, 0.6)),
+            "Jaw": (aim: (0.0, 0.25, 0.97)),
+        },
+        "throw_shut": {
+            "Neck": (aim: (0.0, 0.9, 0.42)),
+            "Head": (aim: (0.0, 0.7, 0.7)),
+            "Jaw": (aim: (0.0, 0.6, 0.8)),
+        },
+        "swim_neck": {
+            "Neck": (aim: (0.0, 0.72, 0.69)),
+            "Head": (aim: (0.0, 0.2, 0.98)),
+            "Jaw": (aim: (0.0, -0.11, 0.99)),
+        },
+    },
+
+    clips: {
+        // A long held glide, and the wings are never quite still.
+        "glide": (duration: 2.4, looping: true, keys: [
+            (0.0, ["wings_spread", "legs_tucked", "neck_out"]),
+            (1.2, ["wings_spread_b", "legs_tucked", "neck_out"]),
+        ]),
+        "flap": (duration: 0.46, looping: true, keys: [
+            (0.0, ["wings_top", "legs_tucked", "neck_out"]),
+            (0.12, ["wings_pull", "legs_tucked", "neck_out"]),
+            (0.22, ["wings_bottom", "legs_tucked", "neck_out"]),
+            (0.34, ["wings_rise", "legs_tucked", "neck_out"]),
+        ]),
+        // Getting off the ground, and the legs let go of it last.
+        "flap_hard": (duration: 0.28, looping: true, keys: [
+            (0.0, ["wings_top", "legs_dangling", "neck_out"]),
+            (0.08, ["wings_pull", "legs_dangling", "neck_out"]),
+            (0.14, ["wings_bottom", "legs_dangling", "neck_out"]),
+            (0.21, ["wings_rise", "legs_dangling", "neck_out"]),
+        ]),
+        "dive": (duration: 1.0, looping: true, keys: [
+            (0.0, ["wings_dive", "legs_tucked", "neck_dive"]),
+        ]),
+        "land": (duration: 0.5, looping: true, keys: [
+            (0.0, ["wings_flare", "legs_reaching", "neck_flare"]),
+            (0.25, ["wings_spread_b", "legs_reaching", "neck_flare"]),
+        ]),
+        "idle": (duration: 9.0, looping: true, keys: [
+            (0.0, ["stand"]),
+            (2.0, ["stand"]),
+            (2.5, ["look_left"]),
+            (4.0, ["look_left"]),
+            (4.5, ["stand"]),
+            (6.0, ["look_right"]),
+            (7.2, ["look_right"]),
+            (7.7, ["head_down"]),
+            (8.5, ["stand"]),
+        ]),
+        "walk": (duration: 0.7, looping: true, keys: [
+            (0.0, ["step_left", "head_down"]),
+            (0.35, ["step_right", "stand"]),
+        ]),
+        "float": (duration: 6.0, looping: true, keys: [
+            (0.0, ["legs_folded", "swim_neck"]),
+            (2.0, ["legs_folded", "look_left"]),
+            (3.0, ["legs_folded", "swim_neck"]),
+            (4.6, ["legs_folded", "look_right"]),
+        ]),
+        "swallow": (duration: 1.1, keys: [
+            (0.0, ["legs_folded", "swim_neck"]),
+            (0.2, ["legs_folded", "throw_back"]),
+            (0.45, ["legs_folded", "throw_shut"]),
+            (0.65, ["legs_folded", "throw_back"]),
+            (0.85, ["legs_folded", "throw_shut"]),
+            (1.1, ["legs_folded", "swim_neck"]),
+        ]),
+    },
+)

@@ -15,13 +15,14 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 
 use crate::grip;
+use crate::keys;
 use anyhow::{Context as _, Result, bail};
 use glam::{Mat3, Mat4, Quat, Vec2, Vec3, Vec4};
 use grimora_core::animation::{
     AnimationClip, Channel, ClipEvent, Interpolation, Joint, JointTransform, Keyframes, MAX_JOINTS,
 };
 use grimora_core::pose::Rig as PoseRig;
-use grimora_core::{AlphaMode, Material, MeshData, PoseClip, Skeleton, Submesh, TextureData, Vertex};
+use grimora_core::{AlphaMode, Material, MeshData, PoseClip, Shading, Skeleton, Submesh, TextureData, Vertex};
 
 /// Largest texture side used when a scene doesn't say otherwise.
 pub const DEFAULT_MAX_TEXTURE_SIZE: u32 = 2048;
@@ -41,7 +42,10 @@ pub fn load_model(path: &Path, max_texture_size: u32) -> Result<MeshData> {
     let key = (path.to_path_buf(), max);
     // A clip saved in the animator counts as the model changing.
     let modified = |file: &Path| std::fs::metadata(file).and_then(|m| m.modified()).ok();
-    let mtime = modified(path).max(clips_changed(path)).max(modified(&grip::grip_path(path)));
+    let mtime = modified(path)
+        .max(clips_changed(path))
+        .max(modified(&grip::grip_path(path)))
+        .max(modified(&keys::keys_path(path)));
     if let Some((cached_mtime, mesh)) = cache().lock().unwrap().get(&key)
         && *cached_mtime == mtime
     {
@@ -50,6 +54,7 @@ pub fn load_model(path: &Path, max_texture_size: u32) -> Result<MeshData> {
     let mut mesh = import(path, max)?;
     let fit = hold_grip(path, &mut mesh);
     add_pose_clips(path, &mut mesh);
+    keys::add_key_clips(path, &mut mesh);
     // Baked clips key the fingers too: the file has the last word there as well.
     if let (Some(fit), Some(skeleton)) = (&fit, &mesh.skeleton) {
         let mut skeleton = Skeleton::clone(skeleton);
@@ -145,15 +150,41 @@ fn import(path: &Path, max_texture_size: u32) -> Result<MeshData> {
         bail!("{} has no scene", path.display());
     };
     let nodes = NodeTree::new(&document, &scene);
-    let rig = document.skins().next().and_then(|skin| Rig::new(&document, &skin, &buffers, &nodes, path));
+    let rig = match document.skins().next() {
+        Some(skin) => Rig::new(&document, &skin, &buffers, &nodes, path),
+        None => Rig::from_nodes(&document, &buffers, &nodes),
+    };
     if document.skins().len() > 1 {
         log::warn!("{}: only the first skin is used", path.display());
     }
 
+    // Nodes named `*_LOD<n>` are simpler versions, and `*_COL` the shape things bump into.
+    let mut lods: std::collections::BTreeMap<usize, (f32, MeshData)> = Default::default();
+    let mut collision = MeshData::new();
     for &node_index in &nodes.order {
         let node = document.nodes().nth(node_index).expect("node index from the tree");
+        if let Some(wind) = node_extra(&node, "wind") {
+            mesh.wind = mesh.wind.max(wind);
+        }
         let Some(gltf_mesh) = node.mesh() else { continue };
         let world = nodes.world[&node_index];
+        let role = nodes.ancestors(node_index).find_map(|n| node_role(&document.nodes().nth(n)?));
+        let target = match role {
+            Some(Role::Collision) => {
+                for primitive in gltf_mesh.primitives() {
+                    append_primitive(&mut collision, &primitive, &buffers, world, Binding::None, 0);
+                }
+                continue;
+            }
+            Some(Role::Lod(level, screen_size)) => {
+                let (_, lod) = lods.entry(level).or_insert_with(|| {
+                    let lod = MeshData { materials: mesh.materials.clone(), ..Default::default() };
+                    (screen_size.unwrap_or(LOD_SCREEN_SIZE / level as f32), lod)
+                });
+                lod
+            }
+            None => &mut mesh,
+        };
         let (placement, binding) = match (&rig, node.skin()) {
             (Some(rig), Some(skin)) if skin.index() == rig.skin => (Mat4::IDENTITY, Binding::Skinned),
             (_, Some(_)) => {
@@ -177,10 +208,21 @@ fn import(path: &Path, max_texture_size: u32) -> Result<MeshData> {
                 continue;
             }
             let material = primitive.material().index().unwrap_or(default_material);
-            append_primitive(&mut mesh, &primitive, &buffers, placement, binding, material);
+            append_primitive(target, &primitive, &buffers, placement, binding, material);
         }
     }
     mesh.skeleton = rig.map(|rig| Arc::new(rig.skeleton));
+    if !collision.is_empty() {
+        mesh.collision = Some(Arc::new(grimora_core::CollisionMesh::from_mesh(&collision)));
+    }
+    for (_, (screen_size, mut lod)) in lods {
+        if lod.submeshes.iter().any(|s| s.material == default_material) {
+            lod.materials.push(Material::default());
+        }
+        lod.wind = mesh.wind;
+        mesh.lods.push(grimora_core::MeshLod { screen_size, mesh: lod });
+    }
+    mesh.lods.sort_by(|a, b| b.screen_size.total_cmp(&a.screen_size));
 
     if mesh.submeshes.iter().any(|s| s.material == default_material) {
         mesh.materials.push(Material::default());
@@ -198,6 +240,34 @@ fn import(path: &Path, max_texture_size: u32) -> Result<MeshData> {
         decoded.as_secs_f64() * 1000.0
     );
     Ok(mesh)
+}
+
+/// Screen size at which a model's first LOD takes over when its node doesn't say
+/// (`screen_size` in the node's extras); the n-th takes over at this over n.
+const LOD_SCREEN_SIZE: f32 = 0.2;
+
+/// What a node of a model file is for, by its name's suffix.
+enum Role {
+    /// `_LOD<n>`: the n-th simpler version, with the screen size its extras give.
+    Lod(usize, Option<f32>),
+    /// `_COL`: the collision shape.
+    Collision,
+}
+
+fn node_role(node: &gltf::Node) -> Option<Role> {
+    let (_, suffix) = node.name()?.rsplit_once('_')?;
+    if suffix == "COL" {
+        return Some(Role::Collision);
+    }
+    let level: usize = suffix.strip_prefix("LOD")?.parse().ok().filter(|&n| n > 0)?;
+    Some(Role::Lod(level, node_extra(node, "screen_size")))
+}
+
+/// A number in a node's extras (Blender writes an object's custom properties there).
+fn node_extra(node: &gltf::Node, key: &str) -> Option<f32> {
+    let extras = node.extras().as_ref()?;
+    let value = gltf::json::deserialize::from_str::<gltf::json::Value>(extras.get()).ok()?;
+    value.get(key)?.as_f64().map(|v| v as f32)
 }
 
 /// The scene's nodes with their world matrices and parents, in file order.
@@ -303,14 +373,99 @@ impl Rig {
             })
             .collect();
 
-        let clips =
-            document.animations().enumerate().filter_map(|(i, a)| clip(&a, i, &joint_of_node, buffers)).collect();
-        let skeleton = Skeleton::new(joints, root.unwrap_or(Mat4::IDENTITY), clips);
+        let clips = document
+            .animations()
+            .enumerate()
+            .filter_map(|(i, a)| clip(&a, i, &joint_of_node, &HashMap::new(), buffers))
+            .collect();
+        Some(Self::finish(skin.index(), joints, root.unwrap_or(Mat4::IDENTITY), clips, joint_of_node))
+    }
+
+    /// For a model with no skin whose animations move its nodes, like a book that opens: every
+    /// node becomes a joint, and its meshes follow it rigidly.
+    fn from_nodes(document: &gltf::Document, buffers: &[gltf::buffer::Data], nodes: &NodeTree) -> Option<Self> {
+        if document.animations().next().is_none() || nodes.order.is_empty() || nodes.order.len() > MAX_JOINTS {
+            return None;
+        }
+        let joint_of_node: HashMap<usize, usize> = nodes.order.iter().enumerate().map(|(i, &n)| (n, i)).collect();
+        let mut morphs = HashMap::new();
+        let joints: Vec<Joint> = nodes
+            .order
+            .iter()
+            .enumerate()
+            .map(|(i, &index)| {
+                let node = document.nodes().nth(index).expect("node index from the tree");
+                let (translation, rotation, scale) = node.transform().decomposed();
+                let rest = JointTransform {
+                    translation: Vec3::from(translation),
+                    rotation: Quat::from_array(rotation).normalize(),
+                    scale: Vec3::from(scale),
+                };
+                if let Some(bend) = morph_as_bend(&node, buffers) {
+                    let (scale, rotation, translation) = (rest.matrix() * bend).to_scale_rotation_translation();
+                    morphs.insert(index, (rest, JointTransform { translation, rotation, scale }));
+                }
+                Joint {
+                    name: node.name().map_or_else(|| format!("joint{i}"), str::to_owned),
+                    parent: nodes.parent.get(&index).and_then(|parent| joint_of_node.get(parent)).copied(),
+                    rest,
+                    inverse_bind: nodes.world[&index].inverse(),
+                }
+            })
+            .collect();
+        let clips = document
+            .animations()
+            .enumerate()
+            .filter_map(|(i, a)| clip(&a, i, &joint_of_node, &morphs, buffers))
+            .collect();
+        Some(Self::finish(usize::MAX, joints, Mat4::IDENTITY, clips, joint_of_node))
+    }
+
+    fn finish(
+        skin: usize,
+        joints: Vec<Joint>,
+        root: Mat4,
+        clips: Vec<AnimationClip>,
+        joint_of_node: HashMap<usize, usize>,
+    ) -> Self {
+        let skeleton = Skeleton::new(joints, root, clips);
         let mut globals = Vec::new();
         skeleton.global_transforms(&skeleton.rest_pose(), &mut globals);
         let rest_skinning = globals.iter().zip(&skeleton.joints).map(|(g, j)| *g * j.inverse_bind).collect();
-        Some(Self { skin: skin.index(), skeleton, joint_of_node, rest_skinning })
+        Self { skin, skeleton, joint_of_node, rest_skinning }
     }
+}
+
+/// The engine has no morph targets, but a rigid part can still do most of what one does to it:
+/// the turn, shift and stretch closest to the first target of `node`'s mesh, by least squares.
+fn morph_as_bend(node: &gltf::Node, buffers: &[gltf::buffer::Data]) -> Option<Mat4> {
+    let mut pairs: Vec<(Vec3, Vec3)> = Vec::new();
+    for primitive in node.mesh()?.primitives() {
+        let reader = primitive.reader(|buffer| buffers.get(buffer.index()).map(|data| &data.0[..]));
+        let (Some(positions), Some((Some(moved), _, _))) =
+            (reader.read_positions(), reader.read_morph_targets().next())
+        else {
+            continue;
+        };
+        pairs.extend(positions.zip(moved).map(|(p, d)| (Vec3::from(p), Vec3::from(p) + Vec3::from(d))));
+    }
+    if pairs.is_empty() {
+        return None;
+    }
+    let count = pairs.len() as f32;
+    let from = pairs.iter().map(|pair| pair.0).sum::<Vec3>() / count;
+    let to = pairs.iter().map(|pair| pair.1).sum::<Vec3>() / count;
+    let outer = |a: Vec3, b: Vec3| Mat3::from_cols(a * b.x, a * b.y, a * b.z);
+    let (mut spread, mut carried) = (Mat3::ZERO, Mat3::ZERO);
+    for &(p, q) in &pairs {
+        spread += outer(p - from, p - from);
+        carried += outer(q - to, p - from);
+    }
+    if spread.determinant().abs() < 1e-18 {
+        return None;
+    }
+    let linear = carried * spread.inverse();
+    Some(Mat4::from_translation(to) * Mat4::from_mat3(linear) * Mat4::from_translation(-from))
 }
 
 /// Converts the channels of `animation` that target skeleton joints.
@@ -318,6 +473,7 @@ fn clip(
     animation: &gltf::Animation,
     index: usize,
     joint_of_node: &HashMap<usize, usize>,
+    morphs: &HashMap<usize, (JointTransform, JointTransform)>,
     buffers: &[gltf::buffer::Data],
 ) -> Option<AnimationClip> {
     use gltf::animation::util::ReadOutputs;
@@ -352,7 +508,27 @@ fn clip(
                 let v: Vec<Vec3> = v.map(Vec3::from).collect();
                 Keyframes::Scale(values(v.len()).into_iter().map(|k| v[k]).collect())
             }
-            // Morph target weights aren't supported.
+            // Only where the part can bend instead: see `morph_as_bend`.
+            Some(ReadOutputs::MorphTargetWeights(v)) => {
+                let Some((rest, bent)) = morphs.get(&channel.target().node().index()) else { continue };
+                let weights: Vec<f32> = v.into_f32().collect();
+                let stride = (weights.len() / times.len().max(1)).max(1);
+                let poses: Vec<JointTransform> = weights.chunks(stride).map(|w| rest.lerp(bent, w[0])).collect();
+                let interpolation = Interpolation::Linear;
+                channels.push(Channel {
+                    joint,
+                    interpolation,
+                    times: times.clone(),
+                    keys: Keyframes::Translation(poses.iter().map(|pose| pose.translation).collect()),
+                });
+                channels.push(Channel {
+                    joint,
+                    interpolation,
+                    times: times.clone(),
+                    keys: Keyframes::Scale(poses.iter().map(|pose| pose.scale).collect()),
+                });
+                Keyframes::Rotation(poses.iter().map(|pose| pose.rotation).collect())
+            }
             _ => continue,
         };
         let interpolation = match interpolation {
@@ -519,7 +695,8 @@ fn material(m: &gltf::Material, textures: &[Arc<TextureData>]) -> Material {
         normal_scale: normal.as_ref().map_or(1.0, |n| n.scale()),
         occlusion_strength: occlusion.as_ref().map_or(1.0, |o| o.strength()),
         double_sided: m.double_sided(),
-        shading: Default::default(),
+        // Leaves and crowns: lit from above on both faces, like the generated plants.
+        shading: if m.name().is_some_and(|n| n.starts_with("foliage")) { Shading::Foliage } else { Shading::Standard },
         pixelated: pbr
             .base_color_texture()
             .is_some_and(|t| t.texture().sampler().mag_filter() == Some(gltf::texture::MagFilter::Nearest)),
@@ -534,6 +711,7 @@ fn material(m: &gltf::Material, textures: &[Arc<TextureData>]) -> Material {
         metallic_roughness_texture: pbr.metallic_roughness_texture().and_then(|t| texture(t.texture(), t.tex_coord())),
         occlusion_texture: occlusion.as_ref().and_then(|t| texture(t.texture(), t.tex_coord())),
         emissive_texture: m.emissive_texture().and_then(|t| texture(t.texture(), t.tex_coord())),
+        ..Default::default()
     }
 }
 
@@ -888,6 +1066,28 @@ mod tests {
         let hips = animator.joint_transform("hips").unwrap().w_axis;
         let lantern = animator.joint_transform("lantern").unwrap().w_axis;
         assert!((hips.distance(lantern) - lantern_reach).abs() < 1e-4);
+    }
+
+    #[test]
+    fn nodes_animated_without_a_skin_become_joints() {
+        let path = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/models/objects/Livro-Articulado.glb"));
+        let mesh = load_model(path, DEFAULT_MAX_TEXTURE_SIZE).unwrap();
+        let skeleton = mesh.skeleton.clone().expect("its nodes are the skeleton");
+        assert!(skeleton.clip("Abrir").is_some() && skeleton.clip("Fechar").is_some());
+        let joint = skeleton.joint("Capa dianteira").unwrap();
+
+        // Shut, the cover lies over the pages; open, it is flat on the other side of the spine.
+        let mut animator = grimora_core::Animator::new(skeleton);
+        animator.update(0.0);
+        let cover_at = |animator: &grimora_core::Animator| {
+            animator.skinning_matrices()[joint].transform_point3(Vec3::new(0.08, 0.045, 0.0))
+        };
+        let shut = cover_at(&animator);
+        assert!((shut - Vec3::new(0.08, 0.045, 0.0)).length() < 1e-4, "at rest it stays as drawn: {shut}");
+        assert!(animator.play_once("Abrir", 0.0));
+        animator.update(5.0);
+        let open = cover_at(&animator);
+        assert!(open.x < -0.2 && open.y < 0.03, "the cover swung over: {open}");
     }
 
     #[test]

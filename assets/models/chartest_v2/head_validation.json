@@ -1,0 +1,26 @@
+{
+  "base_triangles": 880,
+  "triangles": 1418,
+  "vertices": 935,
+  "shape_keys": [
+    "Basis",
+    "Nose_Width",
+    "Nose_Projection",
+    "Nose_Bridge",
+    "Eyes_Spacing",
+    "Eyes_Size",
+    "Mouth_Width",
+    "Lips_Fullness",
+    "Jaw_Width",
+    "Chin_Length",
+    "Cheekbones",
+    "Head_Width",
+    "Head_Height",
+    "Blink_R",
+    "Blink_L",
+    "Mouth_Open"
+  ],
+  "body_preserved": true,
+  "rig_preserved": true,
+  "native_animations_preserved": 15
+}

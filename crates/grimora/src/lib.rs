@@ -23,29 +23,46 @@
 
 mod combat;
 mod config;
+mod fauna;
 mod fly_camera;
 mod gamepad;
+pub mod generated;
 mod interaction;
+mod items;
+pub mod land;
 mod lock_on;
 mod npc;
 mod options;
+pub mod portrait;
 mod runner;
 pub mod save;
+mod shot;
+pub mod story;
 mod streaming;
 mod third_person;
+mod water;
+mod weather_audio;
 mod world;
 
-pub use combat::{CombatEvent, Fighter, Guard, Health, Stamina};
+use grimora_core::Vec3;
+
+pub use combat::{CombatEvent, Fighter, Frozen, Guard, Health, Stamina};
 pub use config::{EngineConfig, USAGE};
+pub use fauna::{BirdDoing, CrabDoing, Fauna, FaunaCount, FaunaEvent, FaunaSound, RayDoing, Threat};
 pub use fly_camera::FlyCamera;
 pub use interaction::{Interaction, TriggerEvent, TriggerState};
+pub use items::{Container, DroppedItem, HOTBAR, Inventory, ItemStack, ItemState, Landing, Pickup, Placed};
+pub use generated::{GenId, GenState, Generated};
+pub use land::{Land, LandStats};
 pub use npc::{Agent, AgentStatus, Brain, NpcEvent};
 pub use options::{Options, RESOLUTIONS, ShadowQuality, UI_SCALES};
 pub use runner::{Context, run};
 pub use save::SaveStore;
+pub use shot::{Shot, ShotDesc, ShotTarget};
 pub use streaming::StreamingStats;
 pub use third_person::{CharacterState, ThirdPersonController};
-pub use world::{Attached, Body, Collider, Entity, Light, MeshId, Name, Renderable, SceneIndex, World};
+pub use water::Floating;
+pub use world::{Attached, Body, Collider, Entity, Light, MeshId, Name, Renderable, SceneIndex, World, Worn};
 
 pub use grimora_audio as audio;
 pub use grimora_core as core;
@@ -66,24 +83,31 @@ pub trait Game: 'static {
 
     /// Every frame, before rendering.
     fn update(&mut self, ctx: &mut Context);
+
+    /// The world's origin just moved, before this frame's `update`: every local position
+    /// changed by `offset` (see [`World::shift_origin`]). The engine moved what it owns, the
+    /// camera and sound included; move whatever positions the game keeps outside the world,
+    /// such as a [`ThirdPersonController`] (with its `shift`).
+    fn origin_shifted(&mut self, _ctx: &mut Context, _offset: Vec3) {}
 }
 
 pub mod prelude {
     pub use crate::{
-        Agent, AgentStatus, Body, Brain, CharacterState, Collider, CombatEvent, Context, EngineConfig, Entity, Fighter,
-        FlyCamera, Game, Guard, Health, Interaction, Light, MeshId, Name, NpcEvent, Options, Renderable, SaveStore,
-        ShadowQuality, Stamina, ThirdPersonController, TriggerEvent, World,
+        Agent, AgentStatus, Body, Brain, CharacterState, Collider, CombatEvent, Context, EngineConfig, Entity,
+        FaunaEvent, Fighter, Floating, FlyCamera, Frozen, Game, Guard, HOTBAR, Health, Interaction, Inventory,
+        ItemStack, Landing, Light, MeshId, Name, NpcEvent, Options, Pickup, Placed, Renderable, SaveStore,
+        ShadowQuality, Shot, ShotDesc, ShotTarget, Stamina, ThirdPersonController, TriggerEvent, World, Worn,
     };
     pub use grimora_audio::{Audio, Category, Emitter, SoundId};
     pub use grimora_core::{
-        ActionMap, Animator, Binding, Camera, Environment, EulerRot, Input, KeyCode, Mat4, MeshData, MouseButton,
-        PadAxis, PadButton, ParticleDesc, ParticleEffect, ParticleShape, ParticleSystem, PointLight, Quat, Time,
-        Transform, Vec2, Vec3, Vec4, actions,
+        ActionMap, Animator, Binding, Camera, DVec3, Environment, EulerRot, Input, KeyCode, Mat4, MeshData,
+        MouseButton, Origin, PadAxis, PadButton, ParticleDesc, ParticleEffect, ParticleShape, ParticleSystem,
+        PointLight, Quat, Time, Transform, Vec2, Vec3, Vec4, WaterLook, WaterPoint, WorldPos, WorldTransform, actions,
     };
     pub use grimora_physics::{BodyHandle, CharacterBody, NavPath, NavShape, Physics, RayHit};
     pub use grimora_render::{Anchor, Rect, TextStyle, Theme, Ui, UiInput};
     pub use grimora_scene::{
-        Behavior, Blade, BodyDesc, CombatDesc, Interactable, MeshDesc, Notice, Reaction, Trigger, TriggerShape, Weapon,
-        load_effect,
+        Behavior, Blade, BodyDesc, CombatDesc, Ground, Interactable, ItemCatalog, ItemDesc, ItemKind, MeshDesc, Notice,
+        Reaction, Trigger, TriggerShape, Weapon, load_effect,
     };
 }

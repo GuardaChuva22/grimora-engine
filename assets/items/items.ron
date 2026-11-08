@@ -1,0 +1,175 @@
+// Everything there is to carry. A scene names this file in its `items`, and its objects name
+// these ids in `pickup` and `container`.
+//
+// `model` is relative to this file. `scale` goes from the model's units to meters: the weapons
+// are drawn at 0.263 meters to the unit, which gives the hand the 2.37 cm thick handle that
+// `chartest_grip.ron` wraps the fingers around. `icon` is `icons/<id>.png` if not given
+// (`cargo run --release -p icon_maker` draws them from the models).
+//
+// Weapons: `blade` is in meters from the grip, `grip` is where along the model the hand closes
+// (in its units, for models whose origin isn't there), and `turn` is 90 for those with one
+// edge, whose +X is where they cut. They all have the same blows for now, the light sword's,
+// written for one hand; those that want two look wrong until they have their own.
+[
+    // ---- grimoires: `at` and `turn` place the open book on the left hand's palm, and each of
+    // `spells` has its picture in `icons/<id>.png`. What they do is up to the game.
+    (id: "grimorio_de_gelo", size: (2, 2), name: "Grimório de Gelo",
+     description: "As contas de uma casa que congelou inteira. Algumas páginas ainda estão frias.",
+     model: "../models/objects/Livro-Articulado.glb", scale: 1.25,
+     kind: Grimoire(at: (-0.069, 0.133, -0.091), turn: (74.8, -121.3, 98.2), spells: [
+         (id: "lanca_de_gelo", name: "Lança de Gelo", description: "Forma uma lança na mão, para mirar e arremessar. Racha no impacto."),
+         (id: "pisao_de_gelo", name: "Pisão de Gelo", description: "Um pisão que manda o gelo pelo chão, em cone, à frente."),
+         (id: "explosao_de_gelo", name: "Explosão de Gelo", description: "Uma explosão em volta de você. Quem ela alcança fica preso no gelo."),
+     ])),
+
+    // ---- straight swords
+    (id: "espada_reta", size: (1, 3), name: "Espada reta", description: "Uma lâmina honesta, de dois fios.",
+     model: "../models/weapons/espada_reta.glb", scale: 0.263,
+     kind: Weapon(weapon: (damage: 10.0, reach: 1.9, cooldown: 0.0, clip: "sword_1", combo: ["sword_2", "sword_3"],
+                           blade: (base: 0.11, tip: 0.79, radius: 0.05), stamina: 16.0, hit_stop: 0.075))),
+    (id: "espada_larga", size: (1, 4), name: "Espada larga", description: "Mais ferro, mais alcance, mais fôlego gasto.",
+     model: "../models/weapons/espada_larga.glb", scale: 0.263,
+     kind: Weapon(weapon: (damage: 14.0, reach: 2.2, cooldown: 0.0, clip: "heavy_1", combo: ["heavy_2", "heavy_3"],
+                           blade: (base: 0.066, tip: 1.03, radius: 0.06), stamina: 22.0, hit_stop: 0.12), grip: 0.12)),
+    (id: "rapieira", size: (1, 4), name: "Rapieira", description: "Fina e comprida, com uma guarda que trabalhou mais que a lâmina.",
+     model: "../models/weapons/rapieira.glb", scale: 0.263,
+     kind: Weapon(weapon: (damage: 9.0, reach: 2.0, cooldown: 0.0, clip: "sword_1", combo: ["sword_2", "sword_3"],
+                           blade: (base: 0.11, tip: 0.91, radius: 0.03), stamina: 12.0, hit_stop: 0.05))),
+    (id: "florete", size: (1, 4), name: "Florete", description: "Quase uma agulha. Quase não pesa.",
+     model: "../models/weapons/florete.glb", scale: 0.263,
+     kind: Weapon(weapon: (damage: 8.0, reach: 2.0, cooldown: 0.0, clip: "sword_1", combo: ["sword_2", "sword_3"],
+                           blade: (base: 0.17, tip: 0.92, radius: 0.03), stamina: 11.0, hit_stop: 0.05))),
+
+    // ---- curved blades
+    (id: "sabre", size: (1, 3), name: "Sabre", description: "Feito para cortar de cima de um cavalo que já não existe.",
+     model: "../models/weapons/sabre.glb", scale: 0.263,
+     kind: Weapon(weapon: (damage: 10.0, reach: 1.9, cooldown: 0.0, clip: "sword_1", combo: ["sword_2", "sword_3"],
+                           blade: (base: 0.11, tip: 0.89, radius: 0.05), stamina: 15.0, hit_stop: 0.07), turn: 90.0)),
+    (id: "sabre_de_abordagem", size: (1, 3), name: "Sabre de abordagem", description: "Curto para os corredores de um navio. A concha protege os dedos.",
+     model: "../models/weapons/sabre_de_abordagem.glb", scale: 0.263,
+     kind: Weapon(weapon: (damage: 11.0, reach: 1.8, cooldown: 0.0, clip: "sword_1", combo: ["sword_2", "sword_3"],
+                           blade: (base: 0.11, tip: 0.82, radius: 0.06), stamina: 16.0, hit_stop: 0.08), turn: 90.0)),
+    (id: "cimitarra", size: (1, 3), name: "Cimitarra", description: "Uma curva longa, que continua o movimento do braço.",
+     model: "../models/weapons/cimitarra.glb", scale: 0.263,
+     kind: Weapon(weapon: (damage: 11.0, reach: 2.0, cooldown: 0.0, clip: "sword_1", combo: ["sword_2", "sword_3"],
+                           blade: (base: 0.11, tip: 0.95, radius: 0.07), stamina: 16.0, hit_stop: 0.07), turn: 90.0)),
+    (id: "alfange", size: (1, 3), name: "Alfange", description: "Pesa na ponta, e é ali que resolve.",
+     model: "../models/weapons/alfange.glb", scale: 0.263,
+     kind: Weapon(weapon: (damage: 12.0, reach: 2.0, cooldown: 0.0, clip: "sword_1", combo: ["sword_2", "sword_3"],
+                           blade: (base: 0.1, tip: 0.92, radius: 0.07), stamina: 18.0, hit_stop: 0.09), turn: 90.0)),
+    (id: "khopesh", size: (1, 3), name: "Khopesh", description: "Uma foice que quis ser espada, muito antes de qualquer outra.",
+     model: "../models/weapons/khopesh.glb", scale: 0.263,
+     kind: Weapon(weapon: (damage: 12.0, reach: 2.0, cooldown: 0.0, clip: "sword_1", combo: ["sword_2", "sword_3"],
+                           blade: (base: 0.11, tip: 0.98, radius: 0.09), stamina: 18.0, hit_stop: 0.09), turn: 90.0)),
+    (id: "katana", size: (1, 4), name: "Katana", description: "Um fio só, e muito bom.",
+     model: "../models/weapons/katana.glb", scale: 0.263,
+     kind: Weapon(weapon: (damage: 12.0, reach: 2.0, cooldown: 0.0, clip: "sword_1", combo: ["sword_2", "sword_3"],
+                           blade: (base: 0.14, tip: 0.89, radius: 0.05), stamina: 17.0, hit_stop: 0.07), turn: 90.0)),
+    (id: "wakizashi", size: (1, 3), name: "Wakizashi", description: "A irmã menor da katana. Fica em casa quando a outra precisa sair.",
+     model: "../models/weapons/wakizashi.glb", scale: 0.263,
+     kind: Weapon(weapon: (damage: 9.0, reach: 1.6, cooldown: 0.0, clip: "sword_1", combo: ["sword_2", "sword_3"],
+                           blade: (base: 0.1, tip: 0.64, radius: 0.04), stamina: 12.0, hit_stop: 0.06), turn: 90.0)),
+
+    // ---- short things
+    (id: "adaga", size: (1, 2), name: "Adaga", description: "Curta. É preciso chegar muito perto.",
+     model: "../models/weapons/adaga.glb", scale: 0.263,
+     kind: Weapon(weapon: (damage: 6.0, reach: 1.1, cooldown: 0.0, clip: "sword_1", combo: ["sword_2", "sword_3"],
+                           blade: (base: 0.06, tip: 0.3, radius: 0.04), stamina: 9.0, hit_stop: 0.05))),
+    (id: "main_gauche", size: (1, 2), name: "Main-gauche", description: "Foi feita para a outra mão, e para desviar lâminas.",
+     model: "../models/weapons/main_gauche.glb", scale: 0.263,
+     kind: Weapon(weapon: (damage: 6.0, reach: 1.1, cooldown: 0.0, clip: "sword_1", combo: ["sword_2", "sword_3"],
+                           blade: (base: 0.06, tip: 0.3, radius: 0.03), stamina: 9.0, hit_stop: 0.05))),
+    (id: "faca_de_caca", size: (1, 2), name: "Faca de caça", description: "Limpa mais do que luta.",
+     model: "../models/weapons/faca_de_caca.glb", scale: 0.263,
+     kind: Weapon(weapon: (damage: 5.0, reach: 1.0, cooldown: 0.0, clip: "sword_1", combo: ["sword_2", "sword_3"],
+                           blade: (base: 0.03, tip: 0.23, radius: 0.04), stamina: 8.0, hit_stop: 0.04), turn: 90.0)),
+    (id: "machete", size: (1, 2), name: "Facão", description: "Abre caminho no mato, e o mato não reclama.",
+     model: "../models/weapons/machete.glb", scale: 0.263,
+     kind: Weapon(weapon: (damage: 8.0, reach: 1.3, cooldown: 0.0, clip: "sword_1", combo: ["sword_2", "sword_3"],
+                           blade: (base: 0.05, tip: 0.35, radius: 0.05), stamina: 11.0, hit_stop: 0.06), turn: 90.0)),
+
+    // ---- axes, whose origin is at the foot of the handle
+    (id: "machadinha", size: (2, 2), name: "Machadinha", description: "Serve para lenha, e não só para lenha.",
+     model: "../models/weapons/machadinha.glb", scale: 0.263,
+     kind: Weapon(weapon: (damage: 9.0, reach: 1.2, cooldown: 0.0, clip: "sword_1", combo: ["sword_2", "sword_3"],
+                           blade: (base: 0.09, tip: 0.21, radius: 0.1), stamina: 13.0, hit_stop: 0.08),
+                  grip: 0.23, turn: 90.0)),
+    // Thin handle: bigger than the rest, for the hand to fit around it.
+    (id: "machado_de_abordagem", size: (2, 3), name: "Machado de abordagem", description: "Corta cabo, corta porta, corta o que estiver atrás da porta.",
+     model: "../models/weapons/machado_de_abordagem.glb", scale: 0.4,
+     kind: Weapon(weapon: (damage: 13.0, reach: 1.5, cooldown: 0.0, clip: "sword_1", combo: ["sword_2", "sword_3"],
+                           blade: (base: 0.27, tip: 0.51, radius: 0.12), stamina: 19.0, hit_stop: 0.1),
+                  grip: 0.35, turn: 90.0)),
+
+    // ---- made for two hands, with one hand's blows for now
+    (id: "flamberge", size: (1, 5), name: "Flamberge", description: "A lâmina ondulada faz o resto do trabalho.",
+     model: "../models/weapons/flamberge.glb", scale: 0.263,
+     kind: Weapon(weapon: (damage: 15.0, reach: 2.1, cooldown: 0.0, clip: "heavy_1", combo: ["heavy_2", "heavy_3"],
+                           blade: (base: 0.079, tip: 0.89, radius: 0.06), stamina: 24.0, hit_stop: 0.13), grip: 0.1)),
+    (id: "zweihander", size: (1, 5), name: "Zweihänder", description: "Pede duas mãos, e ainda assim pesa.",
+     model: "../models/weapons/zweihander.glb", scale: 0.263,
+     kind: Weapon(weapon: (damage: 18.0, reach: 2.4, cooldown: 0.0, clip: "heavy_1", combo: ["heavy_2", "heavy_3"],
+                           blade: (base: 0.084, tip: 1.175, radius: 0.06), stamina: 30.0, hit_stop: 0.15), grip: 0.05)),
+    (id: "espada_colossal", size: (2, 5), name: "Espada colossal", description: "Parece mais um pedaço de muralha.",
+     model: "../models/weapons/espada_colossal.glb", scale: 0.263,
+     kind: Weapon(weapon: (damage: 22.0, reach: 2.3, cooldown: 0.0, clip: "heavy_1", combo: ["heavy_2", "heavy_3"],
+                           blade: (base: 0.105, tip: 1.08, radius: 0.1), stamina: 38.0, hit_stop: 0.18), grip: 0.08)),
+    (id: "machado_grande", size: (2, 5), name: "Machado grande", description: "Dois gumes, e nenhuma pressa.",
+     model: "../models/weapons/machado_grande.glb", scale: 0.4,
+     kind: Weapon(weapon: (damage: 20.0, reach: 1.9, cooldown: 0.0, clip: "sword_1", combo: ["sword_2", "sword_3"],
+                           blade: (base: 0.49, tip: 0.76, radius: 0.14), stamina: 34.0, hit_stop: 0.14),
+                  grip: 0.43)),
+
+    // ---- flintlocks. `at` and `turn` put the grip in the fist, and `tools/gen_gun_clips.py`
+    // prints them, with the `reload` times of the clips it writes. The models are made by
+    // `tools/rig_guns.py`, which gives the sources moving parts.
+    (id: "pistola", size: (2, 1), name: "Pistola de pederneira", description: "Um tiro, e depois um bom motivo para correr.",
+     model: "../models/weapons/Pistola_Pederneira_rig.glb",
+     kind: Gun(
+        gun: (damage: 34.0, range: 55.0, full_damage_to: 16.0, ammo: "bala_de_chumbo",
+              muzzle: (0.411, 0.101, 0.0), pan: (0.143, 0.103, 0.037),
+              spread: 3.4, aimed_spread: 0.6, lock_time: 0.055, raise: 0.13,
+              recoil: (5.5, 1.5), shake: 0.05, shove: 0.2, zoom: 0.93, power: 1.0, clip: "pistol",
+              reload: (ball: (0.5, 1.12), rod: (1.38, 2.94), rod_length: 0.218, rod_grip: [(0.0, 0.172)],
+                       strokes: [1.95, 2.25], cock: 3.02)),
+        at: (0.0, 0.0114, 0.0043), turn: (0.0, 90.0, 30.0))),
+    (id: "mosquete", size: (5, 1), name: "Mosquete", description: "Longo, lento e definitivo. Precisa do chão para ser recarregado.",
+     model: "../models/weapons/Mosquete_rig.glb",
+     kind: Gun(
+        gun: (damage: 72.0, range: 140.0, full_damage_to: 55.0, ammo: "bala_de_chumbo",
+              muzzle: (1.007, 0.044, 0.0), pan: (0.168, 0.047, 0.037),
+              spread: 5.0, aimed_spread: 0.18, lock_time: 0.085, raise: 0.28,
+              recoil: (8.5, 2.0), shake: 0.1, shove: 0.8, zoom: 0.72, power: 1.55, clip: "musket",
+              reload: (ball: (0.95, 1.58), rod: (1.9, 4.97), rod_length: 0.797,
+                       rod_grip: [(1.9, 0.773), (2.2, 0.773), (2.4, 0.3), (2.7, 0.3), (2.82, 0.3), (3.05, 0.3),
+                                  (3.22, 0.55), (3.5, 0.55), (3.64, 0.55), (3.78, 0.55), (4.1, 0.55), (4.25, 0.3),
+                                  (4.5, 0.3), (4.62, 0.3), (4.95, 0.773)],
+                       strokes: [3.5, 3.78], cock: 5.6,
+                       grounded: Some((at: (0.0, -0.72, 0.03), turn: (0.0, -90.0, 90.0),
+                                       slide_in: (0.05, 0.45), slide_out: (5.1, 5.5))))),
+        at: (0.0, 0.0417, -0.0468), turn: (0.0, 90.0, 25.0))),
+    (id: "bala_de_chumbo", size: (1, 1), name: "Bala de chumbo", description: "Pesada para o tamanho. Serve na pistola e no mosquete.",
+     model: "../models/weapons/Bala_Chumbo.glb", scale: 2.8, stack: 30, price: 2),
+
+    // ---- the rest
+    (id: "maca", size: (1, 1), name: "Maçã", description: "Ainda firme. Recupera um pouco de vida.",
+     model: "../models/objects/Maca.glb", scale: 1.3, stack: 5, price: 4, kind: Consumable(health: 15.0, stamina: 10.0)),
+    // Their pictures come from tools/gen_item_art.py, since they have no models yet.
+    (id: "moeda", size: (1, 1), name: "Moeda", description: "Gastas até quase não ter rosto. Todo mundo ainda aceita.", stack: 999, price: 1),
+    (id: "sucata_de_ferro", size: (1, 1), name: "Sucata de ferro", description: "Restos de alguma coisa que já foi útil. Pode voltar a ser.", stack: 10, price: 6),
+    (id: "erva_amarga", size: (1, 1), name: "Erva amarga", description: "Cresce onde a terra foi ferida. O gosto não engana.", stack: 10, price: 3),
+    (id: "tonico", size: (1, 2), name: "Tônico", description: "Vinho, erva e um pouco de teimosia. Devolve bastante vida.", stack: 3, price: 18, kind: Consumable(health: 45.0, stamina: 30.0)),
+    (id: "capuz", size: (2, 2), name: "Capuz de andarilho", description: "Pano grosso e cheiro de chuva velha.", price: 30, kind: Armor(slot: Head, defense: 2.0)),
+    (id: "gibao", size: (2, 3), name: "Gibão de couro", description: "Rebites na frente, remendos nas costas. Alguém fugiu nele.", price: 70, kind: Armor(slot: Body, defense: 5.0)),
+    (id: "botas", size: (2, 2), name: "Botas ferradas", description: "Pesadas o bastante para lembrar onde o chão fica.", price: 24, kind: Armor(slot: Feet, defense: 1.0)),
+    (id: "capacete_ferro", size: (2, 2), name: "Capacete de ferro", description: "Bate quando você corre. Melhor ele do que sua cabeça.", price: 90,
+     model: "../models/chartest/armor/ferro/Capacete_Ferro.glb", kind: Armor(slot: Head, defense: 4.0)),
+    (id: "peitoral_ferro", size: (2, 3), name: "Peitoral de ferro", description: "Placas forjadas sobre um gibão de carvão. Pesa nos ombros, e é para isso.", price: 220,
+     model: "../models/chartest/armor/ferro/Peitoral_Ferro.glb", kind: Armor(slot: Body, defense: 9.0)),
+    (id: "calca_ferro", size: (2, 3), name: "Calça de ferro", description: "Pano grosso e placas nas coxas. Ninguém se ajoelha com pressa nela.", price: 130,
+     model: "../models/chartest/armor/ferro/Calca_Ferro.glb", kind: Armor(slot: Legs, defense: 5.0)),
+    (id: "botas_ferro", size: (2, 2), name: "Botas de ferro", description: "Grevas até o joelho. O chão ouve você chegar.", price: 80,
+     model: "../models/chartest/armor/ferro/Botas_Ferro.glb", kind: Armor(slot: Feet, defense: 3.0)),
+    (id: "lanterna", size: (1, 2), name: "Lanterna velha", description: "Não acende. Quem sabe um dia.",
+     model: "../models/objects/Lanterna.glb"),
+]

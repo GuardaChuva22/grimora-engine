@@ -64,3 +64,57 @@ impl SoundDesc {
         }
     }
 }
+
+/// The sounds of the weather (`weather_sounds:` in the scene file). The engine plays them
+/// as the weather asks, in any scene with a day cycle.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WeatherSounds {
+    /// Loops while it rains, louder the harder it does.
+    pub rain: Option<PathBuf>,
+    /// Loops while it snows.
+    pub snow: Option<PathBuf>,
+    /// One of these plays, picked at random, after each lightning strike.
+    pub thunder: Vec<PathBuf>,
+}
+
+/// The sounds of water (`water_sounds:` in the scene file). The engine plays them by how
+/// close the camera is, and whether it is under.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WaterSounds {
+    /// Loops near a sea: waves on the shore, louder the closer it is to them.
+    pub sea: Option<PathBuf>,
+    /// Loops near a river.
+    pub river: Option<PathBuf>,
+    /// Loops while the camera is under the water.
+    pub underwater: Option<PathBuf>,
+    /// One of these plays when something falls in.
+    pub splash: Vec<PathBuf>,
+    /// The effect that plays along with it.
+    pub splash_effect: Option<PathBuf>,
+}
+
+impl WaterSounds {
+    pub(crate) fn resolved(&self, dir: impl AsRef<Path>) -> Self {
+        let dir = dir.as_ref();
+        Self {
+            sea: self.sea.as_ref().map(|path| dir.join(path)),
+            river: self.river.as_ref().map(|path| dir.join(path)),
+            underwater: self.underwater.as_ref().map(|path| dir.join(path)),
+            splash: self.splash.iter().map(|path| dir.join(path)).collect(),
+            splash_effect: self.splash_effect.as_ref().map(|path| dir.join(path)),
+        }
+    }
+}
+
+impl WeatherSounds {
+    pub(crate) fn resolved(&self, dir: impl AsRef<Path>) -> Self {
+        let dir = dir.as_ref();
+        Self {
+            rain: self.rain.as_ref().map(|path| dir.join(path)),
+            snow: self.snow.as_ref().map(|path| dir.join(path)),
+            thunder: self.thunder.iter().map(|path| dir.join(path)).collect(),
+        }
+    }
+}

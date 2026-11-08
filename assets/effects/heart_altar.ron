@@ -1,0 +1,88 @@
+// What the crystal's beat does around it: the circle of runes hanging over the altar, and the
+// wave each beat sends through the circle and then along the floor. It sits on the altar and
+// not on the crystal, which floats: every wave has to start at the same height. The effect
+// is 1.14 m above the ground, the circle's height, and the floor is 1.095 m below that.
+//
+// How a wave ends is what sells it. It slows as it goes (`sizes`), thins and breaks up until
+// nothing is left (`erode` reaches 1 + `grain`), and its opacity falls well before that
+// (`colors`), because something this bright only starts to look dimmer near the end.
+[
+    // the circle of runes, fading from one to the next
+    (
+        rate: 0.4,
+        lifetime: (3.5, 3.5),
+        flat: true,
+        shape: Runes,
+        sizes: [2.5],
+        spin: 14.0,
+        colors: [(1.0, 1.0, 1.0, 0.0), (1.0, 1.0, 1.0, 0.85), (1.0, 1.0, 1.0, 0.0)],
+        ramp: [(0.3, 0.08, 0.85, 1.6), (0.56, 0.26, 1.0, 2.6), (0.9, 0.72, 1.0, 4.5)],
+        bands: 3.0,
+        pixels: 90.0,
+        emissive: 1.0,
+        additive: 0.9,
+    ),
+    // the wave through the circle
+    (
+        rate: 0.0,
+        burst: 1,
+        repeat: 2.4,
+        delay: 0.06,
+        position: (0.0, 0.01, 0.0),
+        lifetime: (1.1, 1.1),
+        flat: true,
+        shape: Wave,
+        sizes: [0.7, 2.6, 3.4, 3.9, 4.2, 4.4],
+        colors: [
+            (1.0, 1.0, 1.0, 1.0), (1.0, 1.0, 1.0, 0.75), (1.0, 1.0, 1.0, 0.45),
+            (1.0, 1.0, 1.0, 0.22), (1.0, 1.0, 1.0, 0.08), (1.0, 1.0, 1.0, 0.0),
+        ],
+        ramp: [(0.22, 0.04, 0.7, 0.9), (0.6, 0.28, 1.0, 2.0), (0.96, 0.82, 1.0, 5.0)],
+        erode: [0.0, 0.08, 0.2, 0.42, 0.75, 1.25],
+        noise: 6.0,
+        grain: 0.25,
+        bands: 4.0,
+        pixels: 70.0,
+        emissive: 1.0,
+        additive: 0.9,
+    ),
+    // its light in the air: no steps and no bite, so the end of the wave is one slow fade
+    (
+        rate: 0.0,
+        burst: 1,
+        repeat: 2.4,
+        delay: 0.06,
+        lifetime: (1.4, 1.4),
+        flat: true,
+        shape: Ring,
+        sizes: [1.0, 3.0, 3.9, 4.5, 4.8, 5.0],
+        colors: [(1.0, 1.0, 1.0, 0.5), (1.0, 1.0, 1.0, 0.3), (1.0, 1.0, 1.0, 0.14), (1.0, 1.0, 1.0, 0.0)],
+        ramp: [(0.14, 0.04, 0.6, 0.0), (0.32, 0.12, 0.9, 0.5), (0.5, 0.26, 1.0, 1.0)],
+        emissive: 1.0,
+        additive: 1.0,
+    ),
+    // and the same wave on the floor, wider and slower, the altar hiding where it starts
+    (
+        rate: 0.0,
+        burst: 1,
+        repeat: 2.4,
+        delay: 0.3,
+        position: (0.0, -1.095, 0.0),
+        lifetime: (1.9, 1.9),
+        flat: true,
+        shape: Wave,
+        sizes: [2.4, 4.8, 6.0, 6.8, 7.2, 7.5],
+        colors: [
+            (1.0, 1.0, 1.0, 0.0), (1.0, 1.0, 1.0, 0.6), (1.0, 1.0, 1.0, 0.42),
+            (1.0, 1.0, 1.0, 0.26), (1.0, 1.0, 1.0, 0.12), (1.0, 1.0, 1.0, 0.0),
+        ],
+        ramp: [(0.14, 0.03, 0.55, 0.45), (0.4, 0.16, 0.95, 1.2), (0.8, 0.62, 1.0, 3.4)],
+        erode: [0.0, 0.05, 0.16, 0.36, 0.68, 1.25],
+        noise: 8.0,
+        grain: 0.25,
+        bands: 3.0,
+        pixels: 50.0,
+        emissive: 1.0,
+        additive: 1.0,
+    ),
+]

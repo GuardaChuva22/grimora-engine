@@ -1,0 +1,23 @@
+// Frost spreading over the ground where the cold went by, and melting from its edges: it
+// grows fast, stands, and is eaten away. No outline: it thins out into the ground, and the
+// noise bites holes in it, so patches that overlap run together into one sheet.
+[
+    (
+        rate: 0.0,
+        burst: 1,
+        lifetime: (2.6, 3.6),
+        flat: true,
+        spin: 0.0,
+        sizes: [0.6, 1.9, 2.2, 2.3, 2.35],
+        size_jitter: 0.35,
+        colors: [(1.0, 1.0, 1.0, 0.0), (1.0, 1.0, 1.0, 0.9), (1.0, 1.0, 1.0, 0.85), (1.0, 1.0, 1.0, 0.6), (1.0, 1.0, 1.0, 0.0)],
+        ramp: [(0.5, 0.68, 0.92, 0.0), (0.72, 0.86, 1.0, 0.3), (0.96, 1.0, 1.0, 0.85)],
+        erode: [0.0, 0.0, 0.05, 0.2, 0.5, 1.3],
+        noise: 5.0,
+        grain: 0.85,
+        warp: 0.32,
+        pixels: 46.0,
+        emissive: 1.0,
+        additive: 0.0,
+    ),
+]

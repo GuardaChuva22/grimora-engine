@@ -436,5 +436,5 @@ fn in_the_sandbox_the_pilgrim_walks_around_the_altar() {
     assert!(longest_stop < 5.0, "stood still for {longest_stop} s");
     assert_ne!(world.get::<Agent>(pilgrim).unwrap().status(), AgentStatus::Failed);
     // The animation follows: it walks, on a skeleton with that clip.
-    assert_eq!(world.get::<Animator>(pilgrim).unwrap().current(), Some("walk"));
+    assert_eq!(world.get::<Animator>(pilgrim).unwrap().current(), Some("sword_walk"));
 }

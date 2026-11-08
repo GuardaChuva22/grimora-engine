@@ -1,0 +1,33 @@
+// A great sword driven into the ground: sparks off the blade, then earth thrown up and hanging.
+[
+    (
+        rate: 0.0,
+        burst: 18,
+        lifetime: (0.12, 0.36),
+        area: (0.05, 0.02, 0.05),
+        speed: (2.5, 6.5),
+        acceleration: (0.0, -11.0, 0.0),
+        drag: 3.5,
+        sizes: [0.03, 0.0],
+        size_jitter: 0.5,
+        colors: [(1.0, 0.9, 0.7, 1.0), (1.0, 0.5, 0.15, 1.0)],
+        emissive: 9.0,
+        additive: 1.0,
+        stretch: 0.04,
+        shape: Diamond,
+    ),
+    (
+        rate: 0.0,
+        burst: 26,
+        lifetime: (0.5, 1.2),
+        area: (0.14, 0.02, 0.14),
+        speed: (0.5, 2.4),
+        acceleration: (0.0, -1.6, 0.0),
+        drag: 3.0,
+        turbulence: 0.3,
+        sizes: [0.08, 0.26, 0.34],
+        size_jitter: 0.5,
+        colors: [(0.42, 0.37, 0.31, 0.5), (0.36, 0.32, 0.28, 0.0)],
+        lit: 1.0,
+    ),
+]

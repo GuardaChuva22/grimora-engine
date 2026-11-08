@@ -1,0 +1,209 @@
+// What lives on a generated world, by the map's biome (LifeBook, read by grimora_world's
+// life.rs): plants, ambience loops and the animals of the coast and the ponds. Paths are
+// relative to this file. Each plant is placed by cells of about a quarter of its `reach`, from a
+// seed made of the world's seed, its `name` and the cell: renaming a plant reshuffles it,
+// reordering the list doesn't.
+//
+// Plant fields: `density` is copies per hectare on open ground; `reach` how far from the camera
+// it is drawn; `above`/`below` the ground's height in meters (the beach is under 3.5);
+// `flat` the least the ground may face up; `water: (gap, edge, reach, far)` keeps it `gap`
+// meters off streams and ponds, `edge` times as thick right past that, easing to `far` times
+// by `reach` meters (`far: 0.0` grows only by the water); `patches` 0..1 clumps it in patches
+// `patch_size` meters across; `biome_tint` tints it like the ground's grass; `coast: Some((near,
+// far))` grows it only between those meters inland of the coast. A model with a `*_COL` node
+// (assets/models/savana) is solid near the player; `solid: true` gives any other mesh its hull.
+LifeBook(
+    plants: [
+        // ---- grasses: tall dry savanna grass in sweeps, low weeds between
+        (name: "capim", mesh: Sprite(texture: "../textures/capim_alto.png", size: 1.3),
+         biomes: ["savana_tropical", "floresta_seca_tropical", "estepe_quente"],
+         density: 2600.0, reach: 70.0, scale: (0.7, 1.4), color: (0.86, 0.95, 1.1), color_jitter: 0.18,
+         biome_tint: true, tilt: 0.0, sink: 0.03, patches: 0.55, patch_size: 22.0,
+         water: (gap: 1.0, edge: 1.6, reach: 25.0, far: 1.0)),
+        (name: "mato_baixo", mesh: Sprite(texture: "../textures/mato2.png", size: 0.8),
+         density: 1800.0, reach: 55.0, scale: (0.6, 1.2), color: (0.8, 0.95, 1.15), color_jitter: 0.15,
+         biome_tint: true, tilt: 0.0, sink: 0.03, patches: 0.3, patch_size: 14.0,
+         water: (gap: 1.0, edge: 1.4, reach: 20.0, far: 1.0)),
+        (name: "mato_ralo", mesh: Sprite(texture: "../textures/mato4.png", size: 0.9),
+         density: 700.0, reach: 55.0, scale: (0.7, 1.3), color: (0.8, 0.95, 1.15), color_jitter: 0.15,
+         biome_tint: true, tilt: 0.0, sink: 0.03, patches: 0.4, patch_size: 30.0),
+        // Dry tussocks and seed heads in the tall grass, and the odd flower and aloe.
+        (name: "touceira", mesh: Sprite(texture: "../textures/capim_touceira_seca.png", size: 1.2),
+         density: 500.0, reach: 70.0, scale: (0.7, 1.3), color_jitter: 0.15, tilt: 0.0, sink: 0.03,
+         patches: 0.5, patch_size: 26.0, water: (gap: 2.0, edge: 0.5, reach: 20.0, far: 1.0)),
+        (name: "espigas", mesh: Sprite(texture: "../textures/capim_espigas.png", size: 1.4),
+         density: 300.0, reach: 70.0, scale: (0.7, 1.3), color_jitter: 0.15, tilt: 0.0, sink: 0.03,
+         patches: 0.6, patch_size: 18.0),
+        (name: "flores", mesh: Sprite(texture: "../textures/flores_savana.png", size: 0.45),
+         density: 120.0, reach: 40.0, scale: (0.7, 1.3), color_jitter: 0.1, tilt: 0.0, sink: 0.02,
+         patches: 0.8, patch_size: 10.0),
+        (name: "babosa", mesh: Sprite(texture: "../textures/suculenta_aloe.png", size: 0.7, sway: 0.0),
+         density: 12.0, reach: 90.0, scale: (0.7, 1.4), color_jitter: 0.1, tilt: 0.0, sink: 0.03,
+         flat: 0.85, patches: 0.6, patch_size: 30.0, water: (gap: 10.0, edge: 0.3, reach: 30.0, far: 1.0)),
+        (name: "terra_seca", mesh: Decal(texture: "../textures/decal_terra_seca.png", size: 3.0),
+         density: 6.0, reach: 120.0, scale: (0.8, 2.0), color_jitter: 0.1, tilt: 0.0, sink: -0.02,
+         flat: 0.95, patches: 0.5, patch_size: 60.0, water: (gap: 8.0, edge: 0.3, reach: 30.0, far: 1.0)),
+        // ---- by the water: green grass on the banks, reeds on the very bank, ferns a little further
+        (name: "juncos", mesh: Sprite(texture: "../textures/juncos.png", size: 1.4),
+         density: 2600.0, reach: 110.0, scale: (0.8, 1.3), color_jitter: 0.1, tilt: 0.0, sink: 0.05,
+         above: 1.0, flat: 0.6, water: (gap: 0.2, edge: 1.0, reach: 5.0, far: 0.0)),
+        (name: "taboas", mesh: Sprite(texture: "../textures/taboas.png", size: 1.7),
+         density: 1300.0, reach: 110.0, scale: (0.8, 1.2), color_jitter: 0.1, tilt: 0.0, sink: 0.05,
+         above: 1.0, flat: 0.6, patches: 0.5, patch_size: 12.0, water: (gap: 0.1, edge: 1.0, reach: 4.0, far: 0.0)),
+        (name: "capim_margem", mesh: Sprite(texture: "../textures/capim_verde_margem.png", size: 1.2),
+         density: 1500.0, reach: 90.0, scale: (0.8, 1.3), color_jitter: 0.12, tilt: 0.0, sink: 0.03,
+         above: 1.0, flat: 0.6, water: (gap: 0.5, edge: 1.0, reach: 12.0, far: 0.0)),
+        (name: "arbusto_verde", meshes: [
+             Model(path: "../models/savana/Arbusto-Verde-01-Redondo.glb"),
+             Model(path: "../models/savana/Arbusto-Verde-02-Largo.glb"),
+         ], variants: 6, density: 80.0, reach: 250.0, scale: (0.8, 1.5), color_jitter: 0.12, tilt: 3.0, sink: 0.04,
+         patches: 0.4, patch_size: 30.0, water: (gap: 2.0, edge: 1.0, reach: 25.0, far: 0.0)),
+        (name: "samambaia", mesh: Sprite(texture: "../textures/samambaia.png", size: 1.0),
+         density: 700.0, reach: 80.0, scale: (0.8, 1.5), color_jitter: 0.15, tilt: 0.0, sink: 0.03,
+         water: (gap: 2.0, edge: 1.0, reach: 18.0, far: 0.0)),
+        // ---- shrubs, scattered and thicker along the streams
+        (name: "arbusto", mesh: Sprite(texture: "../textures/arbusto_seco.png", size: 1.6, sway: 0.06),
+         density: 60.0, reach: 450.0, scale: (1.0, 2.0), color: (1.05, 1.0, 0.9), color_jitter: 0.12,
+         tilt: 0.0, sink: 0.04, patches: 0.5, patch_size: 60.0,
+         water: (gap: 2.0, edge: 4.0, reach: 40.0, far: 1.0)),
+        (name: "espinhosa", mesh: Sprite(texture: "../textures/planta_espinhosa.png", size: 1.0, sway: 0.08),
+         density: 30.0, reach: 200.0, scale: (0.8, 1.4), color_jitter: 0.1, tilt: 0.0, sink: 0.03,
+         patches: 0.4, patch_size: 45.0),
+        // ---- trees: flat-crowned acacias, alone on the plain and thicker along the water
+        // Eleven acacia models (four generated, seven sculpted), each placed at its own size, turn
+        // and tint, so no two stands repeat.
+        (name: "acacia", meshes: [
+             Model(path: "../models/savana/Acacia-01-Guarda-Sol.glb"),
+             Model(path: "../models/savana/Acacia_01_Copa_Ampla.glb"),
+             Model(path: "../models/savana/Acacia-02-Forquilha.glb"),
+             Model(path: "../models/savana/Acacia_02_Alta_Esguia.glb"),
+             Model(path: "../models/savana/Acacia-03-Inclinada.glb"),
+             Model(path: "../models/savana/Acacia_03_Vento.glb"),
+             Model(path: "../models/savana/Acacia-04-Jovem.glb"),
+             Model(path: "../models/savana/Acacia_04_Tronco_Duplo.glb"),
+             Model(path: "../models/savana/Acacia_05_Ancia_Retorcida.glb"),
+             Model(path: "../models/savana/Acacia_06_Jovem_Irregular.glb"),
+             Model(path: "../models/savana/Acacia_Savana.glb"),
+         ], variants: 11, density: 5.0, reach: 2600.0, scale: (0.8, 1.2), color_jitter: 0.14,
+         tilt: 2.0, sink: 0.1, patches: 0.5, patch_size: 300.0, flat: 0.85,
+         water: (gap: 4.0, edge: 6.0, reach: 70.0, far: 1.0)),
+        // Thorn thickets, low and wide, in clumps.
+        (name: "espinheiro", meshes: [
+             Model(path: "../models/savana/Arbusto-Espinhoso-01-Baixo.glb"),
+             Model(path: "../models/savana/Arbusto-Espinhoso-02-Alto.glb"),
+         ], variants: 6, density: 12.0, reach: 600.0, scale: (0.9, 1.9), color_jitter: 0.14,
+         tilt: 4.0, sink: 0.08, patches: 0.65, patch_size: 110.0, flat: 0.8,
+         water: (gap: 2.0, edge: 3.0, reach: 40.0, far: 1.0)),
+        // A few baobabs, far apart, on the open plain.
+        (name: "baoba", meshes: [
+             Model(path: "../models/savana/Baoba_01_Digitata_Guarda_Sol.glb"),
+             Model(path: "../models/savana/Baoba_02_Digitata_Bifurcado.glb"),
+             Model(path: "../models/savana/Baoba_03_Digitata_Anciao_Seco.glb"),
+             Model(path: "../models/savana/Baoba_04_Grandidieri_Alameda.glb"),
+             Model(path: "../models/savana/Baoba_05_Grandidieri_Inclinado.glb"),
+             Model(path: "../models/savana/Baoba_06_Grandidieri_Candelabro_Seco.glb"),
+             Model(path: "../models/savana/Baoba_Africano.glb"),
+         ], variants: 7, density: 0.12, reach: 3000.0, scale: (0.8, 1.05), color_jitter: 0.1,
+         tilt: 1.0, sink: 0.25, flat: 0.9, above: 8.0,
+         water: (gap: 25.0, edge: 0.5, reach: 120.0, far: 1.0)),
+        // Palms: along the coast, and a few by streams and ponds.
+        (name: "palmeira", meshes: [
+             Model(path: "../models/savana/Palmeira_01_Torre_Costeira.glb"),
+             Model(path: "../models/savana/Palmeira_02_Vento_Do_Mar.glb"),
+             Model(path: "../models/savana/Palmeira_03_Jovem_Baixa.glb"),
+             Model(path: "../models/savana/Palmeira_04_Gemeas.glb"),
+             Model(path: "../models/savana/Palmeira_05_Velha_Copa_Rala.glb"),
+             Model(path: "../models/savana/Palmeira_06_Arco_Da_Duna.glb"),
+             Model(path: "../models/savana/Palmeira_Curva.glb"),
+         ], variants: 7, density: 10.0, reach: 2000.0, scale: (0.85, 1.15), color_jitter: 0.1,
+         tilt: 3.0, sink: 0.15, above: 1.2, flat: 0.75, patches: 0.6, patch_size: 140.0,
+         coast: Some((12.0, 160.0))),
+        (name: "palmeira_margem", meshes: [
+             Model(path: "../models/savana/Palmeira_02_Vento_Do_Mar.glb"),
+             Model(path: "../models/savana/Palmeira_03_Jovem_Baixa.glb"),
+             Model(path: "../models/savana/Palmeira_04_Gemeas.glb"),
+             Model(path: "../models/savana/Palmeira_Curva.glb"),
+         ], variants: 4, density: 6.0, reach: 2000.0, scale: (0.8, 1.1), color_jitter: 0.1,
+         tilt: 3.0, sink: 0.15, above: 1.5, flat: 0.75, patches: 0.5, patch_size: 80.0,
+         water: (gap: 3.0, edge: 1.0, reach: 30.0, far: 0.0)),
+        // Termite mounds, in loose groups on dry ground.
+        (name: "cupinzeiro", meshes: [
+             Model(path: "../models/savana/Cupinzeiro-01-Catedral.glb"),
+             Model(path: "../models/savana/Cupinzeiro-02-Cupula.glb"),
+             Model(path: "../models/savana/Cupinzeiro-03-Torres.glb"),
+         ], variants: 6, density: 1.5, reach: 600.0, scale: (0.7, 1.3), color_jitter: 0.1,
+         tilt: 4.0, sink: 0.12, flat: 0.88, patches: 0.7, patch_size: 160.0,
+         water: (gap: 15.0, edge: 0.3, reach: 60.0, far: 1.0)),
+        // Banana trees in the wet ground by streams and ponds.
+        (name: "bananeira", meshes: [
+             Model(path: "../models/objects/Bananeira-01-Compacta.glb"),
+             Model(path: "../models/objects/Bananeira-02-Ereta.glb"),
+             Model(path: "../models/objects/Bananeira-03-Larga.glb"),
+             Model(path: "../models/objects/Bananeira-04-Inclinada.glb"),
+             Model(path: "../models/objects/Bananeira-05-Assimetrica.glb"),
+             Model(path: "../models/objects/Bananeira-06-Arredondada.glb"),
+         ], variants: 6, density: 40.0, reach: 500.0, scale: (0.7, 1.15), color_jitter: 0.1,
+         tilt: 3.0, sink: 0.05, above: 1.5, flat: 0.8, patches: 0.5, patch_size: 40.0,
+         water: (gap: 3.0, edge: 1.0, reach: 14.0, far: 0.0)),
+        (name: "arvore_seca", meshes: [
+             Model(path: "../models/savana/Arvore-Morta-01-Galhada.glb"),
+             Model(path: "../models/savana/Arvore-Morta-02-Toco.glb"),
+         ], variants: 4, density: 0.7, reach: 900.0, scale: (0.8, 1.4), color_jitter: 0.1,
+         tilt: 6.0, sink: 0.1, flat: 0.85),
+        // Fallen logs, mostly near the water where the trees are.
+        (name: "tronco_caido", meshes: [
+             Model(path: "../models/savana/Tronco-Caido-01.glb"),
+             Model(path: "../models/objects/Tronco-Oco.glb"),
+         ], variants: 4, density: 0.6, reach: 250.0, scale: (0.8, 1.4), color_jitter: 0.1, tilt: 4.0,
+         sink: 0.08, flat: 0.85, solid: true, water: (gap: 3.0, edge: 8.0, reach: 50.0, far: 1.0)),
+        // ---- stones: the sculpted rocks, more on the slopes, and small ones scattered
+        (name: "rocha", meshes: [
+             Model(path: "../models/objects/Rocha-01-Macica.glb"),
+             Model(path: "../models/objects/Rocha-02-Escarpada.glb"),
+             Model(path: "../models/objects/Rocha-03-Laje.glb"),
+             Model(path: "../models/objects/Rocha-04-Cunha.glb"),
+             Model(path: "../models/objects/Rocha-05-Arredondada.glb"),
+         ], variants: 5, density: 2.5, reach: 600.0, scale: (0.5, 1.6), color_jitter: 0.1,
+         tilt: 15.0, sink: 0.15, flat: 0.5, patches: 0.6, patch_size: 90.0, solid: true),
+        // Laterite: loose stones and boulders.
+        (name: "pedra", meshes: [
+             Model(path: "../models/savana/Laterita-01-Seixo.glb"),
+             Model(path: "../models/savana/Laterita-02-Matacao.glb"),
+             Model(path: "../models/savana/Laterita-04-Laje.glb"),
+             Model(path: "../models/savana/Laterita-01-Seixo.glb"),
+             Model(path: "../models/savana/Laterita-03-Bloco-Grande.glb"),
+         ], variants: 10, density: 3.0, reach: 300.0, scale: (0.6, 1.3), color_jitter: 0.1,
+         tilt: 12.0, sink: 0.08, flat: 0.5, patches: 0.6, patch_size: 90.0),
+        // Boulders fallen from the highland's cliffs, piled at their foot.
+        (name: "matacao_falesia", meshes: [
+             Model(path: "../models/savana/Laterita-02-Matacao.glb"),
+             Model(path: "../models/savana/Laterita-03-Bloco-Grande.glb"),
+             Model(path: "../models/objects/Rocha-02-Escarpada.glb"),
+             Model(path: "../models/savana/Laterita-02-Matacao.glb"),
+         ], variants: 8, density: 45.0, reach: 500.0, scale: (1.0, 3.2), color_jitter: 0.12,
+         tilt: 25.0, sink: 0.2, flat: 0.3, patches: 0.5, patch_size: 25.0, cliff_foot: true, solid: true),
+    ],
+
+    // Loops by biome; `inland` fades them in from the coast, which belongs to the sea.
+    ambience: [
+        (sound: "../sounds/savanna_day.wav", biomes: ["savana_tropical", "floresta_seca_tropical", "estepe_quente"],
+         volume: 0.45, when: Day, inland: 150.0),
+        (sound: "../sounds/savanna_night.wav", biomes: ["savana_tropical", "floresta_seca_tropical", "estepe_quente"],
+         volume: 0.5, when: Night, inland: 120.0),
+    ],
+
+    // The sea's animals live at places along the coast `coast_spacing` meters apart; each kind at
+    // every `every`-th place from the `first`, `offshore` meters out to sea.
+    coast_spacing: 1500.0,
+    sea_fauna: [
+        (species: "../fauna/gaivota.ron", offshore: 20.0, height: 8.0, radius: 160.0, count: 6, every: 5),
+        (species: "../fauna/caranguejo.ron", offshore: 0.0, radius: 40.0, count: 15, every: 3),
+        (species: "../fauna/arraia.ron", offshore: 25.0, radius: 22.0, count: 4, every: 4, first: 1),
+        (species: "../fauna/agua_viva.ron", offshore: 140.0, radius: 40.0, count: 16, every: 4, first: 2),
+        (species: "../fauna/sardinha.ron", offshore: 110.0, radius: 30.0, count: 120, every: 3),
+    ],
+    // Fish only where a pond is deep and wide enough to hold a school.
+    pond_fauna: [
+        (species: "../fauna/sardinha.ron", depth: 1.8, radius: 18.0, count: 40),
+    ],
+)

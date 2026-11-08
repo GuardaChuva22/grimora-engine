@@ -4,16 +4,21 @@
 //! another without judging it, while it is being written.
 
 use glam::{Quat, Vec3};
-use grimora_core::{AnimationClip, Animator, Skeleton};
-use grimora_scene::{DEFAULT_MAX_TEXTURE_SIZE, load_model};
+use grimora_core::{AnimationClip, Animator, Control, PoseSampler, Rig, Skeleton};
+use grimora_scene::{DEFAULT_MAX_TEXTURE_SIZE, load_model, load_pose_clips};
 
 const MODEL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/models/chartest/chartest.gltf");
-const BLOWS: [&str; 3] = ["sword_1", "sword_2", "sword_3"];
+const BLOWS: [&str; 6] = ["sword_1", "sword_2", "sword_3", "heavy_1", "heavy_2", "heavy_3"];
 /// Blows that follow one another in a combo.
-const COMBO: [(&str, &str); 2] = [("sword_1", "sword_2"), ("sword_2", "sword_3")];
+const COMBO: [(&str, &str); 4] =
+    [("sword_1", "sword_2"), ("sword_2", "sword_3"), ("heavy_1", "heavy_2"), ("heavy_2", "heavy_3")];
 const FPS: f32 = 60.0;
 /// From the weapon joint to the tip, at the scale the sword is held.
 const TIP: f32 = 0.787;
+const HEAVY_TIP: f32 = 1.1;
+/// Two hands on the handle pull the right wrist a little further than one.
+const WRIST_BEND: f32 = 70.0;
+const HEAVY_WRIST_BEND: f32 = 75.0;
 /// From the body out: each link turns fastest after the one before, and the tip of the blade,
 /// which in a thrust hardly turns at all, moves fastest last.
 const CHAIN: [&str; 4] = ["hips", "chest", "upper_arm.R", "forearm.R"];
@@ -85,7 +90,9 @@ fn blows_are_driven_by_the_body() {
 
         // The tip: slow up, fast down.
         let weapon = joint("weapon.R");
-        let tip: Vec<Vec3> = all.iter().map(|f| f.position[weapon] + f.rotation[weapon] * Vec3::Y * TIP).collect();
+        let heavy = name.starts_with("heavy");
+        let length = if heavy { HEAVY_TIP } else { TIP };
+        let tip: Vec<Vec3> = all.iter().map(|f| f.position[weapon] + f.rotation[weapon] * Vec3::Y * length).collect();
         let tip_speed: Vec<f32> = tip.windows(2).map(|w| w[0].distance(w[1]) * FPS).collect();
         let before = tip_speed[..(swing * FPS) as usize].iter().cloned().fold(0.0, f32::max);
         let cut = tip_speed[window.clone()].iter().cloned().fold(0.0, f32::max);
@@ -106,12 +113,16 @@ fn blows_are_driven_by_the_body() {
         let (foot_l, foot_r, hips, chest) = (joint("foot.L"), joint("foot.R"), joint("hips"), joint("chest"));
         let lowest = |foot: usize| all.iter().map(|f| f.position[foot].y).fold(f32::MAX, f32::min);
         let mut slide = 0.0f32;
+        let mut slide_at = (true, 0.0);
         for foot in [foot_l, foot_r] {
             let low = lowest(foot) + 0.006;
-            for w in all.windows(2) {
+            for (k, w) in all.windows(2).enumerate() {
                 if w[0].position[foot].y < low && w[1].position[foot].y < low {
                     let moved = (w[1].position[foot] - w[0].position[foot]) * Vec3::new(1.0, 0.0, 1.0);
-                    slide = slide.max(moved.length() * FPS);
+                    if moved.length() * FPS > slide {
+                        slide = moved.length() * FPS;
+                        slide_at = (foot == foot_l, k as f32 / FPS);
+                    }
                 }
             }
         }
@@ -123,7 +134,9 @@ fn blows_are_driven_by_the_body() {
             })
             .fold(0.0, f32::max);
         println!(
-            "[blow] {name} planted foot slides {slide:.2} m/s, body up to {:.0} mm off the feet",
+            "[blow] {name} planted foot slides {slide:.2} m/s ({} at {:.2} s), body up to {:.0} mm off the feet",
+            if slide_at.0 { "left" } else { "right" },
+            slide_at.1,
             off_feet * 1000.0
         );
 
@@ -159,10 +172,68 @@ fn blows_are_driven_by_the_body() {
         assert!(in_order, "{name}: the chain peaks out of order");
         assert!(cut > before * 1.5, "{name}: the cut is hardly faster than the wind-up");
         assert!(cut < 45.0, "{name}: the tip reaches {cut:.0} m/s");
-        assert!(bend.0 < 70.0, "{name}: the wrist bends {:.0} deg", bend.0);
+        let limit = if heavy { HEAVY_WRIST_BEND } else { WRIST_BEND };
+        assert!(bend.0 < limit, "{name}: the wrist bends {:.0} deg", bend.0);
         assert!(twist.0 < 105.0, "{name}: the wrist twists {:.0} deg", twist.0);
         assert!(slide < 0.3, "{name}: a planted foot slides at {slide:.2} m/s");
         assert!(off_feet < 0.2, "{name}: the body is {:.0} mm off the feet", off_feet * 1000.0);
+    }
+}
+
+/// `POSES=<clip> cargo test -p grimora_scene --test blows key_poses -- --nocapture`: what each
+/// key of the sword hand asks of the arms, on the exact keys. Prints nothing without it.
+#[test]
+fn key_poses() {
+    let Ok(name) = std::env::var("POSES") else { return };
+    let mesh = load_model(MODEL.as_ref(), DEFAULT_MAX_TEXTURE_SIZE).unwrap();
+    let skeleton = mesh.skeleton.as_ref().unwrap();
+    let rig = Rig::new(skeleton).unwrap();
+    let clips = load_pose_clips(MODEL.as_ref());
+    for (clip_name, clip) in clips.iter().filter(|(clip_name, _)| clip_name.starts_with(&name)) {
+        let sampler = PoseSampler::with_springs(clip, false);
+        for &(time, _) in &clip.tracks[&Control::HandR] {
+            let mut controls = sampler.sample(time);
+            let solved = rig.solve(&controls);
+            // How far to turn the edge around the blade for the wrists to bend the least.
+            let blade = controls[Control::Blade].normalize();
+            let edge = controls[Control::Edge];
+            let strain = |turn: f32, controls: &mut grimora_core::Controls| {
+                controls[Control::Edge] = Quat::from_axis_angle(blade, turn.to_radians()) * edge;
+                let solved = rig.solve(controls);
+                solved.wrist.powi(2) + solved.wrist_l.powi(2) + (solved.twist.max(90.0) - 90.0).powi(2)
+            };
+            let best = (-18..=18).map(|k| k as f32 * 10.0).fold((0.0, f32::MAX), |best, turn| {
+                let value = strain(turn, &mut controls);
+                if value < best.1 { (turn, value) } else { best }
+            });
+            if std::env::var("POSES_TURNS").is_ok() {
+                let table: Vec<String> = (-6..6)
+                    .map(|k| {
+                        let turn = k as f32 * 30.0;
+                        controls[Control::Edge] = Quat::from_axis_angle(blade, turn.to_radians()) * edge;
+                        let solved = rig.solve(&controls);
+                        format!("{turn:.0}:{:.0}/{:.0}/{:.0}", solved.wrist, solved.twist, solved.wrist_l)
+                    })
+                    .collect();
+                println!("[turns] {clip_name} {time:.3} {}", table.join(" "));
+            }
+            controls[Control::Edge] = Quat::from_axis_angle(blade, best.0.to_radians()) * edge;
+            let eased = rig.solve(&controls);
+            println!(
+                "[pose] {clip_name} {time:.3} short {:3.0} mm foot {:3.0} mm wrist {:3.0} twist {:3.0} left {:3.0} {:3.0} | edge {:4.0}: {:3.0} {:3.0} left {:3.0} {:3.0}",
+                solved.short_hand * 1000.0,
+                solved.short_foot * 1000.0,
+                solved.wrist,
+                solved.twist,
+                solved.wrist_l,
+                solved.twist_l,
+                best.0,
+                eased.wrist,
+                eased.twist,
+                eased.wrist_l,
+                eased.twist_l
+            );
+        }
     }
 }
 
@@ -170,7 +241,7 @@ fn blows_are_driven_by_the_body() {
 type Next = (&'static str, f32, f32);
 
 /// The ways the sandbox goes from one clip to another: what plays and for how long, then what follows.
-const SWITCHES: [(&str, &str, f32, &[Next]); 21] = [
+const SWITCHES: [(&str, &str, f32, &[Next]); 20] = [
     ("stepping to the right", "sword_idle", 0.5, &[("sword_strafe_r", LOCOMOTION, 0.5)]),
     ("stepping to the left", "sword_idle", 0.5, &[("sword_strafe_l", LOCOMOTION, 0.5)]),
     ("stepping back", "sword_idle", 0.5, &[("sword_back", LOCOMOTION, 0.5)]),
@@ -178,8 +249,7 @@ const SWITCHES: [(&str, &str, f32, &[Next]); 21] = [
     ("raising the guard", "sword_idle", 0.5, &[("sword_guard_1", GUARD_UP, 0.4)]),
     ("raising the guard on a run", "sword_run", 0.33, &[("sword_guard_1", GUARD_UP, 0.4)]),
     ("first blow on the guard", "sword_guard_1", 0.5, &[("sword_block_2", BLOCK, 0.6)]),
-    ("second blow on the guard", "sword_guard_2", 0.5, &[("sword_block_3", BLOCK, 0.6)]),
-    ("third blow on the guard", "sword_guard_3", 0.5, &[("sword_block_1", BLOCK, 0.6)]),
+    ("second blow on the guard", "sword_guard_2", 0.5, &[("sword_block_1", BLOCK, 0.6)]),
     ("walking out of sword_1", "sword_1", 0.54, &[("sword_walk", OUT_OF_BLOW, 0.5)]),
     ("walking out of sword_2", "sword_2", 0.46, &[("sword_walk", OUT_OF_BLOW, 0.5)]),
     ("running out of sword_3", "sword_3", 0.68, &[("sword_run", OUT_OF_BLOW, 0.5)]),
@@ -279,7 +349,7 @@ fn gaits_step_at_the_same_points() {
         let mut speeds: Vec<f32> = Vec::new();
         for foot in ["foot.L", "foot.R"].map(|foot| skeleton.joint(foot).unwrap()) {
             let low = all.iter().map(|f| f.position[foot].y).fold(f32::MAX, f32::min) + 0.004;
-            for w in all.windows(2) {
+            for (k, w) in all.windows(2).enumerate() {
                 if w[0].position[foot].y < low && w[1].position[foot].y < low {
                     speeds
                         .push(((w[1].position[foot] - w[0].position[foot]) * Vec3::new(1.0, 0.0, 1.0)).length() * FPS);

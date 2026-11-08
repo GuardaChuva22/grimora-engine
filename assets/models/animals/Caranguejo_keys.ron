@@ -1,0 +1,66 @@
+// The crab's arms. Its legs aren't here: each foot is planted on the ground as it walks, in
+// `grimora/src/fauna/crab.rs`. In the model's space: +X is its left, +Y up, +Z ahead.
+(
+    poses: {
+        "arms_rest": {
+            "Arm.L": (aim: (0.77, 0.38, 0.51)),
+            "Forearm.L": (aim: (0.37, -0.12, 0.92)),
+            "Palm.L": (aim: (0.0, 0.0, 1.0)),
+            "Pincer.L": (aim: (-0.05, 0.0, 1.0)),
+        },
+        "arms_rest_b": {
+            "Arm.L": (aim: (0.75, 0.42, 0.51)),
+            "Forearm.L": (aim: (0.4, -0.08, 0.91)),
+            "Palm.L": (aim: (0.05, 0.04, 1.0)),
+            "Pincer.L": (aim: (0.1, 0.0, 1.0)),
+        },
+        // Facing something down: as big as it can make itself.
+        "arms_up": {
+            "Arm.L": (aim: (0.72, 0.62, 0.32)),
+            "Forearm.L": (aim: (0.5, 0.82, 0.28)),
+            "Palm.L": (aim: (0.2, 0.92, 0.34)),
+            "Pincer.L": (aim: (0.05, 0.96, 0.28)),
+        },
+        "arms_up_b": {
+            "Arm.L": (aim: (0.72, 0.68, 0.28)),
+            "Forearm.L": (aim: (0.58, 0.78, 0.22)),
+            "Palm.L": (aim: (0.34, 0.88, 0.32)),
+            "Pincer.L": (aim: (0.42, 0.86, 0.26)),
+        },
+        // One claw to the sand and up to the mouth, then the other.
+        "feed_left": {
+            "Arm.L": (aim: (0.6, 0.3, 0.74)),
+            "Forearm.L": (aim: (-0.5, 0.05, 0.86)),
+            "Palm.L": (aim: (-0.62, -0.15, 0.77)),
+            "Pincer.L": (aim: (-0.72, -0.2, 0.66)),
+            "Arm.R": (aim: (-0.77, 0.28, 0.57)),
+            "Forearm.R": (aim: (-0.3, -0.42, 0.86)),
+            "Palm.R": (aim: (0.0, -0.62, 0.78)),
+            "Pincer.R": (aim: (0.05, -0.7, 0.71)),
+        },
+        "feed_right": {
+            "Arm.R": (aim: (-0.6, 0.3, 0.74)),
+            "Forearm.R": (aim: (0.5, 0.05, 0.86)),
+            "Palm.R": (aim: (0.62, -0.15, 0.77)),
+            "Pincer.R": (aim: (0.72, -0.2, 0.66)),
+            "Arm.L": (aim: (0.77, 0.28, 0.57)),
+            "Forearm.L": (aim: (0.3, -0.42, 0.86)),
+            "Palm.L": (aim: (0.0, -0.62, 0.78)),
+            "Pincer.L": (aim: (-0.05, -0.7, 0.71)),
+        },
+    },
+    clips: {
+        "idle": (duration: 3.0, looping: true, keys: [
+            (0.0, ["arms_rest"]),
+            (1.5, ["arms_rest_b"]),
+        ]),
+        "threat": (duration: 0.8, looping: true, keys: [
+            (0.0, ["arms_up"]),
+            (0.4, ["arms_up_b"]),
+        ]),
+        "feed": (duration: 1.1, looping: true, keys: [
+            (0.0, ["feed_left"]),
+            (0.55, ["feed_right"]),
+        ]),
+    },
+)

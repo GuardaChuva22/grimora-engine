@@ -7,37 +7,59 @@
 mod collider;
 mod combat;
 mod effect;
+mod fauna;
 pub mod grip;
+mod ground;
+mod item;
+mod keys;
 mod model;
 mod npc;
 mod rng;
+mod savanna;
 mod shapes;
 mod sound;
+pub mod story;
 mod streaming;
 mod terrain;
 mod texture;
 mod trigger;
+mod water;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
 use grimora_core::{Camera, DayCycleDesc, Environment, MeshData, PointLight, SkyTextures, Transform, Vec2, Vec3};
 use serde::{Deserialize, Serialize};
 
 pub use collider::{BodyDesc, ColliderDesc, ColliderShape};
-pub use combat::{Blade, CombatDesc, Weapon};
+pub use combat::{Blade, CombatDesc, GunDesc, GunGrip, ReloadDesc, Weapon};
 pub use effect::{EffectDesc, SceneEffect, load_effect, parse_effect};
+pub use fauna::{
+    CrawlDesc, CycleDesc, DriftDesc, FaunaDesc, FeedingDesc, FlightDesc, GlideDesc, HabitatDesc, HarmDesc, Life,
+    NeedsDesc, SceneFauna, SchoolDesc, SensesDesc, SoundsDesc, SpeciesDesc, SwimDesc, WaveJoint, load_fauna,
+    load_species, parse_species,
+};
+use grimora_core::{Sea, WaterBody, WaterShape, Waters};
+pub use ground::{Ground, MUD_FROM, TerrainGrounds};
+pub use item::{
+    ArmorSlot, ContainerDesc, ItemCatalog, ItemDesc, ItemKind, ObjectItems, PickupDesc, SpellDesc, StowBook,
+    StowFamily, StowLie, StowPass, StowPlace,
+};
+pub use keys::{JointKey, KeyClip, KeyFile, bake_keys, parse_keys};
 pub use model::{DEFAULT_MAX_TEXTURE_SIZE, load_model, load_pose_clips, pose_clips_dir};
 pub use npc::{Behavior, Notice, NpcDesc, Reaction};
 pub use rng::{Rng, fbm, value_noise};
 pub use shapes::{MeshDesc, blob, cube, tube};
-pub use sound::{SceneSound, SoundDesc};
+pub use sound::{SceneSound, SoundDesc, WaterSounds, WeatherSounds};
 pub use streaming::{CellCoord, RegionDesc, SceneCell, SceneRegion, SceneStreaming, StreamingDesc};
+use terrain::Carve;
 pub use terrain::{Pond, Terrain, TerrainDesc, TerrainTextures};
-use texture::{Picture, apply_texture, texture_or_log, water_mesh};
-pub use texture::{TextureDesc, WaterDesc, load_texture};
+use texture::{Picture, apply_texture, texture_or_log};
+pub use texture::{TextureDesc, WaterDesc, load_texture, water_mesh, wrap_in_texture};
 pub use trigger::{Interactable, SceneTrigger, Trigger, TriggerDesc, TriggerShape};
+pub use water::{FloatCell, FloatDesc, FloatHull, RiverDesc, RiverFall, fall_profile, river_falls, river_mesh, water_material};
 
 /// The on-disk scene format.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -53,6 +75,9 @@ pub struct SceneDesc {
     pub player: Option<PlayerDesc>,
     /// Looping ambience and positional emitters.
     pub sounds: Vec<SoundDesc>,
+    /// What rain, snow and lightning sound like. Without these they are silent.
+    pub weather_sounds: WeatherSounds,
+    pub water_sounds: WaterSounds,
     /// Load scattered objects only near the camera (see [`StreamingDesc`]).
     /// Implied, with default settings, when there are `regions`.
     pub streaming: Option<StreamingDesc>,
@@ -66,8 +91,13 @@ pub struct SceneDesc {
     /// The passing of the hours: it then decides the sun, light, fog and sky of
     /// `environment`, and the rest of `environment` still applies.
     pub day_cycle: Option<DayCycleDesc>,
-    /// Sheets of water.
+    /// Sheets of water, and seas, with `sea`.
     pub water: Vec<WaterDesc>,
+    pub rivers: Vec<RiverDesc>,
+    /// The file of items that `pickup` and `container` name, from this file.
+    pub items: Option<String>,
+    /// Animals. Regions can't have any yet.
+    pub fauna: Vec<FaunaDesc>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -144,6 +174,14 @@ pub struct ObjectDesc {
     pub combat: Option<CombatDesc>,
     /// A picture over the whole mesh, instead of its plain colors.
     pub texture: Option<TextureDesc>,
+    /// An item lying there to be taken; it decides the mesh and scale, and needs the scene's `items`.
+    pub pickup: Option<PickupDesc>,
+    /// Holds items, like a chest; the player uses it through `interact`.
+    pub container: Option<ContainerDesc>,
+    /// Floats in water: needs `body: Dynamic(...)`, whose mass this replaces.
+    pub float: Option<FloatDesc>,
+    /// What a step on it sounds like. Without it, something solid is stone.
+    pub ground: Option<Ground>,
 }
 
 impl Default for ObjectDesc {
@@ -167,6 +205,10 @@ impl Default for ObjectDesc {
             npc: None,
             combat: None,
             texture: None,
+            pickup: None,
+            container: None,
+            float: None,
+            ground: None,
         }
     }
 }
@@ -193,6 +235,8 @@ pub struct ScatterDesc {
     pub tilt: f32,
     /// How far each copy is pushed into the ground.
     pub sink: f32,
+    /// How far off the terrain's paths to stay, in meters beyond their edges.
+    pub path_margin: f32,
     pub seed: u64,
     /// Optional light attached to every copy; its position is an offset.
     pub light: Option<PointLight>,
@@ -218,6 +262,7 @@ impl Default for ScatterDesc {
             emissive: 0.0,
             tilt: 4.0,
             sink: 0.05,
+            path_margin: 0.0,
             seed: 1,
             light: None,
             effect: None,
@@ -249,6 +294,9 @@ pub struct SceneObject {
     pub effect: Option<SceneEffect>,
     pub npc: Option<NpcDesc>,
     pub combat: Option<CombatDesc>,
+    pub items: Option<ObjectItems>,
+    pub float: Option<Arc<FloatHull>>,
+    pub ground: Option<Ground>,
 }
 
 /// A scene ready to render: unique meshes plus the instances that use them.
@@ -264,19 +312,57 @@ pub struct Scene {
     pub player: Option<PlayerSpawn>,
     /// Looping sounds, positions in world space and paths resolved from the scene directory.
     pub sounds: Vec<SceneSound>,
+    /// Paths resolved from the scene directory.
+    pub weather_sounds: WeatherSounds,
     /// With streaming on, scattered objects live here (by cell) instead of in
     /// `objects`, along with the region files to load.
     pub streaming: Option<SceneStreaming>,
+    pub water_sounds: WaterSounds,
     pub triggers: Vec<SceneTrigger>,
     /// Effects on their own, each with where it stands.
     pub effects: Vec<(Transform, SceneEffect)>,
     pub day_cycle: Option<DayCycleDesc>,
     /// The pictures `environment.sky` names.
     pub sky_textures: SkyTextures,
+    /// The scene's `items` file; empty without one.
+    pub items: Arc<ItemCatalog>,
+    /// Every body of water the game can ask about.
+    pub waters: Waters,
+    pub fauna: Vec<SceneFauna>,
 }
+
+/// How wide a river's half is at the scale its fall's effect file is written for, in meters.
+pub const FALL_EFFECT_WIDTH: f32 = 6.0;
 
 /// Terrain render chunks are this many grid cells on a side.
 const TERRAIN_CHUNK: usize = 32;
+
+/// Where the scene's rivers run, over the land as it is before they dig it.
+fn region_waters(bodies: Vec<WaterBody>, path: &Path) -> Vec<WaterBody> {
+    let (seas, waters): (Vec<_>, Vec<_>) = bodies.into_iter().partition(|b| matches!(b.shape, WaterShape::Sea(_)));
+    if !seas.is_empty() {
+        log::warn!("{}: a region can't have a sea; it is drawn, but nothing swims or floats in it", path.display());
+    }
+    waters
+}
+
+fn river_courses(desc: &SceneDesc) -> Vec<Vec<grimora_core::RiverPoint>> {
+    if desc.rivers.is_empty() {
+        return Vec::new();
+    }
+    let land = desc.terrain.clone().map(Terrain::new);
+    let ground = |x, z| land.as_ref().map_or(0.0, |land: &Terrain| land.height_at(x, z));
+    desc.rivers.iter().map(|river| water::river_course(river, ground)).collect()
+}
+
+/// The scene's catalog of items, or an empty one if it has none or it's broken.
+fn load_items(desc: &SceneDesc, dir: &Path) -> Arc<ItemCatalog> {
+    let Some(path) = &desc.items else { return Arc::default() };
+    ItemCatalog::load(dir.join(path)).unwrap_or_else(|err| {
+        log::error!("{err:#}");
+        Arc::default()
+    })
+}
 
 impl SceneDesc {
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
@@ -308,8 +394,19 @@ impl Scene {
 
     /// Builds a scene, resolving model paths from `dir`.
     pub fn build_in(desc: &SceneDesc, dir: &Path) -> Self {
-        let terrain = desc.terrain.clone().map(Terrain::new);
+        // Rivers dig their beds, along courses that come from the land as it was.
+        let courses = river_courses(desc);
+        let terrain = desc.terrain.clone().map(|mut terrain| {
+            terrain.carves = courses
+                .iter()
+                .zip(&desc.rivers)
+                .map(|(points, river)| Carve { points: points.clone(), depth: river.depth })
+                .collect();
+            Terrain::new(terrain)
+        });
         let mut builder = Builder::new(dir, terrain.as_ref());
+        builder.river_courses = courses;
+        builder.catalog = load_items(desc, dir);
         if let Some(terrain) = &terrain {
             for chunk in terrain_chunks(terrain, dir) {
                 let collider = Some(ColliderShape::trimesh(&chunk));
@@ -328,6 +425,9 @@ impl Scene {
                     effect: None,
                     npc: None,
                     combat: None,
+                    items: None,
+                    float: None,
+                    ground: None,
                 });
             }
         }
@@ -339,6 +439,7 @@ impl Scene {
             ..Default::default()
         });
         builder.add_contents(desc, streaming.as_mut());
+        let fauna = fauna::load_fauna(&desc.fauna, dir, &mut builder.meshes);
         if let Some(streaming) = &mut streaming {
             streaming.regions = desc
                 .regions
@@ -367,7 +468,12 @@ impl Scene {
         let sky_picture = |path: &Option<String>| path.as_ref().and_then(|p| texture_or_log(&dir.join(p)));
         let sky_textures = SkyTextures { sun: sky_picture(&sky.sun_texture), moon: sky_picture(&sky.moon_texture) };
 
-        let Builder { meshes, objects, lights, sounds, triggers, effects, .. } = builder;
+        let Builder { meshes, objects, lights, sounds, triggers, effects, catalog, water_bodies, .. } = builder;
+        let bed = water_bodies
+            .iter()
+            .find(|body| matches!(body.shape, WaterShape::Sea(_)))
+            .and_then(|sea| Some(Arc::new(water::water_bed(terrain.as_ref()?, sea.level))));
+        let waters = Waters { bodies: water_bodies, bed, wave_scale: 1.0, ..Default::default() };
         Self {
             environment: desc.environment.clone(),
             camera,
@@ -377,11 +483,16 @@ impl Scene {
             terrain,
             player,
             sounds,
+            weather_sounds: desc.weather_sounds.resolved(dir),
+            water_sounds: desc.water_sounds.resolved(dir),
             streaming,
             triggers,
             effects,
             day_cycle: desc.day_cycle.clone(),
             sky_textures,
+            items: catalog,
+            waters,
+            fauna,
         }
     }
 
@@ -392,7 +503,12 @@ impl Scene {
         if desc.terrain.is_some() || !desc.regions.is_empty() {
             log::warn!("{}: regions can't have a terrain or regions of their own; ignored", path.display());
         }
-        let mut builder = Builder::new(path.parent().unwrap_or(Path::new("")), terrain);
+        let dir = path.parent().unwrap_or(Path::new(""));
+        let mut builder = Builder::new(dir, terrain);
+        builder.catalog = load_items(&desc, dir);
+        // A region's rivers follow the scene's ground, but can't dig it: it is built already.
+        let ground = |x, z| terrain.map_or(0.0, |t: &Terrain| t.height_at(x, z));
+        builder.river_courses = desc.rivers.iter().map(|river| water::river_course(river, ground)).collect();
         builder.add_contents(&desc, None);
         Ok(Self {
             environment: Environment::default(),
@@ -407,7 +523,13 @@ impl Scene {
             triggers: builder.triggers,
             effects: builder.effects,
             day_cycle: None,
+            weather_sounds: WeatherSounds::default(),
+            water_sounds: WaterSounds::default(),
             sky_textures: SkyTextures::default(),
+            items: builder.catalog,
+            // A region's lakes and rivers; a sea is the main scene's alone.
+            waters: Waters { bodies: region_waters(builder.water_bodies, path), ..Default::default() },
+            fauna: Vec::new(),
         })
     }
 
@@ -449,6 +571,9 @@ struct Builder<'a> {
     /// Directory model paths are relative to.
     dir: PathBuf,
     terrain: Option<&'a Terrain>,
+    catalog: Arc<ItemCatalog>,
+    water_bodies: Vec<WaterBody>,
+    river_courses: Vec<Vec<grimora_core::RiverPoint>>,
 }
 
 impl<'a> Builder<'a> {
@@ -463,6 +588,9 @@ impl<'a> Builder<'a> {
             cache: HashMap::new(),
             dir: dir.to_path_buf(),
             terrain,
+            catalog: Arc::default(),
+            water_bodies: Vec::new(),
+            river_courses: Vec::new(),
         }
     }
 
@@ -507,6 +635,93 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// Adds an object that's an item lying on the ground.
+    fn add_pickup(&mut self, obj: &ObjectDesc, pickup: &PickupDesc, position: Vec3) {
+        let catalog = self.catalog.clone();
+        let Some(item) = catalog.get(&pickup.item) else {
+            log::error!("the object at {position} is the item {:?}, which isn't in the scene's `items`", pickup.item);
+            return;
+        };
+        let key = format!("item:{}", item.id);
+        let mesh = match self.cache.get(&key) {
+            Some(&mesh) => mesh,
+            None => {
+                self.meshes.push(catalog.mesh(item));
+                self.cache.insert(key, self.meshes.len() - 1);
+                self.meshes.len() - 1
+            }
+        };
+        let interact = Interactable { prompt: format!("pegar {}", item.name), radius: 2.0 };
+        self.objects.push(SceneObject {
+            name: obj.name.clone(),
+            mesh,
+            transform: item.lying(&self.meshes[mesh], position, obj.rotation.y),
+            color: obj.color,
+            emissive: obj.emissive,
+            collider: None,
+            body: BodyDesc::Static,
+            animation: None,
+            light: obj.light.clone(),
+            interact: Some(obj.interact.clone().unwrap_or(interact)),
+            effect: obj.effect.as_ref().and_then(|e| self.effect(e)),
+            npc: None,
+            combat: None,
+            items: Some(ObjectItems::Pickup {
+                key: item::object_key(obj.name.as_ref(), &item.id, position),
+                item: item.id.clone(),
+                count: pickup.count.max(1),
+            }),
+            float: None,
+            ground: None,
+        });
+    }
+
+    /// What is seen and heard where a river lands: mist as wide as the fall, and its roar.
+    fn add_fall(&mut self, river: &RiverDesc, fall: &water::RiverFall) {
+        if let Some(path) = &river.fall_effect {
+            let desc = EffectDesc {
+                path: path.clone(),
+                position: Vec3::ZERO,
+                scale: (fall.half_width / FALL_EFFECT_WIDTH).max(0.3),
+            };
+            if let Some(effect) = self.effect(&desc) {
+                self.effects.push((Transform::from_position(fall.foot), effect));
+            }
+        }
+        if let Some(path) = &river.fall_sound {
+            let sound = SoundDesc {
+                path: path.clone(),
+                position: Some(fall.foot),
+                volume: 1.0,
+                min_distance: fall.half_width + fall.height,
+                max_distance: 50.0 + fall.height * 4.0,
+            };
+            self.sounds.push(sound.resolve(&self.dir, |_, _| 0.0));
+        }
+    }
+
+    /// A sheet, sea or river, which all stand for themselves.
+    fn add_water_object(&mut self, mesh: usize, position: Vec3) {
+        self.objects.push(SceneObject {
+            name: Some("water".into()),
+            mesh,
+            transform: Transform::from_position(position),
+            color: Vec3::ONE,
+            emissive: 0.0,
+            collider: None,
+            body: BodyDesc::Static,
+            animation: None,
+            light: None,
+            interact: None,
+            effect: None,
+            npc: None,
+            combat: None,
+            items: None,
+            float: None,
+            ground: None,
+        });
+    }
+
     /// Adds `desc`'s objects, scatter, lights, sounds, triggers and effects. With `streaming`,
     /// scattered copies go into its cells instead.
     fn add_contents(&mut self, desc: &SceneDesc, mut streaming: Option<&mut SceneStreaming>) {
@@ -534,12 +749,29 @@ impl<'a> Builder<'a> {
             if obj.snap_to_ground {
                 position.y += self.ground(position.x, position.z);
             }
+            if let Some(pickup) = &obj.pickup {
+                self.add_pickup(obj, pickup, position);
+                continue;
+            }
             let transform = Transform::from_euler_degrees(position, obj.rotation, obj.scale);
             let mesh = match &obj.texture {
                 Some(texture) => self.textured_mesh(&obj.mesh, texture, obj.scale),
                 None => self.mesh(&obj.mesh),
             };
-            let collider = if obj.npc.is_some() { None } else { obj.collider.resolve(&obj.mesh, &self.meshes[mesh]) };
+            let mut collider =
+                if obj.npc.is_some() { None } else { obj.collider.resolve(&obj.mesh, &self.meshes[mesh]) };
+            let float = obj.float.as_ref().map(|float| {
+                // What stands above its deck shouldn't bump into things, nor weigh in its shape.
+                if let (ColliderDesc::Auto, Some(deck)) = (&obj.collider, float.deck) {
+                    let points = self.meshes[mesh].vertices.iter().map(|v| Vec3::from(v.position));
+                    collider = Some(ColliderShape::ConvexHull { points: points.filter(|p| p.y <= deck).collect() });
+                }
+                Arc::new(FloatHull::build(float, &self.meshes[mesh], obj.scale))
+            });
+            let items = obj.container.clone().map(|desc| ObjectItems::Container {
+                key: item::object_key(obj.name.as_ref(), "container", position),
+                desc,
+            });
             let npc = obj.npc.as_ref().map(|npc| npc.resolve(|x, z| self.ground(x, z)));
             self.objects.push(SceneObject {
                 name: obj.name.clone(),
@@ -555,19 +787,23 @@ impl<'a> Builder<'a> {
                 effect: obj.effect.as_ref().and_then(|e| self.effect(e)),
                 npc,
                 combat: obj.combat.clone(),
+                items,
+                float,
+                ground: obj.ground.or_else(|| obj.texture.as_ref().and_then(|t| Ground::from_picture(&t.path))),
             });
             if let Some(sound) = &obj.sound {
                 self.sounds.push(sound.attached(&dir, &transform));
             }
         }
-        for water in &desc.water {
-            let picture = water.texture.as_ref().and_then(|path| texture_or_log(&dir.join(path)));
-            self.meshes.push(water_mesh(water, picture));
-            let at = water.position + Vec3::Y * self.ground(water.position.x, water.position.z);
+        for (i, path) in desc.terrain.iter().flat_map(|terrain| &terrain.paths).enumerate() {
+            let (Some(terrain), Some(picture)) = (self.terrain, Picture::load(&dir.join(&path.texture))) else {
+                continue;
+            };
+            self.meshes.push(terrain.path_mesh(path, &picture, i as u64));
             self.objects.push(SceneObject {
-                name: Some("water".into()),
+                name: Some("path".into()),
                 mesh: self.meshes.len() - 1,
-                transform: Transform::from_position(at),
+                transform: Transform::default(),
                 color: Vec3::ONE,
                 emissive: 0.0,
                 collider: None,
@@ -578,7 +814,48 @@ impl<'a> Builder<'a> {
                 effect: None,
                 npc: None,
                 combat: None,
+                items: None,
+                float: None,
+                ground: None,
             });
+        }
+        for water in &desc.water {
+            let picture = |path: &Option<String>| path.as_ref().and_then(|path| texture_or_log(&dir.join(path)));
+            let (texture, foam) = (picture(&water.texture), picture(&water.foam_texture));
+            let look = water.look.unwrap_or_else(|| water.plain_look());
+            let at = water.position + Vec3::Y * self.ground(water.position.x, water.position.z);
+            let (mesh, place, shape) = match &water.sea {
+                Some(sea) => (
+                    water::sea_mesh(water, texture, foam),
+                    Vec3::Y * at.y,
+                    WaterShape::Sea(Arc::new(Sea::new(sea, desc.environment.wind.direction.normalize_or(Vec2::X)))),
+                ),
+                None => (
+                    water_mesh(water, texture, foam),
+                    at,
+                    WaterShape::Sheet { center: Vec2::new(at.x, at.z), half: water.size * 0.5 },
+                ),
+            };
+            self.meshes.push(mesh);
+            self.add_water_object(self.meshes.len() - 1, place);
+            // Lakes first: a sea would answer for them, as it has no end.
+            let body = WaterBody { shape, level: at.y, ripples: water.waves, look };
+            let first_sea = self.water_bodies.iter().position(|b| matches!(b.shape, WaterShape::Sea(_)));
+            match first_sea {
+                Some(sea) if !matches!(body.shape, WaterShape::Sea(_)) => self.water_bodies.insert(sea, body),
+                _ => self.water_bodies.push(body),
+            }
+        }
+        for (river, course) in desc.rivers.iter().zip(std::mem::take(&mut self.river_courses)) {
+            let picture = |path: &Option<String>| path.as_ref().and_then(|path| texture_or_log(&dir.join(path)));
+            self.meshes.push(water::river_mesh(river, &course, picture(&river.texture), picture(&river.foam_texture)));
+            self.add_water_object(self.meshes.len() - 1, Vec3::ZERO);
+            for fall in water::river_falls(&course) {
+                self.add_fall(river, &fall);
+            }
+            let level = course.first().map_or(0.0, |point| point.position.y);
+            let shape = WaterShape::river(course, river.speed);
+            self.water_bodies.insert(0, WaterBody { shape, level, ripples: river.waves, look: river.look });
         }
 
         for scatter in &desc.scatter {
@@ -619,8 +896,11 @@ impl<'a> Builder<'a> {
                     effect: effect.clone(),
                     npc: None,
                     combat: None,
+                    items: None,
+                    float: None,
+                    ground: None,
                 };
-                if self.terrain.is_some_and(|t| t.in_pond(x, z)) {
+                if self.terrain.is_some_and(|t| t.in_pond(x, z) || t.on_path(x, z, scatter.path_margin)) {
                     continue;
                 }
                 match streaming.as_deref_mut() {

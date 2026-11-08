@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "audicao-sons",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-I", "-m", "http.server", "8765", "--bind", "127.0.0.1", "--directory", "C:/Users/Admin/AppData/Local/Temp/claude/a86b066e6f059255/cb21eaa1-207e-4bdb-a4c0-89cea7608335/scratchpad/audicao"],
+      "port": 8765
+    }
+  ]
+}

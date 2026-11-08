@@ -1,0 +1,28 @@
+// Written by tools/gen_stow_clips.py. Where things are carried, in the order they're taken.
+(
+    eat_bite: 0.62,
+    places: [
+        (id: "belt_l0", family: Sword, bone: "hips", hand: "weapon.R", grab: 0.330, release: 0.557, lies: Some((at: (-0.19, 1.04, -0.12), long: (-0.0999, -0.6191, 0.7789), across: (0.0, 0.7828, 0.6222)))),
+        (id: "belt_l1", family: Sword, bone: "hips", hand: "weapon.R", grab: 0.330, release: 0.557, lies: Some((at: (-0.225, 1.09, -0.06), long: (-0.1205, -0.452, 0.8839), across: (0.0, 0.8903, 0.4553)))),
+        (id: "belt_l2", family: Sword, bone: "hips", hand: "weapon.R", grab: 0.330, release: 0.557, lies: Some((at: (-0.21, 0.97, -0.115), long: (-0.0797, -0.7975, 0.5981), across: (-0.0, 0.6, 0.8)))),
+        (id: "belt_r0", family: Sword, bone: "hips", hand: "weapon.R", grab: 0.330, release: 0.557, lies: Some((at: (0.195, 1.04, -0.11), long: (0.0999, -0.6191, 0.7789), across: (-0.0, 0.7828, 0.6222)))),
+        (id: "belt_r1", family: Sword, bone: "hips", hand: "weapon.R", grab: 0.330, release: 0.557, lies: Some((at: (0.225, 1.0, -0.05), long: (0.0797, -0.7975, 0.5981), across: (0.0, 0.6, 0.8)))),
+        (id: "back_r0", family: Back, bone: "chest", hand: "weapon.R", grab: 0.360, release: 0.632, lies: Some((at: (0.2, 1.6, 0.225), long: (-0.5024, -0.8641, -0.0301), across: (0.8646, -0.5021, -0.0175)))),
+        (id: "back_l0", family: Back, bone: "chest", hand: "weapon.R", grab: 0.360, release: 0.632, lies: Some((at: (-0.2, 1.6, 0.25), long: (0.5024, -0.8641, -0.0301), across: (0.8646, 0.5021, 0.0175)))),
+        (id: "back_m0", family: Back, bone: "chest", hand: "weapon.R", grab: 0.360, release: 0.632, lies: Some((at: (0.035, 1.7, 0.275), long: (0.0, -0.9996, -0.03), across: (1.0, 0.0, 0.0)))),
+        (id: "back_r1", family: Back, bone: "chest", hand: "weapon.R", grab: 0.360, release: 0.632, lies: Some((at: (0.27, 1.53, 0.25), long: (-0.2019, -0.9792, -0.0202), across: (0.9794, -0.2019, -0.0042)))),
+        (id: "back_l1", family: Back, bone: "chest", hand: "weapon.R", grab: 0.360, release: 0.632, lies: Some((at: (-0.12, 1.67, 0.3), long: (0.2401, -0.9705, -0.02), across: (0.9707, 0.2401, 0.005)))),
+        (id: "sling_r", family: Slung, bone: "chest", hand: "weapon.R", grab: 0.350, release: 0.750, lies: Some((at: (0.16, 1.05, 0.21), long: (-0.551, 0.832, 0.06), across: (0.834, 0.552, 0.0))), pass: Some((hand: "weapon.R", draw: 0.750, stow: 0.350))),
+        (id: "holster_r0", family: Pistol, bone: "hips", hand: "weapon.R", grab: 0.330, release: 0.557, lies: Some((at: (0.225, 0.96, -0.03), long: (0.06, -0.93, -0.35), across: (0.0, 0.35, -0.93)))),
+        (id: "holster_r1", family: Pistol, bone: "hips", hand: "weapon.R", grab: 0.330, release: 0.557, lies: Some((at: (0.215, 0.96, 0.085), long: (0.06, -0.93, -0.35), across: (0.0, 0.35, -0.93)))),
+        (id: "holster_l0", family: Pistol, bone: "hips", hand: "weapon.R", grab: 0.330, release: 0.557, lies: Some((at: (-0.195, 1.02, -0.07), long: (-0.04, -0.96, 0.28), across: (0.0, 0.28, 0.96)))),
+        (id: "pouch_f0", family: Small, bone: "hips", hand: "weapon.R", grab: 0.330, release: 0.417, lies: Some((at: (0.09, 0.99, -0.1), long: (0.0, 1.0, 0.0), across: (1.0, 0.0, 0.0)))),
+        (id: "pouch_f1", family: Small, bone: "hips", hand: "weapon.R", grab: 0.330, release: 0.417, lies: Some((at: (-0.05, 0.99, -0.1), long: (0.0, 1.0, 0.0), across: (1.0, 0.0, 0.0)))),
+        (id: "pouch_b0", family: Small, bone: "hips", hand: "weapon.R", grab: 0.330, release: 0.417, lies: Some((at: (0.13, 1.0, 0.175), long: (0.0, 1.0, 0.0), across: (1.0, 0.0, 0.0)))),
+        (id: "pouch_b1", family: Small, bone: "hips", hand: "weapon.R", grab: 0.330, release: 0.417, lies: Some((at: (0.2, 1.0, 0.07), long: (0.0, 1.0, 0.0), across: (1.0, 0.0, 0.0)))),
+        (id: "pouch_b2", family: Small, bone: "hips", hand: "weapon.R", grab: 0.330, release: 0.417, lies: Some((at: (0.2, 0.99, -0.05), long: (0.0, 1.0, 0.0), across: (1.0, 0.0, 0.0)))),
+        (id: "pocket", family: Pocket, bone: "hips", hand: "weapon.R", grab: 0.330, release: 0.417),
+        (id: "book_0", family: Book, bone: "hips", hand: "hand.L", grab: 0.360, release: 0.420, lies: Some((at: (-0.175, 1.0, 0.03), long: (-0.25, 0.0, -0.97), across: (-0.97, 0.0, 0.25)))),
+        (id: "book_1", family: Book, bone: "hips", hand: "hand.L", grab: 0.360, release: 0.420, lies: Some((at: (-0.07, 1.0, 0.155), long: (-1.0, 0.0, 0.0), across: (0.0, 0.0, 1.0)))),
+    ],
+)

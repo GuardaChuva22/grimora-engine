@@ -1,0 +1,14 @@
+[package]
+name = "icon_maker"
+description = "Draws the icons of Grimora's items from their models, with the engine's own renderer."
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+grimora.workspace = true
+anyhow.workspace = true
+image.workspace = true
+
+[lints]
+workspace = true

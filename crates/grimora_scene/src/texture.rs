@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 
 use anyhow::{Context as _, Result};
-use grimora_core::{AlphaMode, Material, MeshData, Shading, TextureData, Vec2, Vec3, Vec4, Vertex};
+use grimora_core::{AlphaMode, Material, MeshData, SeaDesc, Shading, TextureData, Vec2, Vec3, Vec4, Vertex, WaterLook};
 use serde::{Deserialize, Serialize};
 
 /// A picture repeating over an object's surface (`texture:` on objects).
@@ -45,6 +45,31 @@ pub struct WaterDesc {
     pub tile: f32,
     /// Height of the waves in meters.
     pub waves: f32,
+    /// sRGB color of the light it gives off by itself, following the picture's ripples.
+    pub glow: Vec3,
+    /// Makes it a sea: endless, around the camera, with these waves. `size` no longer counts.
+    pub sea: Option<SeaDesc>,
+    /// Its colors and how clear it is. Without one, it comes from `color` and `opacity`.
+    pub look: Option<WaterLook>,
+    /// Image of its foam, relative to the scene file. Noise without one.
+    pub foam_texture: Option<String>,
+}
+
+impl WaterDesc {
+    /// The look of plain water, from `color` and `opacity`: this opaque at about a meter.
+    pub fn plain_look(&self) -> WaterLook {
+        let through = 1.0 - self.opacity.clamp(0.0, 0.995);
+        WaterLook {
+            deep: self.color,
+            shallow: self.color,
+            clarity: 1.5 / -through.ln().min(-0.01),
+            murk: 0.0,
+            refraction: 0.35,
+            foam: 0.7,
+            caustics: 0.5,
+            ..Default::default()
+        }
+    }
 }
 
 impl Default for WaterDesc {
@@ -57,6 +82,10 @@ impl Default for WaterDesc {
             opacity: 0.75,
             tile: 3.0,
             waves: 0.05,
+            glow: Vec3::ZERO,
+            sea: None,
+            look: None,
+            foam_texture: None,
         }
     }
 }
@@ -154,8 +183,16 @@ pub(crate) fn apply_texture(mesh: &mut MeshData, picture: &Picture, tile: f32, s
     }
 }
 
+/// Wraps `mesh` in the image at `path`, as `ObjectDesc::texture` does, for a mesh the game makes
+/// at run time. Without the image, the mesh stays as it was.
+pub fn wrap_in_texture(mesh: &mut MeshData, path: &Path, tile: f32) {
+    if let Some(picture) = Picture::load(path) {
+        apply_texture(mesh, &picture, tile, Vec3::ONE);
+    }
+}
+
 /// The part of an image that is not fully transparent, as `(u0, v0, u1, v1)`.
-fn drawn_area(texture: &TextureData) -> (f32, f32, f32, f32) {
+pub(crate) fn drawn_area(texture: &TextureData) -> (f32, f32, f32, f32) {
     let (w, h) = (texture.width as usize, texture.height as usize);
     let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0, 0);
     for y in 0..h {
@@ -230,18 +267,23 @@ pub(crate) fn decal_mesh(picture: &Picture, size: f32) -> MeshData {
     mesh
 }
 
-/// A grid of about one quad per meter and a half, for the waves to move.
-pub(crate) fn water_mesh(desc: &WaterDesc, texture: Option<Arc<TextureData>>) -> MeshData {
+/// A grid of about one quad per meter and a half, for the waves to move. A very
+/// large sheet, like a sea, gets larger quads, with `MAX_CELLS` of them per side.
+pub fn water_mesh(desc: &WaterDesc, texture: Option<Arc<TextureData>>, foam: Option<Arc<TextureData>>) -> MeshData {
     const CELL: f32 = 1.5;
+    const MAX_CELLS: f32 = 256.0;
     let size = desc.size.max(Vec2::splat(0.1));
-    let (nx, nz) = ((size.x / CELL).ceil().max(1.0) as u32, (size.y / CELL).ceil().max(1.0) as u32);
+    let cells = |side: f32| (side / CELL).ceil().clamp(1.0, MAX_CELLS) as u32;
+    let (nx, nz) = (cells(size.x), cells(size.y));
+    // Read by `vs_water`: how much to stretch the waves for the grid to carry them.
+    let waves = (CELL * nx as f32 / size.x).min(CELL * nz as f32 / size.y).min(1.0);
     let tile = desc.tile.max(0.01);
     let mut mesh = MeshData::new();
     for j in 0..=nz {
         for i in 0..=nx {
             let (fx, fz) = (i as f32 / nx as f32, j as f32 / nz as f32);
             let (x, z) = ((fx - 0.5) * size.x, (fz - 0.5) * size.y);
-            let mut vertex = Vertex::new(Vec3::new(x, 0.0, z), Vec3::Y, Vec3::ONE);
+            let mut vertex = Vertex::new(Vec3::new(x, 0.0, z), Vec3::new(waves, 1.0, 0.0), Vec3::ONE);
             vertex.uv = [x / tile, z / tile];
             mesh.vertices.push(vertex);
         }
@@ -257,11 +299,15 @@ pub(crate) fn water_mesh(desc: &WaterDesc, texture: Option<Arc<TextureData>>) ->
     mesh.materials = vec![Material {
         name: Some("water".into()),
         base_color: Vec4::new(r, g, b, desc.opacity.clamp(0.0, 1.0)),
+        emissive: Vec3::from_array(desc.glow.to_array().map(srgb_to_linear)),
         roughness: 0.2,
         alpha_mode: AlphaMode::Blend,
         shading: Shading::Water,
         pixelated: true,
         base_color_texture: texture,
+        emissive_texture: foam,
+        water: Some(desc.look.unwrap_or_else(|| desc.plain_look())),
+        water_tile: tile,
         ..Default::default()
     }];
     mesh.wind = desc.waves.max(0.0);
@@ -269,7 +315,7 @@ pub(crate) fn water_mesh(desc: &WaterDesc, texture: Option<Arc<TextureData>>) ->
     mesh
 }
 
-fn srgb_to_linear(c: f32) -> f32 {
+pub(crate) fn srgb_to_linear(c: f32) -> f32 {
     if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
 }
 
@@ -346,7 +392,7 @@ mod tests {
 
     #[test]
     fn water_faces_up_and_moves() {
-        let mesh = water_mesh(&WaterDesc { size: Vec2::new(6.0, 3.0), waves: 0.1, ..Default::default() }, None);
+        let mesh = water_mesh(&WaterDesc { size: Vec2::new(6.0, 3.0), waves: 0.1, ..Default::default() }, None, None);
         assert_eq!(mesh.triangle_count(), 4 * 2 * 2);
         for tri in mesh.indices.chunks(3) {
             let [a, b, c] = [0, 1, 2].map(|i| Vec3::from(mesh.vertices[tri[i] as usize].position));

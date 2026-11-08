@@ -1,0 +1,80 @@
+// What can be said and done in the story. See `grimora_scene/src/story.rs`.
+//
+// Flags the sandbox sets by itself: "area:<trigger>" when the player first walks into a named
+// area, "defeated:<object>" when the player kills a named object.
+StoryBook(
+    dialogues: [
+        (
+            object: "watcher",
+            speaker: "Vela, a Cega",
+            // The first whose conditions hold says where the conversation starts.
+            openings: [
+                ([QuestDone("circulo")], "depois"),
+                ([QuestActive("circulo"), Flag("area:circle")], "voltou"),
+                ([QuestActive("circulo")], "ainda_nao"),
+            ],
+            nodes: [
+                (id: "inicio", text: "Você anda como quem ainda não sabe que caiu. Sente-se perto do fogo, ou siga. As pedras lembram de quem passa, e eu lembro das pedras.",
+                 choices: [
+                    (text: "Que pedras?", next: "pedras"),
+                    (text: "O que você vende?", does: [Shop("vela")]),
+                    (text: "Até logo."),
+                 ]),
+                (id: "pedras", text: "O círculo, ali adiante. Antes era um lugar de reunião. Agora só o vento vem. Ande até o meio dele e volte para me dizer se ainda canta.",
+                 choices: [
+                    (text: "Eu vou.", next: "aceitou", does: [StartQuest("circulo")]),
+                    (text: "Hoje não."),
+                 ]),
+                (id: "aceitou", text: "Leve isto, então. Quem caminha de cabeça descoberta deixa o céu entrar.",
+                 choices: [(text: "Obrigado.", does: [Give("erva_amarga", 2)])]),
+                (id: "ainda_nao", text: "Seus passos ainda não têm pedra neles. O círculo fica no centro da clareira.",
+                 choices: [
+                    (text: "O que você vende?", does: [Shop("vela")]),
+                    (text: "Estou indo."),
+                 ]),
+                (id: "voltou", text: "Ah. Agora há pedra nos seus passos. Ele canta, não canta? Baixo, como quem conta dinheiro.",
+                 choices: [(text: "Canta.", next: "pago", does: [Flag("contou_a_vela")])]),
+                (id: "pago", text: "Fique com o capuz. Era de quem veio antes, e ele não voltou para buscar.",
+                 choices: [(text: "Até logo.")]),
+                (id: "depois", text: "Ainda aqui. O errante lá fora continua de pé, se procura algo para fazer com essa lâmina.",
+                 choices: [
+                    (text: "O que você vende?", does: [Shop("vela")]),
+                    (text: "Vou procurá-lo.", when: [QuestNew("errante")], does: [StartQuest("errante")]),
+                    (text: "Até logo."),
+                 ]),
+            ],
+        ),
+    ],
+    quests: [
+        (
+            id: "circulo",
+            name: "As pedras lembram",
+            stages: [
+                (text: "Vela pediu que eu andasse até o meio do círculo de pedras.", until: [Flag("area:circle")]),
+                (text: "Ouvi o círculo. Falta contar a Vela.", until: [Flag("contou_a_vela")]),
+            ],
+            reward: [("moeda", 40), ("capuz", 1)],
+        ),
+        (
+            id: "errante",
+            name: "O que ainda está de pé",
+            stages: [
+                (text: "Um errante corrompido vaga além do círculo. Vela sugeriu que eu desse um fim a ele.", until: [Flag("defeated:hostile")]),
+            ],
+            reward: [("moeda", 60), ("tonico", 1)],
+        ),
+    ],
+    shops: [
+        (
+            id: "vela",
+            name: "A bolsa de Vela",
+            buys_at: 0.5,
+            wares: [(item: "maca"), (item: "erva_amarga"), (item: "tonico"), (item: "bala_de_chumbo"), (item: "botas"), (item: "gibao")],
+        ),
+    ],
+    recipes: [
+        (makes: ("tonico", 1), needs: [("maca", 1), ("erva_amarga", 2)]),
+        (makes: ("bala_de_chumbo", 5), needs: [("sucata_de_ferro", 1)]),
+        (makes: ("botas", 1), needs: [("sucata_de_ferro", 2), ("erva_amarga", 1)]),
+    ],
+)

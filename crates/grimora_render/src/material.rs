@@ -19,18 +19,40 @@ struct MaterialParams {
     /// rgb = emitted light, w = alpha cutoff
     emissive: [f32; 4],
     /// x = has normal map, y = alpha mode (0 opaque, 1 mask, 2 blend), z = alpha output
-    /// (to coverage or to blending), w = foliage
+    /// (to coverage or to blending), w = shading (1 foliage, 2 crystal, 3 ground)
     flags: [u32; 4],
+    /// Water only: rgb shallow color, w clarity in meters.
+    water_shallow: [f32; 4],
+    /// rgb foam color, w how much foam.
+    water_foam: [f32; 4],
+    /// x murk, y refraction, z 1 with a picture of foam, w meters one repeat covers.
+    water_look: [f32; 4],
+    /// xy how fast the picture moves along its uv, per second; w 1 for a river.
+    water_flow: [f32; 4],
 }
 
 pub struct GpuMaterial {
-    pub bind_group: wgpu::BindGroup,
+    /// Filters the textures smoothly (bilinear).
+    bind_group: wgpu::BindGroup,
+    /// The same textures with hard texels, for materials marked `pixelated`.
+    pixel_bind_group: Option<wgpu::BindGroup>,
     pub double_sided: bool,
     /// Uses alpha (mask or blend): cut out of shadows, and masks get alpha-to-coverage.
     pub alpha: bool,
     /// Really blended: drawn in the transparent part of the main pass.
     pub blend: bool,
     pub water: bool,
+}
+
+impl GpuMaterial {
+    /// `smooth` is the player's choice: it only changes materials marked
+    /// `pixelated`, because the others were never meant to show hard texels.
+    pub fn group(&self, smooth: bool) -> &wgpu::BindGroup {
+        match &self.pixel_bind_group {
+            Some(pixels) if !smooth => pixels,
+            _ => &self.bind_group,
+        }
+    }
 }
 
 /// Uploads materials, sharing textures that several materials reference.
@@ -113,6 +135,7 @@ impl MaterialCache {
             AlphaMode::Mask { cutoff } => (1, cutoff.clamp(0.0, 1.0)),
             AlphaMode::Blend => (2, 0.0),
         };
+        let look = material.water.unwrap_or_default();
         let params = MaterialParams {
             base_color: material.base_color.to_array(),
             params: [
@@ -123,11 +146,26 @@ impl MaterialCache {
             ],
             emissive: material.emissive.max(glam::Vec3::ZERO).extend(cutoff).to_array(),
             flags: [
-                u32::from(material.normal_texture.is_some()),
+                // The ground keeps other pictures in the normal and metal slots.
+                u32::from(material.normal_texture.is_some() && material.shading != Shading::Ground),
                 alpha_mode,
                 u32::from(self.alpha_to_coverage || alpha_mode == 2),
-                u32::from(material.shading == Shading::Foliage),
+                match material.shading {
+                    Shading::Foliage => 1,
+                    Shading::Crystal => 2,
+                    Shading::Ground => 3,
+                    Shading::Standard | Shading::Water => 0,
+                },
             ],
+            water_shallow: look.shallow_linear().extend(look.clarity.max(0.01)).to_array(),
+            water_foam: look.foam_linear().extend(look.foam.max(0.0)).to_array(),
+            water_look: [
+                look.murk.clamp(0.0, 1.0),
+                look.refraction.max(0.0),
+                f32::from(u8::from(material.emissive_texture.is_some())),
+                material.water_tile.max(0.01),
+            ],
+            water_flow: [material.water_flow.x, material.water_flow.y, 0.0, material.water_river],
         };
         let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("material params"),
@@ -140,7 +178,6 @@ impl MaterialCache {
         let mr = self.view(device, queue, &material.metallic_roughness_texture, false);
         let occlusion = self.view(device, queue, &material.occlusion_texture, false);
         let emissive = self.view(device, queue, &material.emissive_texture, true);
-        let sampler = if material.pixelated { &self.pixel_sampler } else { &self.sampler };
         let views = [
             base.unwrap_or_else(|| self.white_srgb.clone()),
             normal.unwrap_or_else(|| self.flat_normal.clone()),
@@ -148,21 +185,24 @@ impl MaterialCache {
             occlusion.unwrap_or_else(|| self.white_linear.clone()),
             emissive.unwrap_or_else(|| self.white_srgb.clone()),
         ];
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: material.name.as_deref(),
-            layout: &self.layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&views[0]) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&views[1]) },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&views[2]) },
-                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&views[3]) },
-                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(sampler) },
-                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&views[4]) },
-            ],
-        });
+        let group = |sampler: &wgpu::Sampler| {
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: material.name.as_deref(),
+                layout: &self.layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&views[0]) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&views[1]) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&views[2]) },
+                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&views[3]) },
+                    wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(sampler) },
+                    wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&views[4]) },
+                ],
+            })
+        };
         GpuMaterial {
-            bind_group,
+            bind_group: group(&self.sampler),
+            pixel_bind_group: material.pixelated.then(|| group(&self.pixel_sampler)),
             double_sided: material.double_sided,
             alpha: alpha_mode != 0,
             blend: alpha_mode == 2,
@@ -218,6 +258,7 @@ pub(crate) fn upload(device: &wgpu::Device, queue: &wgpu::Queue, image: &Texture
         if mip > 0 {
             level = level.half();
         }
+        level.fill_under_alpha();
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &texture,

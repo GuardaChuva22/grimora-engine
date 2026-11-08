@@ -5,12 +5,13 @@ use std::f32::consts::{PI, TAU};
 
 use std::path::Path;
 
-use grimora_core::{MeshData, Vec3};
+use grimora_core::{AlphaMode, Material, MeshData, Shading, Submesh, Vec2, Vec3, Vertex};
 use serde::{Deserialize, Serialize};
 
 use crate::model::{add_events, load_model};
 use crate::rng::{Rng, value_noise};
-use crate::texture::{Picture, decal_mesh, sprite_mesh};
+use crate::savanna;
+use crate::texture::{Picture, apply_texture, decal_mesh, drawn_area, sprite_mesh};
 
 /// Which mesh an object uses. Seeded shapes give a different variation per seed.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -37,12 +38,47 @@ pub enum MeshDesc {
         #[serde(default)]
         subdivisions: u32,
     },
-    /// Conifer, about 3 units tall.
+    /// Conifer, about 3 units tall. With `branches`, a tall one made of pictures,
+    /// about 6 units tall, whose outline is the drawings' own.
     Pine {
         #[serde(default)]
         seed: u64,
         #[serde(default)]
         tiers: u32,
+        /// Pictures of a branch, with a transparent background. Each branch takes one at random.
+        #[serde(default)]
+        branches: Vec<BranchDesc>,
+        /// Picture for the trunk of a pine with `branches`, repeating every 1.4 units.
+        #[serde(default)]
+        bark: Option<String>,
+    },
+    /// Flat-topped savanna tree about 6 units tall and wider than that: a low fork, limbs
+    /// leaning out and a layered crown of `branches` pictures lying almost flat.
+    Acacia {
+        #[serde(default)]
+        seed: u64,
+        #[serde(default)]
+        branches: Vec<BranchDesc>,
+        /// Picture for the wood, repeating every 1.2 units.
+        #[serde(default)]
+        bark: Option<String>,
+    },
+    /// Baobab about 7 units tall: a fat bottle of a trunk, short thick limbs on top and a few
+    /// tufts of `branches` pictures at their ends.
+    Baobab {
+        #[serde(default)]
+        seed: u64,
+        #[serde(default)]
+        branches: Vec<BranchDesc>,
+        /// Picture for the wood, repeating every 1.6 units.
+        #[serde(default)]
+        bark: Option<String>,
+    },
+    /// Termite mound about 2 units tall: a lumpy spire with smaller ones leaning on it. Give it
+    /// a `texture` of earth.
+    Mound {
+        #[serde(default)]
+        seed: u64,
     },
     /// Bare, twisted tree, about 2.5 units tall.
     DeadTree {
@@ -56,6 +92,13 @@ pub enum MeshDesc {
     },
     /// Cluster of pointed crystals. Pair with `emissive` and a light.
     Crystal {
+        #[serde(default)]
+        seed: u64,
+    },
+    /// A spear of ice 1.7 units long along +Y, with the place for a hand at the origin.
+    IceSpear,
+    /// One jagged splinter of crystal about a unit long, centered on the origin.
+    IceShard {
         #[serde(default)]
         seed: u64,
     },
@@ -114,17 +157,32 @@ fn one() -> f32 {
     1.0
 }
 
+/// A picture of a branch.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BranchDesc {
+    /// Image file, relative to the scene file.
+    pub path: String,
+    /// Where in the image the branch leaves the trunk, from (0, 0) at the top left
+    /// to (1, 1). The tip is at the far side of the drawing.
+    pub stem: Vec2,
+}
+
 impl MeshDesc {
     /// Same shape with another seed (unseeded shapes are returned unchanged).
     pub fn with_seed(&self, new_seed: u64) -> Self {
         let mut d = self.clone();
         match &mut d {
             Self::Pine { seed, .. }
+            | Self::Acacia { seed, .. }
+            | Self::Baobab { seed, .. }
+            | Self::Mound { seed }
             | Self::DeadTree { seed }
             | Self::Rock { seed }
             | Self::Crystal { seed }
+            | Self::IceShard { seed }
             | Self::Pillar { seed, .. } => *seed = new_seed,
             Self::Cube
+            | Self::IceSpear
             | Self::Wanderer
             | Self::Plane { .. }
             | Self::Cylinder { .. }
@@ -203,13 +261,36 @@ impl MeshDesc {
                 blob(&mut m, Vec3::new(0.0, 0.5, 0.0), Vec3::splat(0.5), subdivisions.min(4), |_| 1.0, white, None);
                 m
             }
-            Self::Pine { seed, tiers } => {
-                let tiers = if tiers == 0 { 4 } else { tiers.min(8) };
-                pine(seed, tiers, 0).with_lods([(0.04, pine(seed, tiers, 1))])
+            Self::Pine { seed, tiers, ref branches, ref bark } => {
+                let cards: Vec<(Picture, Vec2)> = branches
+                    .iter()
+                    .filter_map(|branch| Some((Picture::load(&dir.join(&branch.path))?, branch.stem)))
+                    .collect();
+                if cards.is_empty() {
+                    let tiers = if tiers == 0 { 4 } else { tiers.min(8) };
+                    pine(seed, tiers, 0).with_lods([(0.04, pine(seed, tiers, 1))])
+                } else {
+                    let bark = bark.as_ref().and_then(|path| Picture::load(&dir.join(path)));
+                    let level = |lod| branch_pine(seed, tiers, &cards, bark.as_ref(), lod);
+                    level(0).with_lods([(0.09, level(1)), (0.035, level(2))])
+                }
             }
+            Self::Acacia { seed, ref branches, ref bark } | Self::Baobab { seed, ref branches, ref bark } => {
+                let cards: Vec<(Picture, Vec2)> = branches
+                    .iter()
+                    .filter_map(|branch| Some((Picture::load(&dir.join(&branch.path))?, branch.stem)))
+                    .collect();
+                let bark = bark.as_ref().and_then(|path| Picture::load(&dir.join(path)));
+                let make = if matches!(self, Self::Acacia { .. }) { savanna::acacia } else { savanna::baobab };
+                let level = |lod| make(seed, &cards, bark.as_ref(), lod);
+                level(0).with_lods([(0.09, level(1)), (0.035, level(2))])
+            }
+            Self::Mound { seed } => savanna::mound(seed, 0).with_lods([(0.03, savanna::mound(seed, 1))]),
             Self::DeadTree { seed } => dead_tree(seed, 0).with_lods([(0.03, dead_tree(seed, 1))]),
             Self::Rock { seed } => rock(seed, 0).with_lods([(0.03, rock(seed, 1))]),
             Self::Crystal { seed } => crystal(seed),
+            Self::IceSpear => ice_spear(),
+            Self::IceShard { seed } => ice_shard(seed),
             Self::Pillar { seed, broken } => pillar(seed, broken),
             Self::Wanderer => wanderer(),
         }
@@ -411,6 +492,105 @@ fn pine(seed: u64, tiers: u32, lod: u32) -> MeshData {
     m
 }
 
+/// A tall conifer whose foliage is flat pictures of branches, sticking out of a
+/// bent trunk at uneven heights and tilted at random, so it is ragged from any side.
+/// Each `lod` keeps half of the branches, made longer to fill in, and every level
+/// draws the same random numbers, so what stays is in the same place.
+fn branch_pine(seed: u64, tiers: u32, cards: &[(Picture, Vec2)], bark: Option<&Picture>, lod: u32) -> MeshData {
+    const HEIGHT: f32 = 6.0;
+    const SWAY: f32 = 0.16;
+    let mut rng = Rng::new(seed);
+    let lean = Vec3::new(rng.jitter(0.5), 0.0, rng.jitter(0.5));
+    let at = |y: f32| Vec3::Y * y + lean * (y / HEIGHT).powi(2);
+
+    let mut m = MeshData::new();
+    let trunk_color = if bark.is_some() { Vec3::splat(0.55) } else { Vec3::new(0.27, 0.19, 0.14) };
+    let sides = (7 >> lod).max(4);
+    for (k, [y0, y1, r0, r1]) in
+        [[0.0, 2.4, 0.2, 0.13], [2.4, 4.6, 0.13, 0.07], [4.6, HEIGHT, 0.07, 0.01]].into_iter().enumerate()
+    {
+        tube(&mut m, at(y0), at(y1), r0, r1, sides, k as f32, trunk_color, None);
+    }
+    if let Some(bark) = bark {
+        apply_texture(&mut m, bark, 1.4, Vec3::ONE);
+    } else {
+        m.materials = vec![Default::default()];
+    }
+    m.submeshes.push(Submesh { indices: 0..m.indices.len() as u32, material: 0 });
+
+    let whorls = if tiers == 0 { 18 } else { tiers.min(30) };
+    let mut indices = vec![Vec::new(); cards.len()];
+    for whorl in 0..whorls {
+        let f = ((whorl as f32 + rng.range(-0.35, 0.35)) / whorls as f32).clamp(0.0, 1.0);
+        let reach = 1.5 * (1.0 - f) + 0.3;
+        let count = 5 - (f * 3.0) as u32;
+        let first = rng.range(0.0, TAU);
+        for branch in 0..count {
+            let angle = first + branch as f32 / count as f32 * TAU + rng.jitter(0.5);
+            let length = reach * rng.range(0.65, 1.3);
+            let slope = -0.4 + f * 0.75 + rng.jitter(0.15);
+            let roll = rng.range(0.15, 1.2) * if rng.f32() < 0.5 { -1.0 } else { 1.0 };
+            let card = (rng.next_u64() % cards.len() as u64) as usize;
+            if branch % (1 << lod) != 0 {
+                continue;
+            }
+            let along = Vec3::new(angle.cos(), slope, angle.sin()).normalize();
+            let upright = (Vec3::Y - along * along.y).normalize();
+            let up = upright * roll.cos() + along.cross(upright) * roll.sin();
+            let length = length * (1.0 + 0.25 * lod as f32);
+            let (picture, stem) = &cards[card];
+            let start = at(HEIGHT * (0.26 + 0.73 * f));
+            let first_vertex = m.vertices.len() as u32;
+            branch_card(&mut m, picture, *stem, start, along, up, length);
+            indices[card].extend_from_slice(&[
+                first_vertex,
+                first_vertex + 1,
+                first_vertex + 2,
+                first_vertex,
+                first_vertex + 2,
+                first_vertex + 3,
+            ]);
+        }
+    }
+    for ((picture, _), indices) in cards.iter().zip(indices) {
+        let start = m.indices.len() as u32;
+        m.indices.extend(indices);
+        m.submeshes.push(Submesh { indices: start..m.indices.len() as u32, material: m.materials.len() });
+        m.materials.push(Material {
+            double_sided: true,
+            alpha_mode: AlphaMode::Mask { cutoff: 0.5 },
+            shading: Shading::Foliage,
+            ..picture.material()
+        });
+    }
+    m.wind = SWAY / (HEIGHT * HEIGHT);
+    m
+}
+
+/// The four corners of a picture of a branch, its stem at `start`, the tip `length`
+/// away along `along` and the top of the image towards `up`.
+pub(crate) fn branch_card(
+    m: &mut MeshData,
+    picture: &Picture,
+    stem: Vec2,
+    start: Vec3,
+    along: Vec3,
+    up: Vec3,
+    length: f32,
+) {
+    let (u0, v0, u1, v1) = drawn_area(&picture.texture);
+    let tip = if stem.x < 0.5 { u1 } else { u0 };
+    let scale = length / (tip - stem.x).abs().max(0.01);
+    let forward = (tip - stem.x).signum();
+    for (u, v) in [(u0, v1), (u1, v1), (u1, v0), (u0, v0)] {
+        let position = start + along * (u - stem.x) * forward * scale + up * (stem.y - v) * scale;
+        // Facing up: lit like the ground under it, from any side.
+        let mut vertex = Vertex::new(position, Vec3::Y, Vec3::ONE);
+        vertex.uv = [u, v];
+        m.vertices.push(vertex);
+    }
+}
+
 fn dead_tree(seed: u64, lod: u32) -> MeshData {
     let mut rng = Rng::new(seed);
     let mut m = MeshData::new();
@@ -469,6 +649,52 @@ fn crystal(seed: u64) -> MeshData {
         tube(&mut m, base - dir * 0.1, body_end, radius, radius, 6, phase, color, Some(&mut rng));
         tube(&mut m, body_end, base + dir * length, radius, 0.0, 6, phase, color, Some(&mut rng));
     }
+    m.submeshes.push(Submesh { indices: 0..m.indices.len() as u32, material: 0 });
+    m.materials.push(Material { shading: Shading::Crystal, ..Default::default() });
+    m
+}
+
+fn ice_spear() -> MeshData {
+    let mut rng = Rng::new(9);
+    let mut m = MeshData::new();
+    let color = Vec3::new(0.85, 0.9, 1.0);
+    let y = |at: f32| Vec3::Y * at;
+    // The shaft is as thick as the handle the hand closes around.
+    tube(&mut m, y(-0.66), y(-0.5), 0.0, 0.026, 5, 0.3, color, Some(&mut rng));
+    tube(&mut m, y(-0.5), y(0.58), 0.026, 0.026, 5, 0.3, color, Some(&mut rng));
+    tube(&mut m, y(0.58), y(0.72), 0.026, 0.085, 5, 0.3, color, Some(&mut rng));
+    tube(&mut m, y(0.72), y(1.16), 0.085, 0.0, 5, 0.3, color, Some(&mut rng));
+    // Splinters growing back from the head and off the shaft.
+    for (at, angle, length, radius) in [
+        (0.72, 0.4, 0.3, 0.036),
+        (0.76, 2.5, 0.25, 0.03),
+        (0.7, 4.5, 0.28, 0.032),
+        (0.42, 1.3, 0.16, 0.018),
+        (0.3, 3.3, 0.13, 0.016),
+        (0.16, 5.2, 0.11, 0.014),
+        (-0.3, 3.6, 0.12, 0.016),
+        (-0.46, 0.9, 0.1, 0.014),
+    ] {
+        let out = Vec3::new(f32::cos(angle), -0.75, f32::sin(angle)).normalize();
+        tube(&mut m, y(at), y(at) + out * length, radius, 0.0, 4, angle, color, Some(&mut rng));
+    }
+    m.submeshes.push(Submesh { indices: 0..m.indices.len() as u32, material: 0 });
+    m.materials.push(Material { shading: Shading::Crystal, ..Default::default() });
+    m
+}
+
+fn ice_shard(seed: u64) -> MeshData {
+    let mut rng = Rng::new(seed);
+    let mut m = MeshData::new();
+    let color = Vec3::new(0.85, 0.9, 1.0);
+    let lean = Vec3::new(rng.jitter(0.25), 1.0, rng.jitter(0.25)).normalize();
+    let middle = lean * rng.jitter(0.12);
+    let width = rng.range(0.16, 0.26);
+    let phase = rng.range(0.0, TAU);
+    tube(&mut m, middle, lean * rng.range(0.4, 0.6), width, 0.0, 4, phase, color, Some(&mut rng));
+    tube(&mut m, -lean * rng.range(0.25, 0.45), middle, 0.0, width, 4, phase, color, Some(&mut rng));
+    m.submeshes.push(Submesh { indices: 0..m.indices.len() as u32, material: 0 });
+    m.materials.push(Material { shading: Shading::Crystal, ..Default::default() });
     m
 }
 
@@ -523,7 +749,8 @@ mod tests {
 
     #[test]
     fn prop_lods_are_lighter_with_the_same_outline() {
-        for desc in [MeshDesc::Pine { seed: 3, tiers: 0 }, MeshDesc::DeadTree { seed: 2 }, MeshDesc::Rock { seed: 5 }] {
+        let pine = MeshDesc::Pine { seed: 3, tiers: 0, branches: Vec::new(), bark: None };
+        for desc in [pine, MeshDesc::DeadTree { seed: 2 }, MeshDesc::Rock { seed: 5 }] {
             let mesh = desc.build();
             let [lod] = &mesh.lods[..] else { panic!("{desc:?} should have one LOD") };
             assert!(lod.mesh.indices.len() * 10 <= mesh.indices.len() * 7, "{desc:?}: LOD isn't much lighter");
@@ -534,6 +761,38 @@ mod tests {
     }
 
     #[test]
+    fn branch_pines_share_their_outline_between_levels() {
+        let dir = std::env::temp_dir().join(format!("grimora_branch_pine_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut image = image::RgbaImage::new(8, 8);
+        for x in 1..7 {
+            image.put_pixel(x, 4, image::Rgba([40, 90, 50, 255]));
+        }
+        image.save(dir.join("branch.png")).unwrap();
+        let desc = MeshDesc::Pine {
+            seed: 3,
+            tiers: 0,
+            branches: vec![BranchDesc { path: "branch.png".into(), stem: Vec2::new(0.0, 0.5) }],
+            bark: Some("branch.png".into()),
+        };
+        let mesh = desc.build_in(&dir);
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        assert_eq!(mesh.materials.len(), 2, "trunk and one picture of a branch");
+        let covered: u32 = mesh.submeshes.iter().map(|s| s.indices.len() as u32).sum();
+        assert_eq!(covered as usize, mesh.indices.len());
+        assert!(mesh.materials[1].double_sided && !mesh.shadowless);
+        let full = mesh.bounding_sphere();
+        let mut previous = mesh.indices.len();
+        for lod in &mesh.lods {
+            assert!(lod.mesh.indices.len() < previous, "each level is lighter");
+            previous = lod.mesh.indices.len();
+            assert!(full.center.distance(lod.mesh.bounding_sphere().center) < 0.2 * full.radius);
+        }
+        assert_eq!(mesh.lods.len(), 2);
+    }
+
+    #[test]
     fn every_shape_builds() {
         let shapes = [
             MeshDesc::Cube,
@@ -541,7 +800,7 @@ mod tests {
             MeshDesc::Cylinder { segments: 0 },
             MeshDesc::Cone { segments: 6 },
             MeshDesc::Sphere { subdivisions: 2 },
-            MeshDesc::Pine { seed: 1, tiers: 0 },
+            MeshDesc::Pine { seed: 1, tiers: 0, branches: Vec::new(), bark: None },
             MeshDesc::DeadTree { seed: 2 },
             MeshDesc::Rock { seed: 3 },
             MeshDesc::Crystal { seed: 4 },

@@ -18,6 +18,58 @@ pub struct Environment {
     pub shadows: Shadows,
     pub post: Post,
     pub wind: Wind,
+    pub surface: SurfaceLook,
+    pub precipitation: Precipitation,
+    /// Set each frame from the world's water.
+    #[serde(skip)]
+    pub water: crate::water::WaterFrame,
+    /// Set each frame from the world's origin: what local position zero is in the world, for
+    /// the patterns drawn fixed in it.
+    #[serde(skip)]
+    pub origin: crate::Origin,
+}
+
+/// What is falling and what it has done to the ground. A day cycle sets all of this, and
+/// a scene without one can still be written with snow on the ground.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Precipitation {
+    /// How hard it rains, from 0 to 1.
+    pub rain: f32,
+    /// How hard it snows, from 0 to 1.
+    pub snow: f32,
+    /// How wet surfaces are, from 0 to 1.
+    pub wet: f32,
+    /// How much snow lies on what faces up, from 0 to 1.
+    pub snow_cover: f32,
+    /// How bright the lightning is right now.
+    #[serde(skip)]
+    pub flash: f32,
+}
+
+/// What every lit surface goes through, on top of its own textures.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SurfaceLook {
+    /// Pushes a texture's texels away from its average color. 1 leaves it alone.
+    pub contrast: f32,
+    /// How colorful surfaces are. 1 leaves them alone.
+    pub saturation: f32,
+    /// How much large stains, fixed in the world, break up the surfaces, from 0 to 1.
+    /// They hide the repeats of a texture and are streaked down walls and cliffs.
+    pub mottle: f32,
+    /// Meters that one large stain measures, roughly.
+    pub mottle_size: f32,
+    /// What the dark and the bright parts of the stains multiply the color by.
+    pub mottle_dark: Vec3,
+    pub mottle_light: Vec3,
+    /// How many mip levels sharper textures are kept. Far away and at grazing angles
+    /// they stay crunchy instead of blurring into flat color, at the price of some shimmer.
+    pub crisp: f32,
+    /// How much the stains keep their color, from 0 (gray) to 1. The day cycle sets it,
+    /// by the hour: what makes the night dreamlike only looks painted in the sun.
+    #[serde(skip)]
+    pub stain_color: f32,
 }
 
 /// Directional light. `direction` points from the ground towards the sun.
@@ -49,6 +101,33 @@ pub struct Fog {
     pub base_height: f32,
     /// How much the fog glows when looking towards the sun.
     pub sun_scatter: f32,
+    pub mist: Mist,
+}
+
+/// Banks of mist lying low in the world, thick in patches, that drift with the wind.
+/// `amount` 0 (the default) leaves it out.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Mist {
+    /// How much it hides per meter inside a bank.
+    pub amount: f32,
+    /// World height of its top, whatever the ground does. It fills the low places.
+    pub top: f32,
+    /// How wide the banks are, in meters.
+    pub size: f32,
+    /// How fast they drift, in meters per second at wind direction length 1.
+    pub speed: f32,
+    /// Its color, as a multiple of the fog's.
+    pub brightness: f32,
+    /// A multiple of `amount`. The day cycle sets it, by the hour.
+    #[serde(skip)]
+    pub strength: f32,
+}
+
+impl Default for Mist {
+    fn default() -> Self {
+        Self { amount: 0.0, top: 5.0, size: 18.0, speed: 0.4, brightness: 1.5, strength: 1.0 }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -69,6 +148,9 @@ pub struct Sky {
     pub moon_sprite_size: f32,
     /// How visible the stars are, from 0 to 1.
     pub stars: f32,
+    /// How far the sun or moon lights up the sky around it.
+    pub halo: f32,
+    pub clouds: Clouds,
     /// Where the sun appears, if not where the light comes from. The day cycle
     /// sets these: the light stays above the horizon but the sun goes down.
     #[serde(skip)]
@@ -78,6 +160,25 @@ pub struct Sky {
     /// Where the source of the light really is, which is where its glow goes.
     #[serde(skip)]
     pub light_position: Option<Vec3>,
+}
+
+/// Marbled clouds and a glow of color behind them, painted on the sky.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Clouds {
+    /// How much of the sky they cover, from 0 (no clouds) to 1.
+    pub amount: f32,
+    /// Their color in the thin and shaded parts, and where the light catches them.
+    pub dark: Vec3,
+    pub light: Vec3,
+    /// The glow in patches behind the clouds, which also gathers the faintest stars.
+    pub nebula: Vec3,
+    /// How many clouds fit in the sky: more makes them smaller.
+    pub scale: f32,
+    /// How fast they drift with the wind.
+    pub speed: f32,
+    /// Their shape, from 0 (marbled wisps) to 1 (separate round heaps).
+    pub puff: f32,
 }
 
 /// The pictures named by [`Sky`], once loaded.
@@ -95,6 +196,9 @@ pub struct Wind {
     pub direction: glam::Vec2,
     /// 1 is a light breeze; 0 is still air.
     pub strength: f32,
+    /// How hard it blows at the moment, as a multiple of `strength`. A day cycle sets this.
+    #[serde(skip)]
+    pub scale: f32,
     /// How fast the gusts come.
     pub speed: f32,
 }
@@ -121,6 +225,12 @@ pub struct Post {
     pub vignette: f32,
     pub grain: f32,
     pub bloom: f32,
+    /// How much bright colors keep their hue instead of going pale, from 0 to 1.
+    pub vivid: f32,
+    /// How crisp the edges and texels are. 0 leaves the image alone.
+    pub sharpen: f32,
+    /// Color added to the darkest parts of the image, so blacks lean to a hue.
+    pub shadow_tint: Vec3,
 }
 
 /// A local light such as a torch or a glowing crystal.
@@ -157,6 +267,7 @@ impl Default for Fog {
             height_falloff: 0.08,
             base_height: 0.0,
             sun_scatter: 0.6,
+            mist: Mist::default(),
         }
     }
 }
@@ -174,6 +285,8 @@ impl Default for Sky {
             sun_sprite_size: 7.0,
             moon_sprite_size: 5.0,
             stars: 0.0,
+            halo: 0.0,
+            clouds: Clouds::default(),
             sun_position: None,
             moon_position: None,
             light_position: None,
@@ -181,9 +294,38 @@ impl Default for Sky {
     }
 }
 
+impl Default for Clouds {
+    fn default() -> Self {
+        Self {
+            amount: 0.0,
+            dark: Vec3::new(0.2, 0.22, 0.3),
+            light: Vec3::new(0.7, 0.72, 0.78),
+            nebula: Vec3::ZERO,
+            scale: 1.0,
+            speed: 1.0,
+            puff: 0.0,
+        }
+    }
+}
+
+impl Default for SurfaceLook {
+    fn default() -> Self {
+        Self {
+            contrast: 1.0,
+            saturation: 1.0,
+            mottle: 0.0,
+            mottle_size: 8.0,
+            mottle_dark: Vec3::splat(0.5),
+            mottle_light: Vec3::splat(1.5),
+            crisp: 0.0,
+            stain_color: 1.0,
+        }
+    }
+}
+
 impl Default for Wind {
     fn default() -> Self {
-        Self { direction: glam::Vec2::new(1.0, 0.3), strength: 1.0, speed: 1.6 }
+        Self { direction: glam::Vec2::new(1.0, 0.3), strength: 1.0, scale: 1.0, speed: 1.6 }
     }
 }
 
@@ -195,7 +337,17 @@ impl Default for Shadows {
 
 impl Default for Post {
     fn default() -> Self {
-        Self { exposure: 1.0, contrast: 1.05, saturation: 1.0, vignette: 0.3, grain: 0.03, bloom: 0.15 }
+        Self {
+            exposure: 1.0,
+            contrast: 1.05,
+            saturation: 1.0,
+            vignette: 0.3,
+            grain: 0.03,
+            bloom: 0.15,
+            vivid: 0.0,
+            sharpen: 0.0,
+            shadow_tint: Vec3::ZERO,
+        }
     }
 }
 

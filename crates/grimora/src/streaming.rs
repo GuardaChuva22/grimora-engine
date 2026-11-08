@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 
-use grimora_core::{MeshData, PointLight, Vec3};
+use grimora_core::{MeshData, PointLight, Transform, Vec3, WaterBody};
 use grimora_physics::Physics;
 use grimora_scene::{CellCoord, Scene, SceneObject, SceneRegion, SceneSound, SceneStreaming, Terrain};
 use hecs::Entity;
@@ -24,6 +24,9 @@ pub(crate) struct Chunk {
     /// A region's free-standing lights (lights on objects are components).
     pub lights: Vec<PointLight>,
     pub sounds: Vec<SceneSound>,
+    /// A region's lakes and rivers, which [`World::waters`](crate::World) answers for while
+    /// it is loaded.
+    pub waters: Vec<WaterBody>,
 }
 
 impl Chunk {
@@ -33,9 +36,12 @@ impl Chunk {
         meshes: &[MeshData],
         ecs: &mut hecs::World,
         physics: &mut Physics,
+        offset: Vec3,
     ) -> Self {
-        let entities =
-            objects.iter().map(|o| ecs.spawn(object_builder(o, mesh(o.mesh), meshes, physics).build())).collect();
+        let entities = objects
+            .iter()
+            .map(|o| ecs.spawn(object_builder(o, mesh(o.mesh), meshes, physics, offset).build()))
+            .collect();
         Chunk { entities, ..Default::default() }
     }
 
@@ -120,6 +126,9 @@ pub(crate) struct Streamer {
     pub loaded: HashMap<CellCoord, Chunk>,
     regions: Vec<Region>,
     worker: Option<Worker>,
+    /// How far the world's origin has moved what the scene placed: added to everything that
+    /// loads, and taken from the focus to find what is near.
+    shifted: Vec3,
 }
 
 impl Streamer {
@@ -130,7 +139,30 @@ impl Streamer {
             .map(|desc| Region { desc: desc.clone(), state: RegionState::Unloaded, meshes: Vec::new() })
             .collect();
         let worker = (!regions.is_empty()).then(|| Worker::spawn(terrain.cloned()));
-        Self { scene, terrain: terrain.cloned(), loaded: HashMap::new(), regions, worker }
+        Self { scene, terrain: terrain.cloned(), loaded: HashMap::new(), regions, worker, shifted: Vec3::ZERO }
+    }
+
+    /// Moves what is loaded and what will load by `offset`, as the world's origin moves the
+    /// other way. The entities move with the rest of the world.
+    pub fn shift(&mut self, offset: Vec3) {
+        self.shifted += offset;
+        let chunks = self.loaded.values_mut().chain(self.regions.iter_mut().filter_map(|r| match &mut r.state {
+            RegionState::Loaded(chunk) => Some(chunk),
+            _ => None,
+        }));
+        for chunk in chunks {
+            for light in &mut chunk.lights {
+                light.position += offset;
+            }
+            for sound in &mut chunk.sounds {
+                if let Some(position) = &mut sound.position {
+                    *position += offset;
+                }
+            }
+            for water in &mut chunk.waters {
+                water.shift(offset);
+            }
+        }
     }
 
     /// Loads what is within reach of `focus` and unloads what was left behind.
@@ -145,6 +177,7 @@ impl Streamer {
         physics: &mut Physics,
         wait: bool,
     ) -> bool {
+        let focus = focus - self.shifted;
         let load = self.scene.load_distance;
         // Things unload a little further out than they load, so walking along
         // the edge doesn't flip them on and off.
@@ -171,7 +204,7 @@ impl Streamer {
         wanted.sort_by(|a, b| a.0.total_cmp(&b.0));
         let budget = if wait { wanted.len() } else { CELLS_PER_FRAME };
         for (_, cell) in wanted.into_iter().take(budget) {
-            let chunk = Chunk::new(&scene.cells[&cell].objects, MeshId, meshes, ecs, physics);
+            let chunk = Chunk::new(&scene.cells[&cell].objects, MeshId, meshes, ecs, physics, self.shifted);
             self.loaded.insert(cell, chunk);
             changed = true;
         }
@@ -204,7 +237,7 @@ impl Streamer {
                 RegionState::Unloaded if distance < load => {
                     if wait {
                         let scene = Scene::load_region(&region.desc.path, self.terrain.as_ref());
-                        changed |= finish(region, scene, ecs, meshes, physics);
+                        changed |= finish(region, scene, ecs, meshes, physics, self.shifted);
                     } else if let Some(worker) = &self.worker {
                         region.state = RegionState::Loading;
                         let _ = worker.jobs.send((index, region.desc.path.clone()));
@@ -228,7 +261,7 @@ impl Streamer {
                 region.state = RegionState::Unloaded;
                 continue;
             }
-            changed |= finish(region, scene, ecs, meshes, physics);
+            changed |= finish(region, scene, ecs, meshes, physics, self.shifted);
         }
         changed
     }
@@ -274,6 +307,7 @@ fn finish(
     ecs: &mut hecs::World,
     meshes: &mut Vec<MeshData>,
     physics: &mut Physics,
+    offset: Vec3,
 ) -> bool {
     let scene = match scene {
         Ok(scene) => scene,
@@ -294,11 +328,24 @@ fn finish(
             .collect();
     }
     let ids = &region.meshes;
-    let mut chunk = Chunk::new(&scene.objects, |i| ids[i], meshes, ecs, physics);
-    chunk.entities.extend(scene.triggers.into_iter().map(|t| ecs.spawn((t.transform, t.trigger))));
-    chunk.entities.extend(scene.effects.iter().map(|(t, e)| ecs.spawn((*t, e.system(t)))));
+    let mut chunk = Chunk::new(&scene.objects, |i| ids[i], meshes, ecs, physics, offset);
+    let moved = |t: &Transform| Transform { position: t.position + offset, ..*t };
+    chunk.entities.extend(scene.triggers.into_iter().map(|t| ecs.spawn((moved(&t.transform), t.trigger))));
+    chunk.entities.extend(scene.effects.iter().map(|(t, e)| ecs.spawn((moved(t), e.system(t)))));
     chunk.lights = scene.lights;
     chunk.sounds = scene.sounds;
+    chunk.waters = scene.waters.bodies;
+    for water in &mut chunk.waters {
+        water.shift(offset);
+    }
+    for light in &mut chunk.lights {
+        light.position += offset;
+    }
+    for sound in &mut chunk.sounds {
+        if let Some(position) = &mut sound.position {
+            *position += offset;
+        }
+    }
     log::info!("Loaded region {} ({} objects)", region.desc.path.display(), chunk.entities.len());
     region.state = RegionState::Loaded(chunk);
     true

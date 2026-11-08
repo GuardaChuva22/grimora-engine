@@ -29,6 +29,10 @@ const OPEN: [f32; 4] = [8.0, 10.0, 6.0, 0.0];
 const TUCK_FEET: Vec3 = Vec3::new(0.1, -0.28, -0.32);
 const TUCK_HAND_R: Vec3 = Vec3::new(0.2, -0.16, -0.26);
 const TUCK_HAND_L: Vec3 = Vec3::new(-0.2, -0.16, -0.26);
+/// Meters along the handle from the sword hand to the other one, when it holds on too.
+pub const TWO_HANDS_APART: f32 = 0.105;
+/// The hidden clip with the other hand's fit, from the model's grip file.
+pub const SECOND_GRIP_CLIP: &str = "__grip_left";
 
 /// One thing a clip can key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -65,13 +69,20 @@ pub enum Control {
     ElbowR,
     /// The wrist of the free hand.
     HandL,
+    /// How that hand turns from its rest pose, in the body's space, as Euler angles: palm up
+    /// to hold a book, whatever the elbow does. All zeros leaves it to the forearm.
+    HandLRot,
     ElbowL,
     /// 0..1 in x: from those feet and hands to balled up, for rolling.
     Tuck,
+    /// 0..1 in x: from where [`Control::HandL`] says to on the handle, closed, under the sword hand.
+    GripL,
+    /// 0..1 in x: closes the free hand's fingers where it is, as around a handle.
+    CurlL,
 }
 
 impl Control {
-    pub const ALL: [Control; 20] = [
+    pub const ALL: [Control; 23] = [
         Control::Root,
         Control::Hips,
         Control::HipsRot,
@@ -90,8 +101,11 @@ impl Control {
         Control::Edge,
         Control::ElbowR,
         Control::HandL,
+        Control::HandLRot,
         Control::ElbowL,
         Control::Tuck,
+        Control::GripL,
+        Control::CurlL,
     ];
 
     /// The value it has in a clip that doesn't key it.
@@ -451,6 +465,9 @@ impl HandAxes {
 struct GripReference {
     turns: Vec<Option<Quat>>,
     hand_frame: Mat3,
+    /// From the wrist to the handle, at rest. Only the second hand's is used: the first has
+    /// the weapon's joint for this.
+    offset: Vec3,
 }
 
 impl GripReference {
@@ -481,7 +498,39 @@ impl GripReference {
             .collect();
         // The exported socket's Y follows the blade; Z identifies its edge orientation.
         let socket = relative * rotation(closed[weapon]);
-        Some(Self { turns, hand_frame: frame(socket * Vec3::Y, socket * Vec3::Z) })
+        Some(Self { turns, hand_frame: frame(socket * Vec3::Y, socket * Vec3::Z), offset: Vec3::ZERO })
+    }
+
+    /// The other hand, from [`SECOND_GRIP_CLIP`], whose channels for `weapon` say where the
+    /// handle is in that hand.
+    fn second(skeleton: &Skeleton, hand: usize, weapon: usize, bind: &[Mat4]) -> Option<Self> {
+        let clip = skeleton.clip(SECOND_GRIP_CLIP)?;
+        let mut pose = skeleton.rest_pose();
+        skeleton.clips[clip].sample(0.0, &mut pose);
+        let held = pose[weapon];
+        let mut closed = Vec::new();
+        skeleton.global_transforms(&pose, &mut closed);
+        let rotation = |matrix: Mat4| matrix.to_scale_rotation_translation().1;
+        let turns = skeleton
+            .joints
+            .iter()
+            .enumerate()
+            .map(|(joint, _)| {
+                let mut ancestor = joint;
+                while ancestor != hand {
+                    ancestor = skeleton.joints[ancestor].parent?;
+                }
+                (joint != hand).then(|| (rotation(closed[joint]) * rotation(bind[joint]).inverse()).normalize())
+            })
+            .collect();
+        let socket = rotation(bind[hand]) * held.rotation;
+        let offset = bind[hand].transform_point3(held.translation) - bind[hand].w_axis.truncate();
+        Some(Self { turns, hand_frame: frame(socket * Vec3::Y, socket * Vec3::Z), offset })
+    }
+
+    /// This joint's rotation, `amount` of the way from `open` to closed on the handle.
+    fn closing(&self, joint: usize, hand: Quat, amount: f32, open: Quat) -> Option<Quat> {
+        Some(open.slerp(hand * self.turns[joint]?, amount))
     }
 
     fn apply(
@@ -515,6 +564,9 @@ pub struct SolvedPose {
     pub wrist: f32,
     /// Degrees it is turned around the forearm; over about 100 looks forced.
     pub twist: f32,
+    /// The same of the other hand, while it holds on too.
+    pub wrist_l: f32,
+    pub twist_l: f32,
 }
 
 /// A skeleton as the solver needs it. Works with any model with the joints it looks for.
@@ -539,6 +591,7 @@ pub struct Rig {
     hand_rest: Mat3,
     weapon_rest: Mat3,
     right_grip: Option<GripReference>,
+    second_grip: Option<GripReference>,
 }
 
 impl Rig {
@@ -605,6 +658,7 @@ impl Rig {
         let arms = [arm("R", true)?, arm("L", false)?];
         let hand = arms[0].hand_axes;
         let right_grip = GripReference::new(skeleton, arms[0].hand, joint("weapon.R")?, &globals);
+        let second_grip = GripReference::second(skeleton, arms[1].hand, joint("weapon.R")?, &globals);
         let hand_rest = right_grip
             .as_ref()
             .map_or_else(|| frame(hand.bend, -hand.fingers + hand.palm * 0.3), |grip| grip.hand_frame);
@@ -630,7 +684,14 @@ impl Rig {
             // How the weapon joint sits at rest: edges up and down.
             weapon_rest: frame(Vec3::NEG_Z, Vec3::Y),
             right_grip,
+            second_grip,
         })
+    }
+
+    /// How the right hand holds things and where the joints of that hand are at rest, for tools
+    /// that write clips: its frame, `weapon.R` and `fingers.R`.
+    pub fn hand_numbers(&self) -> (Mat3, Vec3, Vec3) {
+        (self.hand_rest, self.heads[self.weapon], self.heads[self.arms[0].fingers])
     }
 
     fn rest_dir(&self, from: usize, to: usize) -> Vec3 {
@@ -677,6 +738,8 @@ impl Rig {
         }
         let tuck = c[Control::Tuck].x.clamp(0.0, 1.0);
         let root_at = Vec3::new(c[Control::Root].x, 0.0, c[Control::Root].z);
+        let second = self.second_grip.as_ref().filter(|_| c[Control::GripL].x > 0.0);
+        let both_hands = if second.is_some() { c[Control::GripL].x.clamp(0.0, 1.0) * (1.0 - tuck) } else { 0.0 };
 
         // Legs, from the ankle back up.
         for leg in &self.legs {
@@ -733,6 +796,12 @@ impl Rig {
                 turns[self.weapon] = Quat::from_mat3(&(held * self.weapon_rest.transpose()));
                 hand_turn = Some(turn);
                 palm - turn * (self.heads[self.weapon] - self.heads[arm.hand])
+            } else if let Some(grip) = second {
+                let blade = c[Control::Blade].normalize_or_zero();
+                let turn = Quat::from_mat3(&(frame(blade, c[Control::Edge]) * grip.hand_frame.transpose()));
+                hand_turn = Some(turn);
+                let on_handle = c[Control::HandR] - blade * TWO_HANDS_APART - turn * grip.offset;
+                palm.lerp(on_handle, both_hands)
             } else {
                 palm
             };
@@ -754,6 +823,12 @@ impl Rig {
             positions[arm.forearm] = elbow;
             turns[arm.forearm] = aim(self.rest_dir(arm.forearm, arm.hand), arm.rest_poles.1, at_wrist - elbow, pole_b);
             positions[arm.hand] = at_wrist;
+            // The free hand has no blade to tell it how to turn, unless it's told.
+            let free_turn = c[Control::HandLRot];
+            let turned_freely = !arm.right && both_hands <= 0.0 && free_turn != Vec3::ZERO;
+            if turned_freely {
+                hand_turn = Some(rotation_of(free_turn));
+            }
             let hand = match hand_turn {
                 None => turns[arm.forearm],
                 Some(hand) => {
@@ -769,10 +844,15 @@ impl Rig {
                     let angle = 2.0 * twist.w.abs().min(1.0).acos().to_degrees();
                     // Near half a turn the direction of the twist is a coin toss: leave it to the wrist.
                     let share = 0.5 * ((150.0 - angle) / 30.0).clamp(0.0, 1.0);
-                    turns[arm.forearm] *= Quat::IDENTITY.slerp(twist, share);
-                    out.twist = angle;
-                    out.wrist = (hand * self.rest_dir(arm.hand, arm.fingers)).angle_between(axis).to_degrees();
-                    hand
+                    let amount = if arm.right || turned_freely { 1.0 } else { both_hands };
+                    turns[arm.forearm] *= Quat::IDENTITY.slerp(twist, share * amount);
+                    let wrist = (hand * self.rest_dir(arm.hand, arm.fingers)).angle_between(axis).to_degrees();
+                    if arm.right {
+                        (out.twist, out.wrist) = (angle, wrist);
+                    } else {
+                        (out.twist_l, out.wrist_l) = (angle * amount, wrist * amount);
+                    }
+                    turns[arm.forearm].slerp(hand, amount)
                 }
             };
             turns[arm.hand] = hand;
@@ -792,12 +872,23 @@ impl Rig {
         }
         // Joints waiting for cloth, with nothing on them yet.
         let right_hand = turns[self.arms[0].hand];
+        let left_hand = turns[self.arms[1].hand];
         for &joint in &self.order {
             // Apply before the generic inheritance pass so independent native index and
             // third phalanges retain their fitted rotations and their actual parent links.
             if self.right_grip.as_ref().is_some_and(|grip| {
                 grip.apply(joint, right_hand, &self.heads, &self.parents, &mut turns, &mut positions)
             }) {
+                continue;
+            }
+            let open = if solved_joint[joint] { turns[joint] } else { left_hand };
+            let closed = both_hands.max(c[Control::CurlL].x.clamp(0.0, 1.0));
+            let closer = self.second_grip.as_ref().filter(|_| closed > 0.0);
+            if let Some(turn) = closer.and_then(|grip| grip.closing(joint, left_hand, closed, open))
+                && let Some(parent) = self.parents[joint]
+            {
+                turns[joint] = turn;
+                positions[joint] = from_parent(joint, parent, &turns, &positions);
                 continue;
             }
             if solved_joint[joint] {

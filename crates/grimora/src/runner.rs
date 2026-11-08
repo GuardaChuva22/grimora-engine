@@ -4,10 +4,12 @@ use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context as _, Result, bail};
 use grimora_audio::Audio;
-use grimora_core::{Animator, Camera, Input, KeyCode, Time, Transform, Vec2, actions};
+
+use crate::weather_audio::WeatherAudio;
+use grimora_core::{Animator, Camera, Input, KeyCode, Origin, Time, Transform, Vec2, Vec3, WorldPos, actions};
 use grimora_physics::Physics;
-use grimora_render::{DrawItem, Frame, FrameStats, MeshHandle, Renderer, RendererSettings, Ui, UiInput};
-use grimora_scene::Scene;
+use grimora_render::{DrawItem, Frame, FrameStats, MeshHandle, Portrait, Renderer, RendererSettings, Ui, UiInput};
+use grimora_scene::{PlayerSpawn, Scene};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use winit::application::ApplicationHandler;
@@ -42,6 +44,11 @@ pub struct Context {
     /// HUD and menus: text, panels, bars and widgets drawn over the frame.
     /// Cleared before every `update`, so draw it each frame.
     pub ui: Ui,
+    /// The 3D pictures for the [`Ui`] to draw this frame; the game asks for them each frame.
+    pub portraits: Vec<crate::portrait::PortraitShot>,
+    /// Where the player is this frame (local), for the colliders of a generated world's ground;
+    /// the camera when the game doesn't say. Taken each frame.
+    pub land_focus: Option<Vec3>,
     config: EngineConfig,
     exit: bool,
     cursor_grab: bool,
@@ -52,13 +59,17 @@ pub struct Context {
     window_size: Vec2,
     dpi: f32,
     ui_scale: f32,
+    /// The UI's size follows the window's height, not the screen's DPI.
+    ui_follows_window: bool,
     fullscreen: bool,
     vsync: bool,
     shadow_quality: ShadowQuality,
+    smooth_textures: bool,
     /// A window size to apply, in physical pixels.
     requested_size: Option<(u32, u32)>,
     reload_requested: bool,
     menu_nav: MenuNav,
+    weather_audio: WeatherAudio,
 }
 
 impl Context {
@@ -72,8 +83,11 @@ impl Context {
             audio,
             saves: config.save_dir.clone().map_or_else(|| SaveStore::for_game(&config.title), SaveStore::new),
             ui: Ui::default(),
+            portraits: Vec::new(),
+            land_focus: None,
             window_size: Vec2::new(config.width as f32, config.height as f32),
             vsync: config.vsync,
+            smooth_textures: config.smooth_textures,
             config,
             exit: false,
             cursor_grab: false,
@@ -82,11 +96,13 @@ impl Context {
             aspect: 16.0 / 9.0,
             dpi: 1.0,
             ui_scale: 1.0,
+            ui_follows_window: false,
             fullscreen: false,
             shadow_quality: ShadowQuality::default(),
             requested_size: None,
             reload_requested: false,
             menu_nav: MenuNav::default(),
+            weather_audio: WeatherAudio::default(),
         }
     }
 
@@ -113,11 +129,27 @@ impl Context {
             self.load_world(&path, false)?;
             game.scene_loaded(self);
         }
+        follow_origin(self, game);
         self.before_update();
         game.update(self);
         self.after_update();
         self.input.end_frame();
         Ok(())
+    }
+
+    /// What local position zero is in the world.
+    pub fn origin(&self) -> Origin {
+        self.world.origin()
+    }
+
+    /// Moves the origin by `delta` (a local position) and every local position the engine
+    /// keeps by `-delta`: the world (see [`World::shift_origin`]), the camera and the sound.
+    /// The engine does it by itself when the camera gets far from the origin, and then tells
+    /// the game with `Game::origin_shifted`; whoever calls this tells the game themselves.
+    pub fn shift_origin(&mut self, delta: Vec3) {
+        self.world.shift_origin(delta, &mut self.physics);
+        self.camera.position -= delta;
+        self.audio.shift(-delta);
     }
 
     /// Closes the engine at the end of this frame.
@@ -158,6 +190,12 @@ impl Context {
         self.ui_scale = scale.clamp(0.25, 8.0);
     }
 
+    /// Makes the UI a fixed share of the window, with whole pixels in its art, on any
+    /// resolution ([`grimora_render::pixel_scale`]). [`Context::set_ui_scale`] still multiplies it.
+    pub fn set_ui_follows_window(&mut self, follows: bool) {
+        self.ui_follows_window = follows;
+    }
+
     pub fn ui_scale(&self) -> f32 {
         self.ui_scale
     }
@@ -186,6 +224,16 @@ impl Context {
 
     pub fn shadow_quality(&self) -> ShadowQuality {
         self.shadow_quality
+    }
+
+    /// Filters pixel art textures or shows hard texels. `--pixel-textures` on the
+    /// command line wins.
+    pub fn set_smooth_textures(&mut self, smooth: bool) {
+        self.smooth_textures = smooth && self.config.smooth_textures;
+    }
+
+    pub fn smooth_textures(&self) -> bool {
+        self.smooth_textures
     }
 
     /// Resizes the window, in physical pixels. Ignored in fullscreen.
@@ -247,9 +295,18 @@ impl Context {
         {
             bail!("save slot {slot:?} was made in {saved}, but {current} is loaded");
         }
+        // Brings the origin near where the save was made first, so what it holds lands
+        // precisely. Positions the game keeps outside the save are its own to redo.
+        let origin = self.world.origin();
+        if let Some(delta) = origin.shift_for(origin.to_local(file.world.camera.position)) {
+            self.shift_origin(delta);
+        }
         let unmatched = file.world.restore(&mut self.world, &mut self.physics, &mut self.camera);
         if unmatched > 0 {
             log::warn!("{unmatched} saved objects no longer match the scene");
+        }
+        if let Some(weather) = self.config.weather {
+            self.world.set_weather(weather);
         }
         self.audio.set_scene_sounds(&self.world.active_sounds());
         log::info!("Loaded save slot {slot:?}");
@@ -278,8 +335,33 @@ impl Context {
             }
         }
         let started = Instant::now();
+        let before = (!initial).then(|| self.world.origin());
         self.physics = Physics::new();
         self.world = World::from_scene(scene, &mut self.physics);
+        // The scene's zero is where `--origin-offset` puts it in the world. A reload keeps the
+        // origin it had, so the kept camera still stands where it was.
+        let land = match &self.config.world {
+            Some(file) => Some(crate::land::Land::load(file)?),
+            None => None,
+        };
+        // In a generated world, the scene's zero is the start, at sea level.
+        let start = land.as_ref().map(|l| l.start(self.config.at));
+        let base = match start {
+            Some(start) => Origin::new(WorldPos::new(start.x, 0.0, start.z)),
+            None => Origin::new(self.config.origin_offset.unwrap_or_default()),
+        };
+        self.world.set_origin(base);
+        if let (Some(land), Some(start)) = (land, start) {
+            self.start_on_land(land, start, initial);
+        }
+        match before {
+            Some(before) => self.world.shift_origin((before.world() - base.world()).as_vec3(), &mut self.physics),
+            None => {
+                if let Some(delta) = self.config.origin_shift {
+                    self.shift_origin(delta);
+                }
+            }
+        }
         log::info!(
             "Built {} entities and {} colliders in {:.0} ms",
             self.world.ecs.len(),
@@ -301,21 +383,64 @@ impl Context {
                 );
             }
         }
+        if let Some(weather) = self.config.weather {
+            self.world.set_weather(weather);
+        }
+        self.weather_audio.stop(&mut self.audio);
         self.audio.set_scene_sounds(&self.world.active_sounds());
         Ok(())
     }
 
+    /// Puts a generated world's ground under the scene: the player at its start and the camera
+    /// behind, both on the ground, and the tiles around them built at once.
+    fn start_on_land(&mut self, land: crate::land::Land, start: WorldPos, initial: bool) {
+        let started = Instant::now();
+        let ground = start.y as f32;
+        let yaw = self.world.player_spawn.map_or(0.0, |s| s.yaw);
+        self.world.player_spawn = Some(PlayerSpawn { position: Vec3::new(0.0, ground, 0.0), yaw });
+        self.camera.far = self.camera.far.max(land.view() as f32 * 1.3);
+        if initial {
+            if self.config.camera_position.is_none() {
+                self.camera.position = Vec3::new(0.0, ground + 4.0, 9.0);
+            }
+            if self.config.look_at.is_none() {
+                self.camera.look_at(Vec3::new(0.0, ground + 1.5, 0.0));
+            }
+        }
+        self.world.set_land(land);
+        let stats = self.world.update_land(self.camera.position, Vec3::new(0.0, ground, 0.0), &mut self.physics);
+        // The land's animals find their depths, holes and perches on the ground just made.
+        self.world.settle_fauna(&self.physics);
+        // From here on the ground builds on other threads, so walking never waits for it;
+        // captures keep building in the frame, so they come out the same every time.
+        if self.config.screenshot.is_none()
+            && let Some(land) = self.world.land.as_mut()
+        {
+            land.set_blocking(false);
+        }
+        log::info!(
+            "Land: {} tiles and {} colliders in {:.0} ms, start {:.0} m above the sea",
+            stats.tiles,
+            stats.colliders,
+            started.elapsed().as_secs_f64() * 1000.0,
+            ground
+        );
+    }
+
     /// The part of a frame before `Game::update`.
     fn before_update(&mut self) {
+        self.portraits.clear();
         if self.config.escape_quits && self.input.action_just_pressed(actions::PAUSE) {
             self.exit();
         }
         self.menu_nav.update(&mut self.input, self.time.delta());
         if !self.is_paused() {
+            self.world.update_floating(&mut self.physics, self.time.world_elapsed());
             self.physics.step(self.time.world_delta());
             self.world.sync_bodies(&self.physics);
         }
-        let scale = self.dpi * self.ui_scale;
+        let base = if self.ui_follows_window { grimora_render::pixel_scale(self.window_size.y) } else { self.dpi };
+        let scale = base * self.ui_scale;
         self.ui.begin(self.window_size / scale, scale);
         let mut input = UiInput::from_input(&self.input, scale);
         if self.cursor_grab {
@@ -334,16 +459,35 @@ impl Context {
             self.world.update_attachments();
             self.world.update_particles(self.time.world_delta(), self.camera.position);
             self.world.update_day(self.time.world_delta());
+            self.world.update_fauna(&self.physics, self.camera.position, self.time.world_delta());
         }
         // Set again each frame, so a saved game's hour doesn't undo it.
         if let Some(hour) = self.config.time_of_day {
             self.world.set_time_of_day(hour);
         }
+        let focus = self.land_focus.take().unwrap_or(self.camera.position);
+        self.world.update_land(self.camera.position, focus, &mut self.physics);
         if self.world.update_streaming(self.camera.position, &mut self.physics) {
             self.audio.set_scene_sounds(&self.world.active_sounds());
         }
+        self.world.update_water_view(self.camera.position, self.time.delta());
+        self.audio.set_underwater(self.world.environment.water.submerged);
+        self.weather_audio.update(&mut self.audio, &mut self.world, self.camera.position, self.time.delta());
+        for sound in self.world.fauna.take_sounds() {
+            self.audio.play_pitched_at(&sound.file, sound.volume, sound.pitch, sound.emitter);
+        }
         self.audio.follow_camera(&self.camera);
+        self.audio.update_occlusion(self.time.delta(), |from, to| self.physics.line_blocked(from, to));
         self.audio.update();
+    }
+}
+
+/// Moves the origin to the camera once it has gone far enough, and tells the game.
+fn follow_origin(ctx: &mut Context, game: &mut impl Game) {
+    if let Some(delta) = ctx.world.origin().shift_for(ctx.camera.position) {
+        log::info!("Origin moved by {delta} to {}", ctx.world.origin().world() + delta.as_dvec3());
+        ctx.shift_origin(delta);
+        game.origin_shifted(ctx, -delta);
     }
 }
 
@@ -490,6 +634,7 @@ impl<G: Game> App<G> {
             self.ctx.window_size = Vec2::new(size.width as f32, size.height as f32);
             self.ctx.dpi = window.scale_factor() as f32;
         }
+        follow_origin(&mut self.ctx, &mut self.game);
         self.ctx.before_update();
         self.game.update(&mut self.ctx);
         self.ctx.after_update();
@@ -507,25 +652,33 @@ impl<G: Game> App<G> {
         let Some(renderer) = self.renderer.as_mut() else {
             return Ok(());
         };
+        let replaced = self.ctx.world.take_replaced_meshes();
         let world = &self.ctx.world;
-        for mesh in &world.meshes()[self.handles.len()..] {
+        let uploaded = self.handles.len();
+        for mesh in &world.meshes()[uploaded..] {
             self.handles.push(renderer.upload_mesh(mesh));
         }
+        // New ones were just uploaded with their latest data.
+        for id in replaced.into_iter().filter(|id| id.0 < uploaded) {
+            if let Some(mesh) = world.mesh(id) {
+                self.handles[id.0] = renderer.replace_mesh(self.handles[id.0], mesh);
+            }
+        }
         let mut joint_matrices = Vec::new();
-        let mut query = world.ecs.query::<(&Transform, &Renderable, Option<&Animator>)>();
-        let draws: Vec<DrawItem> = query
+        let mut query = world.ecs.query::<(&Transform, &Renderable, Option<&Animator>, Option<&crate::world::Worn>)>();
+        let mut draws: Vec<DrawItem> = query
             .iter()
-            .filter(|(_, r, _)| r.visible)
-            .filter_map(|(transform, r, animator)| {
+            .filter(|(_, r, _, _)| r.visible)
+            .filter_map(|(transform, r, animator, worn)| {
                 let mesh = *self.handles.get(r.mesh.0)?;
-                let joints = animator.map(|a| {
-                    joint_matrices.extend_from_slice(a.skinning_matrices());
-                    (joint_matrices.len() - a.skinning_matrices().len()) as u32
-                });
+                let joints = crate::world::push_skin(&world.ecs, animator, worn, &mut joint_matrices);
                 Some(DrawItem { mesh, transform: *transform, color: r.color, emissive: r.emissive, joints })
             })
             .collect();
         drop(query);
+        world.fauna.push_draws(&self.handles, &mut draws, &mut joint_matrices);
+        let portraits: Vec<Portrait<'_>> =
+            self.ctx.portraits.iter().filter_map(|shot| shot.resolve(world, &self.handles)).collect();
         let frame = Frame {
             camera: &self.ctx.camera,
             environment: &world.environment,
@@ -534,8 +687,12 @@ impl<G: Game> App<G> {
             draws: &draws,
             joint_matrices: &joint_matrices,
             particles: &world.active_particles(),
+            water_bed: self.ctx.world.waters.bed.as_ref(),
+            water_levels: self.ctx.world.waters.levels.as_ref(),
+            water_hulls: &self.ctx.world.waters.hulls,
             time: self.ctx.time.world_elapsed(),
             ui: &self.ctx.ui,
+            portraits: &portraits,
         };
         let capture = self.ctx.screenshot.take();
         if let Some(image) = renderer.render(&frame, capture.is_some())? {
@@ -593,6 +750,7 @@ impl<G: Game> App<G> {
         renderer.set_vsync(self.ctx.vsync);
         let (map_size, cascades) = self.ctx.shadow_quality.settings();
         renderer.set_shadow_quality(map_size, cascades);
+        renderer.set_smooth_textures(self.ctx.smooth_textures);
         if let Some((width, height)) = self.ctx.requested_size.take()
             && let Some(window) = &self.window
             && !self.fullscreen

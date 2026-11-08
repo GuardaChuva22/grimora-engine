@@ -1,21 +1,31 @@
-//! The built-in bitmap font: the public-domain 8x8 glyphs of the `font8x8`
-//! crate for printable ASCII and Latin-1 (accents for Portuguese, Spanish,
-//! French...), packed into one small atlas with an outline channel.
+//! The built-in pixel font: Departure Mono (see `CREDITS.md`), baked into `font_data.rs` by
+//! `tools/gen_ui_font.py`, for printable ASCII and Latin-1 (accents for Portuguese, Spanish,
+//! French...), packed into one small atlas with an outline channel. Each glyph is trimmed to
+//! its ink, so the text comes out proportional.
 
 use std::sync::LazyLock;
 
-use font8x8::legacy::{BASIC_LEGACY, LATIN_LEGACY};
+use crate::font_data::{BASIC, COLUMNS as GLYPH_COLUMNS, LATIN, ROWS as GLYPH_ROWS};
 
-/// Glyph bitmaps are `GLYPH` x `GLYPH` font units (atlas texels).
-pub(crate) const GLYPH: u32 = 8;
+/// Rows of every glyph bitmap, including the accents above and the descenders below.
+pub(crate) const ROWS: u32 = GLYPH_ROWS as u32;
+/// The rows above the text's box, which only accents reach.
+pub(crate) const TOP: u32 = 3;
+/// Height of the text's box in font units: what layout counts, from the top of the capitals
+/// to just under the baseline. Accents and descenders stick out of it.
+pub(crate) const GLYPH: u32 = 10;
 /// Distance between baselines, in font units.
-pub(crate) const LINE: u32 = 10;
+pub(crate) const LINE: u32 = 13;
+/// Font units in a [`crate::ui::TextStyle::size`] of 8: sizes in multiples of 8 are a whole
+/// number of pixels per font unit.
+pub(crate) const UNIT_SIZE: f32 = 8.0;
 /// Advance of a blank glyph (space), in font units.
 const SPACE: u32 = 4;
 /// Each glyph sits in a cell with this much empty border, so the outline and
 /// linear filtering never reach the neighbouring cell.
 const PAD: u32 = 2;
-const CELL: u32 = GLYPH + 2 * PAD;
+const CELL_WIDTH: u32 = GLYPH_COLUMNS as u32 + 2 * PAD;
+const CELL_HEIGHT: u32 = ROWS + 2 * PAD;
 const COLUMNS: u32 = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,19 +78,19 @@ impl Font {
     fn build() -> Self {
         let codes: Vec<u32> = (0x20..0x7F).chain(0xA0..0x100).collect();
         let slots = codes.len() as u32 + 1;
-        let width = COLUMNS * CELL;
-        let height = slots.div_ceil(COLUMNS) * CELL;
+        let width = COLUMNS * CELL_WIDTH;
+        let height = slots.div_ceil(COLUMNS) * CELL_HEIGHT;
         let mut coverage = vec![0u8; (width * height) as usize];
-        let cell = |slot: u32| ((slot % COLUMNS) * CELL, (slot / COLUMNS) * CELL);
+        let cell = |slot: u32| ((slot % COLUMNS) * CELL_WIDTH, (slot / COLUMNS) * CELL_HEIGHT);
 
         let mut glyphs = Box::new([None; 256]);
         for (slot, &code) in codes.iter().enumerate() {
-            let rows = if code < 0x80 { BASIC_LEGACY[code as usize] } else { LATIN_LEGACY[(code - 0xA0) as usize] };
+            let rows = if code < 0x80 { BASIC[code as usize - 0x20] } else { LATIN[(code - 0xA0) as usize] };
             let (cx, cy) = cell(slot as u32);
             let (x, y) = (cx + PAD, cy + PAD);
-            let lit = rows.iter().fold(0u8, |acc, row| acc | row);
+            let lit = rows.iter().fold(0u16, |acc, row| acc | row);
             for (r, row) in rows.iter().enumerate() {
-                for c in 0..GLYPH {
+                for c in 0..GLYPH_COLUMNS as u32 {
                     if row & (1 << c) != 0 {
                         coverage[((y + r as u32) * width + x + c) as usize] = 255;
                     }
@@ -89,13 +99,13 @@ impl Font {
             let (left, width) = if lit == 0 {
                 (0, 0)
             } else {
-                (lit.trailing_zeros(), GLYPH - lit.leading_zeros() - lit.trailing_zeros())
+                (lit.trailing_zeros(), u16::BITS - lit.leading_zeros() - lit.trailing_zeros())
             };
             glyphs[code as usize] = Some(Glyph { x, y, left, width });
         }
         let (sx, sy) = cell(slots - 1);
-        for y in sy..sy + CELL {
-            coverage[(y * width + sx) as usize..(y * width + sx + CELL) as usize].fill(255);
+        for y in sy..sy + CELL_HEIGHT {
+            coverage[(y * width + sx) as usize..(y * width + sx + CELL_WIDTH) as usize].fill(255);
         }
 
         let mut pixels = vec![0u8; coverage.len() * 2];
@@ -111,7 +121,7 @@ impl Font {
         }
 
         let fallback = glyphs['?' as usize].expect("'?' is printable ASCII");
-        let solid = [(sx + CELL / 2) as f32 + 0.5, (sy + CELL / 2) as f32 + 0.5];
+        let solid = [(sx + CELL_WIDTH / 2) as f32 + 0.5, (sy + CELL_HEIGHT / 2) as f32 + 0.5];
         Self { glyphs, fallback, solid, width, height, pixels }
     }
 }
@@ -134,11 +144,11 @@ mod tests {
 
     #[test]
     fn glyphs_are_trimmed_to_their_ink() {
-        let i = FONT.glyph('i');
+        let dot = FONT.glyph('.');
         let m = FONT.glyph('m');
-        assert!(i.width < m.width, "proportional: i {} vs m {}", i.width, m.width);
+        assert!(dot.width < m.width, "proportional: . {} vs m {}", dot.width, m.width);
         // The trimmed columns are lit at both edges.
-        let lit = |x: u32| (0..GLYPH).any(|r| FONT.pixels[(((m.y + r) * FONT.width + x) * 2) as usize] != 0);
+        let lit = |x: u32| (0..ROWS).any(|r| FONT.pixels[(((m.y + r) * FONT.width + x) * 2) as usize] != 0);
         assert!(lit(m.x + m.left) && lit(m.x + m.left + m.width - 1));
     }
 
@@ -149,8 +159,8 @@ mod tests {
             let i = ((y * FONT.width + x) * 2) as usize;
             (FONT.pixels[i], FONT.pixels[i + 1])
         };
-        let (cx, cy) = (g.x + g.left, g.y);
-        assert_eq!(texel(cx, cy).0, 255, "top-left of 'I' is lit");
+        let cx = g.x + g.left;
+        let cy = (g.y..g.y + ROWS).find(|&y| texel(cx, y).0 == 255).expect("the top-left of 'I' is lit");
         assert_eq!(texel(cx - 1, cy - 1), (0, 255), "outline only, diagonally outside");
         assert_eq!(texel(cx - 2, cy - 2), (0, 0));
         let [sx, sy] = FONT.solid;

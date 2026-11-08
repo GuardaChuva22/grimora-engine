@@ -6,18 +6,34 @@
     knuckle: "fingers.R",
     row_towards: "index_01_r_030",
     // The handle's middle from the middle knuckle: (towards the index, along the fingers, into the palm).
-    center: (-0.012, -0.035, 0.034),
+    center: (-0.012, -0.035, 0.037),
     radius: 0.0237,
-    tilt: 12.0,
+    tilt: 20.0,
     fingers: [
         (joints: ["index_01_r_030", "index_02_r_031", "index_03_r_032"], tip: 0.024, pad: 0.012),
-        (joints: ["fingers.R", "fingertips.R", "fingers_03_r_035"], tip: 0.026, pad: 0.012),
+        (joints: ["fingers.R", "fingertips.R", "fingers_03_r_035"], tip: 0.026, pad: 0.016),
     ],
     // `around`: 0 faces along the fingers, 90 into the palm. `along`: from the handle's middle towards the blade.
     thumb: (joints: ["thumb.R", "thumb_02_r_028", "thumb_03_r_029"], tip: 0.028, pad: 0.004, around: 100.0, along: 0.04),
     // Where the blade points when it's only being carried: (right, up, back), so -z is ahead.
     carry: Some((
-        aim: (0.3, -0.42, -0.86),
+        aim: (0.3, -0.34, -0.89),
         clips: ["sword_idle", "sword_walk", "sword_run", "jump", "jump_fall", "jump_land", "jump_land_walk", "jump_land_run"],
+    )),
+    // The left hand on the same handle, in the clips that key `grip_l`.
+    second: Some((
+        hand: "hand.L",
+        weapon: "weapon.R",
+        knuckle: "fingers.L",
+        row_towards: "index_01_l_015",
+        left: true,
+        center: (-0.012, -0.035, 0.034),
+        radius: 0.0237,
+        tilt: 12.0,
+        fingers: [
+            (joints: ["index_01_l_015", "index_02_l_016", "index_03_l_017"], tip: 0.024, pad: 0.012),
+            (joints: ["fingers.L", "fingertips.L", "fingers_03_l_020"], tip: 0.026, pad: 0.012),
+        ],
+        thumb: (joints: ["thumb.L", "thumb_02_l_013", "thumb_03_l_014"], tip: 0.028, pad: 0.004, around: 100.0, along: 0.04),
     )),
 )

@@ -1,0 +1,35 @@
+// Green sparks that wander over the ground at night and catch the eye far off.
+// They glow on their own, so they show in any light, and the bloom softens them.
+[
+    (
+        rate: 70.0,
+        max_particles: 520,
+        lifetime: (4.0, 9.0),
+        area: (60.0, 1.6, 60.0),
+        speed: (0.05, 0.25),
+        turbulence: 0.25,
+        sizes: [0.0, 0.07, 0.07, 0.0],
+        size_jitter: 0.6,
+        colors: [(0.5, 1.0, 0.55, 1.0)],
+        emissive: 4.0,
+        lit: 0.0,
+        additive: 1.0,
+        max_distance: 200.0,
+    ),
+    // Closer together around the clearing.
+    (
+        rate: 26.0,
+        max_particles: 190,
+        lifetime: (4.0, 9.0),
+        area: (24.0, 1.0, 24.0),
+        speed: (0.05, 0.2),
+        turbulence: 0.2,
+        sizes: [0.0, 0.05, 0.05, 0.0],
+        size_jitter: 0.6,
+        colors: [(0.55, 1.0, 0.75, 1.0)],
+        emissive: 4.0,
+        lit: 0.0,
+        additive: 1.0,
+        max_distance: 90.0,
+    ),
+]

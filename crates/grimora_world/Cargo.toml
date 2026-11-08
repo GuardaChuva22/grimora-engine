@@ -1,0 +1,17 @@
+[package]
+name = "grimora_world"
+description = "Generated worlds for Grimora: the Nyraldar macro map and what is built from it."
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+grimora_core.workspace = true
+grimora_scene.workspace = true
+glam.workspace = true
+serde.workspace = true
+ron.workspace = true
+anyhow.workspace = true
+image.workspace = true
+
+[lints]
+workspace = true

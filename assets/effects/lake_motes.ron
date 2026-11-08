@@ -1,0 +1,20 @@
+// Violet sparks rising slowly from the lake.
+[
+    (
+        rate: 14.0,
+        max_particles: 120,
+        lifetime: (4.0, 8.0),
+        area: (7.0, 0.3, 7.0),
+        direction: (0.0, 1.0, 0.0),
+        spread: 25.0,
+        speed: (0.1, 0.35),
+        turbulence: 0.12,
+        sizes: [0.0, 0.08, 0.0],
+        size_jitter: 0.5,
+        colors: [(0.8, 0.45, 1.0, 1.0)],
+        emissive: 4.0,
+        lit: 0.0,
+        additive: 1.0,
+        max_distance: 90.0,
+    ),
+]

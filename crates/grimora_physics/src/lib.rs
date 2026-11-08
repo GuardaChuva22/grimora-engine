@@ -14,8 +14,8 @@ use rapier3d::math::{Pose, Rotation, Vector};
 use rapier3d::parry::query::Ray;
 use rapier3d::parry::shape::Capsule;
 use rapier3d::prelude::{
-    ColliderBuilder, Group, InteractionGroups, InteractionTestMode, PhysicsWorld, QueryFilter, RigidBodyBuilder,
-    RigidBodyHandle,
+    ColliderBuilder, Group, InteractionGroups, InteractionTestMode, MassProperties, PhysicsWorld, QueryFilter,
+    RigidBodyBuilder, RigidBodyHandle,
 };
 
 pub use nav::{NavPath, NavShape};
@@ -207,10 +207,46 @@ impl Physics {
         Some((from_rapier(pose.translation), Quat::from_xyzw(r.x, r.y, r.z, r.w)))
     }
 
+    /// A sudden push on a dynamic body at a point of it, as for a shot.
+    pub fn add_impulse_at(&mut self, body: BodyHandle, impulse: Vec3, point: Vec3) {
+        if let Some(body) = self.world.bodies.get_mut(body.0) {
+            body.apply_impulse_at_point(to_rapier(impulse), to_rapier(point), true);
+        }
+    }
+
     /// Linear and angular velocity of a dynamic body.
     pub fn body_velocity(&self, body: BodyHandle) -> Option<(Vec3, Vec3)> {
         let body = self.world.bodies.get(body.0)?;
         Some((from_rapier(body.linvel()), from_rapier(body.angvel())))
+    }
+
+    /// How fast a point fixed to a dynamic body is moving.
+    pub fn point_velocity(&self, body: BodyHandle, point: Vec3) -> Vec3 {
+        self.world.bodies.get(body.0).map_or(Vec3::ZERO, |b| from_rapier(b.velocity_at_point(to_rapier(point))))
+    }
+
+    /// Replaces what pushes a dynamic body, each force at a point of the world. They hold
+    /// through the steps until the next call. Nothing wakes a body when the list is empty.
+    pub fn set_forces(&mut self, body: BodyHandle, forces: &[(Vec3, Vec3)]) {
+        let Some(body) = self.world.bodies.get_mut(body.0) else { return };
+        body.reset_forces(false);
+        body.reset_torques(false);
+        for &(force, point) in forces {
+            body.add_force_at_point(to_rapier(force), to_rapier(point), true);
+        }
+    }
+
+    /// Gives a dynamic body this weight, whatever its collider's shape: `center` in its own
+    /// frame, and `inertia` around its own axes. A hull's weight is low, unlike its shape's.
+    pub fn set_mass_properties(&mut self, body: BodyHandle, center: Vec3, mass: f32, inertia: Vec3) {
+        let Some(body) = self.world.bodies.get_mut(body.0) else { return };
+        for &collider in body.colliders() {
+            if let Some(collider) = self.world.colliders.get_mut(collider) {
+                collider.set_density(0.0);
+            }
+        }
+        let properties = MassProperties::new(to_rapier(center), mass, to_rapier(inertia));
+        body.set_additional_mass_properties(properties, true);
     }
 
     /// The collider of a dynamic body, to recognize it in a [`RayHit`].
@@ -259,6 +295,24 @@ impl Physics {
         }
     }
 
+    /// Moves every body and collider by `offset`, as the world's origin moves the other way,
+    /// without stepping the simulation: velocities, sleep and contacts stay as they were.
+    pub fn shift(&mut self, offset: Vec3) {
+        let offset = to_rapier(offset);
+        for (_, body) in self.world.bodies.iter_mut() {
+            let mut pose = *body.position();
+            pose.translation += offset;
+            body.set_position(pose, false);
+        }
+        for (_, collider) in self.world.colliders.iter_mut() {
+            if collider.parent().is_none() {
+                collider.set_translation(collider.translation() + offset);
+            }
+        }
+        // Brings the colliders on bodies and the broad phase along, so queries see it at once.
+        self.world.detect_collisions(&(), &());
+    }
+
     /// Makes newly added colliders visible to queries right away.
     pub fn refresh(&mut self) {
         self.world.step();
@@ -273,6 +327,12 @@ impl Physics {
     /// cameras, which shouldn't jump whenever somebody walks past.
     pub fn raycast_scenery(&self, origin: Vec3, direction: Vec3, max_distance: f32) -> Option<RayHit> {
         self.cast(origin, direction, max_distance, scenery())
+    }
+
+    /// Whether scenery stands between two points, as far as sound is concerned. Starting
+    /// inside something doesn't count, or a boat's hull would wall in whoever stands on it.
+    pub fn line_blocked(&self, from: Vec3, to: Vec3) -> bool {
+        self.raycast_scenery(from, to - from, from.distance(to)).is_some_and(|hit| hit.distance > 0.0)
     }
 
     fn cast(&self, origin: Vec3, direction: Vec3, max_distance: f32, filter: QueryFilter) -> Option<RayHit> {
@@ -433,6 +493,19 @@ mod tests {
     }
 
     #[test]
+    fn a_line_is_blocked_by_what_it_crosses_not_by_where_it_starts() {
+        let mut physics = floor();
+        let wall = ColliderShape::Cuboid { center: Vec3::Y, half_extents: Vec3::new(5.0, 1.0, 0.25) };
+        physics.add_static(&wall, &Transform::from_position(Vec3::new(0.0, 0.0, -3.0)));
+        physics.refresh();
+        let eyes = Vec3::Y;
+        assert!(physics.line_blocked(eyes, Vec3::new(0.0, 1.0, -6.0)));
+        assert!(!physics.line_blocked(eyes, Vec3::new(0.0, 1.0, -2.0)), "it stops short of the wall");
+        assert!(!physics.line_blocked(eyes, Vec3::new(0.0, 6.0, -6.0)), "over the wall");
+        assert!(!physics.line_blocked(Vec3::new(0.0, 1.0, -3.0), Vec3::new(0.0, 1.0, -6.0)), "from inside it");
+    }
+
+    #[test]
     fn character_lands_on_floor() {
         let mut physics = floor();
         physics.refresh();
@@ -480,6 +553,27 @@ mod tests {
         assert!((center_height - 0.5).abs() < 0.03, "center at {center_height}");
         run(&mut physics, 0.5);
         assert!(physics.body_pose(body).unwrap().0.distance(position) < 1e-3, "still moving");
+    }
+
+    #[test]
+    fn shifting_moves_everything_and_changes_nothing_else() {
+        let tilted = Transform::from_euler_degrees(Vec3::new(1.0, 3.0, 0.0), Vec3::new(20.0, 30.0, 10.0), Vec3::ONE);
+        let (mut still, mut moved) = (floor(), floor());
+        let a = still.add_body(&CUBE, &tilted, &WOOD).unwrap();
+        let b = moved.add_body(&CUBE, &tilted, &WOOD).unwrap();
+        run(&mut still, 0.4);
+        run(&mut moved, 0.4);
+        let offset = Vec3::new(-2048.0, 0.0, 1536.0);
+        moved.shift(offset);
+        // Queries see the floor where it went, before any step.
+        assert!(moved.raycast(offset + Vec3::Y, Vec3::NEG_Y, 2.0).is_some());
+        run(&mut still, 1.5);
+        run(&mut moved, 1.5);
+        let (pa, ra) = still.body_pose(a).unwrap();
+        let (pb, rb) = moved.body_pose(b).unwrap();
+        // f32 at 2 km is a tenth of a millimeter, which a tumble on contact grows a little.
+        assert!((pb - offset).distance(pa) < 1e-2, "{pa} {pb}");
+        assert!(ra.angle_between(rb) < 1e-2);
     }
 
     #[test]

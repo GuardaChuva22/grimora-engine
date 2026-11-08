@@ -9,9 +9,19 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 use glam::{Mat3, Quat, Vec3};
-use grimora_core::Skeleton;
-use grimora_core::animation::{Channel, Interpolation, Keyframes};
+use grimora_core::animation::{AnimationClip, Channel, Interpolation, Keyframes};
+use grimora_core::{FREE_HAND_CLIP, SECOND_GRIP_CLIP, Skeleton};
 use serde::Deserialize;
+
+/// How an empty hand hangs, degrees from the bind pose: the wrist bends a little towards the
+/// palm and towards the little finger, and each phalanx of the fingers curls a bit more than
+/// the last until the middle one.
+const FREE_WRIST: (f32, f32) = (10.0, 7.0);
+const FREE_FINGERS: [f32; 3] = [4.0, 9.0, 6.0];
+const FREE_THUMB: [f32; 3] = [-6.0, 0.0, 4.0];
+/// The same, lying on a page.
+const FLAT_FINGERS: [f32; 3] = [-4.0, 0.0, 0.0];
+const FLAT_THUMB: [f32; 3] = [-45.0, 0.0, 0.0];
 
 /// A hand closing on a round handle. Lengths are meters, angles degrees.
 #[derive(Debug, Clone, Deserialize)]
@@ -33,6 +43,13 @@ pub struct GripDesc {
     pub thumb: ThumbDesc,
     #[serde(default)]
     pub carry: Option<CarryDesc>,
+    /// The other hand, for the clips that hold the weapon with both ([`grimora_core::Control::GripL`]).
+    /// Its fingers only close in those: no clip but those has anything to say about it.
+    #[serde(default)]
+    pub second: Option<Box<GripDesc>>,
+    /// It's the mirror image of a right hand, whose palm is on the other side of the row.
+    #[serde(default)]
+    pub left: bool,
 }
 
 /// Where the weapon points while it isn't being used: the grip stays, and the arm turns.
@@ -71,6 +88,10 @@ pub struct ThumbDesc {
 pub struct GripFit {
     /// Local rotation of each finger joint.
     pub joints: Vec<(usize, Quat)>,
+    /// The hand with nothing in it: local rotation of the wrist first, then of the fingers.
+    pub free: Vec<(usize, Quat)>,
+    /// The same joints, with the fingers lying flat on something.
+    pub flat: Vec<(usize, Quat)>,
     pub weapon: usize,
     pub weapon_rotation: Quat,
     pub weapon_translation: Vec3,
@@ -80,6 +101,7 @@ pub struct GripFit {
     pub axis: Vec3,
     pub phalanges: Vec<Vec3>,
     pub carry: Option<CarryDesc>,
+    pub second: Option<Box<GripFit>>,
 }
 
 /// The file with a model's grip: `chartest_grip.ron` for `chartest.gltf`.
@@ -100,13 +122,14 @@ impl GripDesc {
         skeleton.global_transforms(&skeleton.rest_pose(), &mut globals);
         let head = |j: usize| globals[j].w_axis.truncate();
         let rest = |j: usize| rotation(globals[j]);
+        let rest_of = rest;
         let (hand, weapon, knuckle) = (joint(&self.hand)?, joint(&self.weapon)?, joint(&self.knuckle)?);
 
         // The hand's axes.
         let along_fingers = (head(knuckle) - head(hand)).normalize();
         let towards = head(joint(&self.row_towards)?) - head(knuckle);
         let row = (towards - along_fingers * towards.dot(along_fingers)).normalize();
-        let palm = row.cross(along_fingers).normalize();
+        let palm = if self.left { along_fingers.cross(row) } else { row.cross(along_fingers) }.normalize();
 
         // The handle, and the plane around it in which fingers wrap.
         let center = head(knuckle) + row * self.center.x + along_fingers * self.center.y + palm * self.center.z;
@@ -192,8 +215,39 @@ impl GripDesc {
         let reached = start + dir * reach;
         pose_chain(&thumb.joints, &[start, bend, reached, reached + tangent * thumb.tip])?;
 
+        // The same hand with nothing in it, from the bind pose.
+        let curl = along_fingers.cross(palm).normalize();
+        let wrist = Quat::from_axis_angle(curl, FREE_WRIST.0.to_radians())
+            * Quat::from_axis_angle(palm, FREE_WRIST.1.to_radians());
+        let above = skeleton.joints[hand].parent.map_or(Quat::IDENTITY, rest_of);
+        let thumb_along = (head(ids[1]) - head(ids[0])).normalize();
+        let relaxed = |fingers: &[f32; 3], thumbs: &[f32; 3]| -> Result<Vec<(usize, Quat)>> {
+            let mut joints = vec![(hand, (above.inverse() * wrist * rest(hand)).normalize())];
+            let mut relax = |names: &[String], axis: Vec3, degrees: &[f32; 3]| -> Result<()> {
+                let (mut above, mut total) = (rest(hand), 0.0);
+                for (name, degrees) in names.iter().zip(degrees) {
+                    let id = joint(name)?;
+                    total += degrees.to_radians();
+                    let global = Quat::from_axis_angle(axis, total) * rest(id);
+                    joints.push((id, (above.inverse() * global).normalize()));
+                    above = global;
+                }
+                Ok(())
+            };
+            for finger in &self.fingers {
+                relax(&finger.joints, curl, fingers)?;
+            }
+            relax(&thumb.joints, thumb_along.cross(palm).normalize(), thumbs)?;
+            Ok(joints)
+        };
+        let (free, flat) = (relaxed(&FREE_FINGERS, &FREE_THUMB)?, relaxed(&FLAT_FINGERS, &FLAT_THUMB)?);
+
+        let second = self.second.as_ref().map(|hand| hand.fit(skeleton).map(Box::new)).transpose()?;
         Ok(GripFit {
+            second,
             joints,
+            free,
+            flat,
             weapon,
             weapon_rotation,
             weapon_translation,
@@ -212,7 +266,8 @@ pub fn apply_fit(skeleton: &mut Skeleton, fit: &GripFit) {
     weapon.rest.rotation = fit.weapon_rotation;
     let mut held: Vec<(usize, Quat)> = fit.joints.clone();
     held.push((fit.weapon, fit.weapon_rotation));
-    for clip in &mut skeleton.clips {
+    skeleton.clips.retain(|clip| clip.name != FREE_HAND_CLIP);
+    for clip in skeleton.clips.iter_mut().filter(|clip| clip.name != SECOND_GRIP_CLIP) {
         clip.channels.retain(|channel| !held.iter().any(|(joint, _)| *joint == channel.joint));
         for &(joint, turn) in &held {
             clip.channels.push(Channel {
@@ -227,6 +282,34 @@ pub fn apply_fit(skeleton: &mut Skeleton, fit: &GripFit) {
     for &(joint, turn) in &fit.joints {
         skeleton.joints[joint].rest.rotation = turn;
     }
+    skeleton.clips.push(free_hand_clip(fit));
+    if let Some(second) = &fit.second {
+        skeleton.clips.retain(|clip| clip.name != SECOND_GRIP_CLIP);
+        skeleton.clips.push(second_grip_clip(second));
+    }
+}
+
+fn free_hand_clip(fit: &GripFit) -> AnimationClip {
+    let channel = |(&(joint, hangs), &(_, flat)): (&(usize, Quat), &(usize, Quat))| Channel {
+        joint,
+        interpolation: Interpolation::Linear,
+        times: vec![0.0, 1.0],
+        keys: Keyframes::Rotation(vec![hangs, flat]),
+    };
+    let channels = fit.free.iter().zip(&fit.flat).map(channel).collect();
+    AnimationClip { name: FREE_HAND_CLIP.to_string(), duration: 1.0, channels, events: Vec::new() }
+}
+
+/// What the rig reads about the other hand: the closed fingers, and the weapon's joint keyed
+/// to where the handle is in that hand, though it isn't that hand's child.
+fn second_grip_clip(fit: &GripFit) -> AnimationClip {
+    let times = vec![0.0];
+    let channel = |joint, keys| Channel { joint, interpolation: Interpolation::Linear, times: times.clone(), keys };
+    let mut channels: Vec<Channel> =
+        fit.joints.iter().map(|&(joint, turn)| channel(joint, Keyframes::Rotation(vec![turn]))).collect();
+    channels.push(channel(fit.weapon, Keyframes::Rotation(vec![fit.weapon_rotation])));
+    channels.push(channel(fit.weapon, Keyframes::Translation(vec![fit.weapon_translation])));
+    AnimationClip { name: SECOND_GRIP_CLIP.to_string(), duration: 1.0 / 60.0, channels, events: Vec::new() }
 }
 
 /// Turns the arm in the clips that carry the weapon, so that it points where the file says.

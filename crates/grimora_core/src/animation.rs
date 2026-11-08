@@ -282,6 +282,86 @@ struct Overlay {
     rate: f32,
 }
 
+/// The hidden clip with an empty hand: the wrist first, then the fingers, keyed twice, as it
+/// hangs and as it lies flat on something.
+pub const FREE_HAND_CLIP: &str = "__hand_free";
+/// Seconds for a hand to open or to close on something.
+const FREE_HAND_FADE: f32 = 0.22;
+
+/// A hand that may be empty. Clips are written for a hand holding a weapon, with the forearm
+/// and wrist turned to aim it, so all of that goes away while it's empty.
+#[derive(Debug, Clone)]
+struct FreeHand {
+    hand: usize,
+    forearm: usize,
+    /// Along the forearm, in its own frame.
+    axis: Vec3,
+    /// Each joint hanging, and lying flat.
+    turns: Vec<(usize, Quat, Quat)>,
+    empty: bool,
+    amount: f32,
+    /// The clip places this hand itself, on something: it keeps its arm and only the fingers open.
+    placed: bool,
+    placed_amount: f32,
+    /// How far the fingers are open, from closed on a grip to an empty hand's.
+    fingers: f32,
+    /// Closing on something it doesn't have yet.
+    grasping: bool,
+    /// Holds something small: the arm lets go as if empty, and the fingers stay this far open.
+    loose: Option<f32>,
+}
+
+impl FreeHand {
+    fn of(skeleton: &Skeleton) -> Option<Self> {
+        let clip = &skeleton.clips[skeleton.clip(FREE_HAND_CLIP)?];
+        let hand = clip.channels.first()?.joint;
+        let forearm = skeleton.joints[hand].parent?;
+        let turns = clip.channels.iter().filter_map(|channel| match &channel.keys {
+            Keyframes::Rotation(keys) => Some((channel.joint, *keys.first()?, *keys.last()?)),
+            _ => None,
+        });
+        Some(Self {
+            hand,
+            forearm,
+            axis: skeleton.joints[hand].rest.translation.normalize_or_zero(),
+            turns: turns.collect(),
+            empty: false,
+            amount: 0.0,
+            placed: false,
+            placed_amount: 0.0,
+            fingers: 0.0,
+            grasping: false,
+            loose: None,
+        })
+    }
+
+    fn apply(&mut self, skeleton: &Skeleton, pose: &mut [JointTransform], dt: f32) {
+        let step = dt / FREE_HAND_FADE;
+        let empty = self.empty && !self.grasping;
+        let fingers = if empty { 1.0 } else { self.loose.unwrap_or(0.0) };
+        let hangs = empty || self.loose.is_some();
+        self.amount = (self.amount + if hangs { step } else { -step }).clamp(0.0, 1.0);
+        self.fingers += (fingers - self.fingers).clamp(-step, step);
+        self.placed_amount = (self.placed_amount + if self.placed { step } else { -step }).clamp(0.0, 1.0);
+        if self.amount <= 0.0 && self.fingers <= 0.0 {
+            return;
+        }
+        let smooth = |amount: f32| amount * amount * (3.0 - 2.0 * amount);
+        let (weight, placed, open) = (smooth(self.amount), smooth(self.placed_amount), smooth(self.fingers));
+        let hanging = weight * (1.0 - placed);
+        // A forearm hangs untwisted: the elbow's bend stays and the roll around itself goes.
+        let forearm = &mut pose[self.forearm].rotation;
+        let bent = skeleton.joints[self.forearm].rest.rotation.inverse() * *forearm;
+        let along = self.axis * Vec3::new(bent.x, bent.y, bent.z).dot(self.axis);
+        let twist = Quat::from_xyzw(along.x, along.y, along.z, bent.w).normalize();
+        *forearm = (*forearm * Quat::IDENTITY.slerp(twist.inverse(), hanging)).normalize();
+        for &(joint, hangs, flat) in &self.turns {
+            let (turn, amount) = if joint == self.hand { (hangs, hanging) } else { (hangs.slerp(flat, placed), open) };
+            pose[joint].rotation = pose[joint].rotation.slerp(turn, amount);
+        }
+    }
+}
+
 /// Plays a skeleton's clips: looping or once, with crossfades between them. A change in
 /// the middle of a fade fades from what's on screen, however many clips that takes.
 ///
@@ -290,6 +370,7 @@ struct Overlay {
 #[derive(Debug, Clone)]
 pub struct Animator {
     skeleton: Arc<Skeleton>,
+    free_hand: Option<FreeHand>,
     current: Option<Track>,
     /// Clips being faded out, oldest first.
     previous: Vec<Fading>,
@@ -305,7 +386,20 @@ pub struct Animator {
     /// Events the last update passed, as clip and event indices.
     fired: Vec<(usize, usize)>,
     root_delta: Vec3,
+    /// Joints bent on top of every clip, and how far in all: see [`Animator::set_bend`].
+    bend: Vec<usize>,
+    bend_angle: f32,
+    /// How much the overlay keeps its own orientation: see [`Animator::set_overlay_steady`].
+    overlay_steady: f32,
+    /// Joints the overlay leaves to the clips underneath, and how far it has let them go (0 to
+    /// 1) and is going: see [`Animator::overlay_leave`].
+    left_out: Vec<bool>,
+    left_out_amount: f32,
+    left_out_target: f32,
 }
+
+/// Seconds for the overlay to let go of a limb or take it back.
+const LEAVE_FADE: f32 = 0.3;
 
 impl Animator {
     /// Starts in the bind pose with nothing playing.
@@ -315,6 +409,7 @@ impl Animator {
             scratch: Vec::new(),
             mixing: Vec::new(),
             overlay_pose: Vec::new(),
+            free_hand: FreeHand::of(&skeleton),
             skeleton,
             current: None,
             previous: Vec::new(),
@@ -324,6 +419,12 @@ impl Animator {
             matrices: Vec::new(),
             fired: Vec::new(),
             root_delta: Vec3::ZERO,
+            bend: Vec::new(),
+            bend_angle: 0.0,
+            overlay_steady: 0.0,
+            left_out: Vec::new(),
+            left_out_amount: 0.0,
+            left_out_target: 0.0,
         };
         animator.evaluate();
         animator
@@ -460,6 +561,11 @@ impl Animator {
         Some(self.skeleton.clips[over.current.clip].name.as_str())
     }
 
+    /// Seconds into the clip playing over the body.
+    pub fn overlay_time(&self) -> f32 {
+        self.overlay.as_ref().map_or(0.0, |over| over.current.time)
+    }
+
     /// The clip over the body, started with [`Animator::overlay_once`], has reached its end.
     pub fn overlay_finished(&self) -> bool {
         self.overlay.as_ref().is_some_and(|over| {
@@ -516,6 +622,52 @@ impl Animator {
         self.root_delta
     }
 
+    /// Tells the hand of a [`FREE_HAND_CLIP`] whether it has anything in it: an empty one lets
+    /// go, whatever the clip says, and the other closes the way the clip has it. The world
+    /// does this for whatever is attached to a joint.
+    pub fn set_hand_empty(&mut self, empty: bool) {
+        if let Some(free) = &mut self.free_hand {
+            free.empty = empty;
+        }
+    }
+
+    /// The clip playing puts the empty hand on something, with its own arm and wrist: only
+    /// the fingers open, lying flat.
+    pub fn set_hand_placed(&mut self, placed: bool) {
+        if let Some(free) = &mut self.free_hand {
+            free.placed = placed;
+        }
+    }
+
+    /// The hand closes as if it had something, ahead of getting it.
+    pub fn set_hand_grasping(&mut self, grasping: bool) {
+        if let Some(free) = &mut self.free_hand {
+            free.grasping = grasping;
+        }
+    }
+
+    /// The hand has something small: its arm moves as if it were empty, whatever the clip's grip
+    /// says, and the fingers stay this far open (0 to 1). `None` is a hand closed on a grip.
+    pub fn set_hand_loose(&mut self, open: Option<f32>) {
+        if let Some(free) = &mut self.free_hand {
+            free.loose = open;
+        }
+    }
+
+    /// Whether `joint` is the free hand or something it carries.
+    pub fn in_free_hand(&self, joint: &str) -> bool {
+        let (Some(free), Some(mut at)) = (&self.free_hand, self.skeleton.joint(joint)) else { return false };
+        loop {
+            if at == free.hand {
+                return true;
+            }
+            match self.skeleton.joints[at].parent {
+                Some(parent) => at = parent,
+                None => return false,
+            }
+        }
+    }
+
     /// Advances playback by `dt` seconds and recomputes the pose.
     pub fn update(&mut self, dt: f32) {
         let clips = &self.skeleton.clips;
@@ -554,19 +706,108 @@ impl Animator {
                 &mut self.mixing,
             );
             let weight = over.amount * over.amount * (3.0 - 2.0 * over.amount);
+            let step = dt / LEAVE_FADE;
+            self.left_out_amount += (self.left_out_target - self.left_out_amount).clamp(-step, step);
+            let free = self.left_out_amount * self.left_out_amount * (3.0 - 2.0 * self.left_out_amount);
+            let joints = &self.skeleton.joints;
+            let mut held = Vec::new();
+            if self.overlay_steady > 0.0 {
+                // The overlay's top joints turn by what the clip underneath has done above them.
+                let chain = |pose: &[JointTransform], mut at: Option<usize>| {
+                    let mut turn = Quat::IDENTITY;
+                    while let Some(index) = at {
+                        turn = pose[index].rotation * turn;
+                        at = joints[index].parent;
+                    }
+                    turn
+                };
+                for (j, joint) in joints.iter().enumerate() {
+                    if over.mask[j] && joint.parent.is_some_and(|parent| !over.mask[parent]) {
+                        let wanted = chain(&self.pose, joint.parent).inverse()
+                            * chain(&self.overlay_pose, joint.parent)
+                            * self.overlay_pose[j].rotation;
+                        held.push((j, wanted));
+                    }
+                }
+            }
             for (j, pose) in self.pose.iter_mut().enumerate() {
                 if over.mask[j] {
-                    *pose = pose.lerp(&self.overlay_pose[j], weight);
+                    let kept = if self.left_out.get(j).copied().unwrap_or(false) { 1.0 - free } else { 1.0 };
+                    *pose = pose.lerp(&self.overlay_pose[j], weight * kept);
                 }
+            }
+            for (j, wanted) in held {
+                self.pose[j].rotation = self.pose[j].rotation.slerp(wanted, weight * self.overlay_steady);
             }
             if over.amount <= 0.0 && over.rate < 0.0 {
                 self.overlay = None;
             }
         }
+        if let Some(free) = &mut self.free_hand {
+            free.apply(&self.skeleton, &mut self.pose, dt);
+        }
+        self.apply_bend();
         if let Some(joint) = self.skeleton.motion {
             self.pose[joint].translation = self.skeleton.joints[joint].rest.translation;
         }
         self.evaluate();
+    }
+
+    /// Bends `joints`, parents first, by `angle` radians in all around the character's own
+    /// right, on top of whatever is playing: up when positive. For aiming up or down with a
+    /// pose written looking straight ahead. An angle of 0 turns it off.
+    pub fn set_bend(&mut self, joints: &[&str], angle: f32) {
+        self.bend_angle = angle;
+        if self.bend.len() != joints.len() {
+            self.bend = joints.iter().filter_map(|name| self.skeleton.joint(name)).collect();
+        }
+    }
+
+    /// With 1, an overlay faces the way it was written whatever the clip underneath does to the
+    /// hips: for aiming, where a sway below would throw the barrel off. 0 lets it ride on them.
+    pub fn set_overlay_steady(&mut self, steady: f32) {
+        self.overlay_steady = steady.clamp(0.0, 1.0);
+    }
+
+    /// Leaves a joint and everything under it to the clips underneath, whatever overlay plays:
+    /// a free arm swinging with the walk while the other holds a gun. `None` gives it back to the
+    /// overlay. Either way it changes over a moment, not at once.
+    pub fn overlay_leave(&mut self, from: Option<&str>) {
+        match from.and_then(|name| self.skeleton.joint(name)) {
+            Some(joint) => {
+                let mut mask = vec![false; self.skeleton.joints.len()];
+                for &j in self.skeleton.order() {
+                    mask[j] = j == joint || self.skeleton.joints[j].parent.is_some_and(|parent| mask[parent]);
+                }
+                if mask != self.left_out {
+                    // Another limb: it starts from the overlay, as nothing else was let go.
+                    self.left_out = mask;
+                    self.left_out_amount = 0.0;
+                }
+                self.left_out_target = 1.0;
+            }
+            None => self.left_out_target = 0.0,
+        }
+    }
+
+    fn apply_bend(&mut self) {
+        if self.bend_angle == 0.0 || self.bend.is_empty() {
+            return;
+        }
+        let share = self.bend_angle / self.bend.len() as f32;
+        let (_, root, _) = self.skeleton.root.to_scale_rotation_translation();
+        for at in 0..self.bend.len() {
+            let joint = self.bend[at];
+            let mut above = Quat::IDENTITY;
+            let mut parent = self.skeleton.joints[joint].parent;
+            while let Some(index) = parent {
+                above = self.pose[index].rotation * above;
+                parent = self.skeleton.joints[index].parent;
+            }
+            let axis = (root * above).inverse() * Vec3::X;
+            self.pose[joint].rotation =
+                Quat::from_axis_angle(axis.normalize_or_zero(), share) * self.pose[joint].rotation;
+        }
     }
 
     fn evaluate(&mut self) {

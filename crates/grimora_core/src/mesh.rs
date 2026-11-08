@@ -49,7 +49,7 @@ pub struct TextureData {
 }
 
 impl TextureData {
-    /// Half-size copy using a 2×2 box filter (odd edges repeat the last texel).
+    /// Half-size copy using a 2Ã—2 box filter (odd edges repeat the last texel).
     /// Used for mipmaps and to shrink oversized textures.
     pub fn half(&self) -> Self {
         let (w, h) = (self.width as usize, self.height as usize);
@@ -59,14 +59,59 @@ impl TextureData {
             let (y0, y1) = ((2 * y).min(h - 1), (2 * y + 1).min(h - 1));
             for x in 0..hw {
                 let (x0, x1) = ((2 * x).min(w - 1), (2 * x + 1).min(w - 1));
-                for c in 0..4 {
-                    let texel = |x: usize, y: usize| u32::from(self.rgba[(y * w + x) * 4 + c]);
-                    let sum = texel(x0, y0) + texel(x1, y0) + texel(x0, y1) + texel(x1, y1);
-                    rgba.push(((sum + 2) / 4) as u8);
+                let texels = [(x0, y0), (x1, y0), (x0, y1), (x1, y1)].map(|(x, y)| (y * w + x) * 4);
+                let alpha: u32 = texels.iter().map(|&t| u32::from(self.rgba[t + 3])).sum();
+                for c in 0..3 {
+                    // What is see-through has no say in the color, which would fringe cutouts.
+                    let weighted = |t: usize| {
+                        let weight = if alpha == 0 { 1 } else { u32::from(self.rgba[t + 3]) };
+                        (u32::from(self.rgba[t + c]) * weight, weight)
+                    };
+                    let (sum, total) = texels.iter().fold((0, 0), |(sum, total), &t| {
+                        let (value, weight) = weighted(t);
+                        (sum + value, total + weight)
+                    });
+                    rgba.push(((sum + total / 2) / total) as u8);
                 }
+                rgba.push(((alpha + 2) / 4) as u8);
             }
         }
         Self { name: self.name.clone(), width: hw as u32, height: hh as u32, rgba }
+    }
+
+    /// Gives fully transparent texels the color of what is drawn beside them.
+    /// Nothing shows them with hard texels, but a filter blends them into the
+    /// edge of a cutout, which would get a dark outline.
+    pub fn fill_under_alpha(&mut self) {
+        if !self.rgba.as_chunks::<4>().0.iter().any(|texel| texel[3] == 0) {
+            return;
+        }
+        let (w, h) = (self.width as usize, self.height as usize);
+        let source = self.rgba.clone();
+        for y in 0..h {
+            for x in 0..w {
+                let texel = (y * w + x) * 4;
+                if source[texel + 3] != 0 {
+                    continue;
+                }
+                let (mut sum, mut total) = ([0u32; 3], 0u32);
+                for ny in [y + h - 1, y, y + 1] {
+                    for nx in [x + w - 1, x, x + 1] {
+                        let near = (ny % h * w + nx % w) * 4;
+                        let weight = u32::from(source[near + 3]);
+                        for (c, value) in sum.iter_mut().enumerate() {
+                            *value += u32::from(source[near + c]) * weight;
+                        }
+                        total += weight;
+                    }
+                }
+                for (c, value) in sum.iter().enumerate() {
+                    if let Some(mean) = (value + total / 2).checked_div(total) {
+                        self.rgba[texel + c] = mean as u8;
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -76,7 +121,7 @@ impl std::fmt::Debug for TextureData {
     }
 }
 
-/// How a material uses its alpha (base color alpha × texture alpha).
+/// How a material uses its alpha (base color alpha Ã— texture alpha).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum AlphaMode {
     /// Alpha is ignored.
@@ -102,6 +147,14 @@ pub enum Shading {
     /// Waves on the vertices (`MeshData::wind` is their height), scrolling
     /// texture and the sky reflected at low angles. Use with `AlphaMode::Blend`.
     Water,
+    /// Glows from within, with depth: clouds and veins seen through its faces, moving.
+    /// `Renderable::emissive` says how awake it is.
+    Crystal,
+    /// Generated ground: grass (the base picture, tinted by the vertex color), sand (the
+    /// emissive picture) and rock (the occlusion picture) blended by the weights in the
+    /// vertex's `tangent.xyz`, with ragged borders and two scales of each picture against the
+    /// repeats. See `ground_texel` in scene.wgsl.
+    Ground,
 }
 
 /// Surface appearance, modeled on glTF's metallic-roughness materials.
@@ -123,7 +176,8 @@ pub struct Material {
     pub double_sided: bool,
     pub alpha_mode: AlphaMode,
     pub shading: Shading,
-    /// Keeps the texels sharp up close instead of blurring them: pixel art.
+    /// Pixel art: follows the player's choice between filtered and hard texels
+    /// (`Renderer::set_smooth_textures`). Without this, always filtered.
     pub pixelated: bool,
     /// Linear light emitted by the surface, multiplied by `emissive_texture`.
     /// Unaffected by lighting; values above 1 feed the bloom.
@@ -136,8 +190,16 @@ pub struct Material {
     pub metallic_roughness_texture: Option<Arc<TextureData>>,
     /// Red channel = ambient occlusion.
     pub occlusion_texture: Option<Arc<TextureData>>,
-    /// sRGB emission color.
+    /// sRGB emission color. On water, the picture of its foam instead.
     pub emissive_texture: Option<Arc<TextureData>>,
+    /// With `Shading::Water`: what it looks like.
+    pub water: Option<crate::water::WaterLook>,
+    /// Water: meters one repeat of its picture covers.
+    pub water_tile: f32,
+    /// A river: how fast its picture moves along its uv, per second.
+    pub water_flow: glam::Vec2,
+    /// 1 on a river, whose uv runs along it.
+    pub water_river: f32,
 }
 
 impl Default for Material {
@@ -159,6 +221,10 @@ impl Default for Material {
             metallic_roughness_texture: None,
             occlusion_texture: None,
             emissive_texture: None,
+            water: None,
+            water_tile: 3.0,
+            water_flow: glam::Vec2::ZERO,
+            water_river: 0.0,
         }
     }
 }
@@ -190,6 +256,35 @@ pub struct MeshData {
     pub wind: f32,
     /// Casts no shadow: grass that would cost more than it shows, or water.
     pub shadowless: bool,
+    /// Follows the camera around, so it is never out of view: a sea.
+    pub boundless: bool,
+    /// What bumps into it, when its file gives a shape of its own (a model's `*_COL`
+    /// nodes): the trunk of a tree, not its crown. Never drawn.
+    pub collision: Option<Arc<CollisionMesh>>,
+}
+
+/// Welded triangles for a static collider, in the mesh's own space.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CollisionMesh {
+    pub vertices: Vec<Vec3>,
+    pub indices: Vec<[u32; 3]>,
+}
+
+impl CollisionMesh {
+    /// The triangles of `mesh`, with the vertices that sit on the same spot joined.
+    pub fn from_mesh(mesh: &MeshData) -> Self {
+        let mut vertices = Vec::new();
+        let mut lookup = std::collections::HashMap::new();
+        let mut remap = |p: [f32; 3]| {
+            *lookup.entry(p.map(f32::to_bits)).or_insert_with(|| {
+                vertices.push(Vec3::from(p));
+                vertices.len() as u32 - 1
+            })
+        };
+        let welded: Vec<u32> = mesh.indices.iter().map(|&i| remap(mesh.vertices[i as usize].position)).collect();
+        let indices = welded.as_chunks::<3>().0.iter().map(|t| [t[0], t[1], t[2]]).collect();
+        Self { vertices, indices }
+    }
 }
 
 /// A lower-detail stand-in for a mesh.
@@ -275,5 +370,34 @@ impl MeshData {
 
     pub fn is_empty(&self) -> bool {
         self.indices.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mipmaps_ignore_the_color_of_what_is_see_through() {
+        let rgba = vec![200, 100, 50, 255, 0, 0, 0, 0, 0, 0, 0, 0, 200, 100, 50, 255];
+        let half = TextureData { name: "cutout".into(), width: 2, height: 2, rgba }.half();
+        assert_eq!(half.rgba, [200, 100, 50, 128]);
+
+        let rgba = vec![90, 90, 90, 0, 30, 30, 30, 0, 30, 30, 30, 0, 90, 90, 90, 0];
+        let half = TextureData { name: "empty".into(), width: 2, height: 2, rgba }.half();
+        assert_eq!(half.rgba, [60, 60, 60, 0]);
+    }
+
+    #[test]
+    fn transparent_texels_take_the_color_beside_them() {
+        let rgba = vec![200, 100, 50, 255, 0, 0, 0, 0];
+        let mut cutout = TextureData { name: "cutout".into(), width: 2, height: 1, rgba };
+        cutout.fill_under_alpha();
+        assert_eq!(cutout.rgba, [200, 100, 50, 255, 200, 100, 50, 0]);
+
+        let rgba = vec![9, 9, 9, 0, 7, 7, 7, 0];
+        let mut empty = TextureData { name: "empty".into(), width: 2, height: 1, rgba: rgba.clone() };
+        empty.fill_under_alpha();
+        assert_eq!(empty.rgba, rgba, "nothing drawn, nothing to copy");
     }
 }

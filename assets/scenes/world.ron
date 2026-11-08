@@ -1,0 +1,65 @@
+// The scene under a generated world: run with `--world assets/world/island.ron`, which the
+// sandbox does by itself when given `--world` without `--scene`. The ground is not here: it comes
+// from the world file, in tiles (`grimora::land`). This holds the sky, the day and the sea, at
+// sea level (y 0); the player starts on the world's `start`.
+SceneDesc(
+    environment: (
+        fog: (height_falloff: 0.09, base_height: 0.0, sun_scatter: 0.25),
+        sky: (
+            sun_size: 1.6,
+            sun_texture: "../textures/sol.png",
+            moon_texture: "../textures/moons/maris.png",
+            sun_sprite_size: 2.4,
+            moon_sprite_size: 11.0,
+            halo: 1.0,
+            clouds: (scale: 1.2, speed: 1.0),
+        ),
+        wind: (direction: (1.0, 0.35), strength: 1.2, speed: 1.6),
+        shadows: (enabled: true, distance: 140.0, strength: 0.7, cascades: 4),
+        post: (
+            contrast: 1.15, saturation: 1.15, vignette: 0.35, grain: 0.02, bloom: 0.25,
+            vivid: 0.6, sharpen: 0.6, shadow_tint: (0.0, 0.01, 0.04),
+        ),
+        surface: (
+            contrast: 1.35, saturation: 0.95, mottle: 0.6, mottle_size: 7.0,
+            mottle_dark: (0.5, 0.5, 0.65), mottle_light: (1.1, 1.1, 1.0), crisp: 1.5,
+        ),
+    ),
+
+    day_cycle: (time: 15.5, day_length: 480.0, sunrise: 40.0, tilt: 52.0, moon_tilt: 76.0, haze: 0.4, weather: Clear),
+
+    player: (position: (0.0, 0.0, 0.0), yaw: 0.0),
+    camera: (position: (0.0, 6.0, 10.0), look_at: (0.0, 2.0, 0.0), fov: 60.0),
+
+    water_sounds: (
+        sea: "../sounds/sea.wav",
+        river: "../sounds/river.wav",
+        underwater: "../sounds/underwater.wav",
+        splash: ["../sounds/splash_1.wav", "../sounds/splash_2.wav"],
+        splash_effect: "../effects/splash.ron",
+    ),
+
+    // A sea: endless, around the camera. `sea` says what its waves are like, and the weather
+    // makes them higher. `look` is its colors: try a low `clarity` and a high `murk` for a
+    // muddy sea, or a high `clarity` and a pale `shallow` for a crystal one.
+
+    // `reach` draws the sea out to the horizon, past its waved rings.
+    water: [
+        (position: (0.0, 0.0, 0.0), texture: "../textures/agua.png", tile: 5.0,
+         sea: (swell: 0.75, length: 55.0, chop: 0.16, steepness: 0.7, spread: 45.0, reach: 24000.0),
+         look: (deep: (0.06, 0.42, 0.72), shallow: (0.3, 1.0, 0.9), clarity: 16.0, murk: 0.2,
+                refraction: 0.7, foam: 1.0, foam_color: (0.92, 0.97, 0.96), caustics: 1.0)),
+    ],
+
+    weather_sounds: (
+        rain: "../sounds/rain.wav",
+        snow: "../sounds/wind.ogg",
+        thunder: ["../sounds/thunder_1.wav", "../sounds/thunder_2.wav"],
+    ),
+
+    sounds: [
+        (path: "../sounds/wind.ogg", volume: 0.35),
+    ],
+
+    items: "../items/items.ron",
+)

@@ -11,16 +11,36 @@ use grimora::prelude::*;
 use crate::{Mode, QUICK_LOAD, QUICK_SAVE, QUICK_SLOT, Sandbox, TOGGLE_FLY, animate};
 
 const TITLE: &str = "GRIMORA";
-const TITLE_SIZE: f32 = 80.0;
-const TITLE_GAP: f32 = 32.0;
+const TITLE_SIZE: f32 = 64.0;
+const TITLE_GAP: f32 = 28.0;
 const HEADING_SIZE: f32 = 32.0;
-const BUTTON: Vec2 = Vec2::new(340.0, 44.0);
-const OPTION_ROW: Vec2 = Vec2::new(760.0, 44.0);
-const GAP: f32 = 8.0;
-const PANEL_PADDING: f32 = 24.0;
-const GOLD: Vec4 = Vec4::new(1.0, 0.78, 0.42, 1.0);
-const PANEL: Vec4 = Vec4::new(0.05, 0.04, 0.06, 0.88);
-const BORDER: Vec4 = Vec4::new(0.55, 0.43, 0.28, 0.9);
+const HEADING_GAP: f32 = 18.0;
+/// The big lists, in the title and the pause.
+const BUTTON: Vec2 = Vec2::new(320.0, 38.0);
+const BUTTON_TEXT: f32 = 24.0;
+const OPTION_ROW: Vec2 = Vec2::new(600.0, 32.0);
+const OPTION_TEXT: f32 = 16.0;
+const GAP: f32 = 4.0;
+/// How far the dark behind a list goes on after it, fading.
+const SHADE_FADE: f32 = 220.0;
+const SHADE: Vec4 = Vec4::new(0.015, 0.018, 0.05, 0.86);
+/// The menus' look: lines of text, no boxes.
+const MENU_THEME: Theme = Theme {
+    text_size: BUTTON_TEXT,
+    text: Vec4::new(0.9, 0.87, 0.76, 1.0),
+    accent: Vec4::new(0.98, 0.95, 0.84, 1.0),
+    disabled: Vec4::new(0.6, 0.58, 0.62, 0.55),
+    fill: Vec4::new(0.015, 0.018, 0.05, 0.86),
+    hover: Vec4::new(0.36, 0.27, 0.46, 0.85),
+    pressed: Vec4::new(0.5, 0.38, 0.6, 0.9),
+    border: Vec4::new(0.62, 0.46, 0.58, 1.0),
+    track: Vec4::new(0.0, 0.0, 0.03, 0.75),
+    frames: false,
+    upper: true,
+};
+const PALE: Vec4 = Vec4::new(0.98, 0.95, 0.84, 1.0);
+const DIM: Vec4 = Vec4::new(0.7, 0.68, 0.6, 0.95);
+const LINE: Vec4 = Vec4::new(0.62, 0.46, 0.58, 1.0);
 
 const VOLUME_STEP: f32 = 0.05;
 const SENSITIVITY_RANGE: std::ops::RangeInclusive<f32> = 0.25..=3.0;
@@ -29,11 +49,11 @@ const UI_SCALE_NAMES: [&str; 3] = ["100%", "125%", "150%"];
 const RESOLUTION_NAMES: [&str; 4] = ["1280 x 720", "1600 x 900", "1920 x 1080", "2560 x 1440"];
 const SHADOW_NAMES: [&str; 3] = ["Baixa", "Média", "Alta"];
 /// The controls screen is a grid of smaller rows: there is a lot to fit.
-const CONTROL_ROW: Vec2 = Vec2::new(390.0, 36.0);
+const CONTROL_ROW: Vec2 = Vec2::new(390.0, 28.0);
 const CONTROL_TEXT: f32 = 16.0;
 const CONTROL_GAP: f32 = 12.0;
 /// What the player can rebind, with the names shown.
-const CONTROLS: [(&str, &str); 14] = [
+const CONTROLS: [(&str, &str); 19] = [
     (actions::MOVE_FORWARD, "Andar para frente"),
     (actions::MOVE_BACK, "Andar para trás"),
     (actions::MOVE_LEFT, "Andar à esquerda"),
@@ -45,20 +65,58 @@ const CONTROLS: [(&str, &str); 14] = [
     (actions::ROLL, "Rolar"),
     (actions::LOCK_ON, "Travar alvo"),
     (actions::GUARD, "Defender"),
+    crate::spells::CONTROL_NAMES[0],
+    crate::spells::CONTROL_NAMES[1],
+    crate::guns::CONTROL_NAMES[0],
+    (crate::bag::OPEN_BAG, "Mochila"),
     (TOGGLE_FLY, "Câmera livre"),
     (QUICK_SAVE, "Salvar"),
     (QUICK_LOAD, "Carregar"),
+    crate::tale::CONTROL_NAME,
 ];
 /// A `--menu pause` or `--menu options` run plays this many frames first, so
 /// the capture shows a game in progress.
 const CAPTURE_WARMUP_FRAMES: u64 = 30;
 
-const TITLE_HINT: &str = "W/S ou setas escolher · Enter ou Espaço confirmar · ou use o mouse";
-const PAUSE_HINT: &str = "W/S ou setas escolher · Enter ou Espaço confirmar · Esc voltar ao jogo · F3 métricas";
-const OPTIONS_HINT: &str = "W/S ou setas escolher · A/D ou setas ajustar · Esc voltar";
-const CONTROLS_HINT: &str =
-    "Enter ou clique trocar · A tecla ou botão mostrado é do último aparelho usado · Esc voltar";
-const CAPTURE_HINT: &str = "Pressione a nova tecla, botão do mouse ou do controle · Esc cancela";
+/// The keys of a screen, on a keyboard and on a gamepad.
+type Keys = (&'static str, &'static str);
+const TITLE_HINT: Keys = ("ENTER  ESCOLHER", "A  ESCOLHER");
+const PAUSE_HINT: Keys = ("ENTER  ESCOLHER    ESC  VOLTAR AO JOGO    F3  MÉTRICAS", "A  ESCOLHER    B  VOLTAR AO JOGO");
+const OPTIONS_HINT: Keys = ("A/D  AJUSTAR    ESC  VOLTAR", "ESQUERDA/DIREITA  AJUSTAR    B  VOLTAR");
+const CONTROLS_HINT: Keys = ("ENTER  TROCAR    ESC  VOLTAR", "A  TROCAR    B  VOLTAR");
+const CAPTURE_HINT: Keys = ("PRESSIONE A NOVA TECLA OU BOTÃO    ESC  CANCELAR", "PRESSIONE O NOVO BOTÃO OU TECLA");
+const SAVE_HINT: Keys = ("ENTER  SALVAR    DEL  APAGAR    ESC  VOLTAR", "A  SALVAR    X  APAGAR    B  VOLTAR");
+const LOAD_HINT: Keys = ("ENTER  CARREGAR    DEL  APAGAR    ESC  VOLTAR", "A  CARREGAR    X  APAGAR    B  VOLTAR");
+const SURE_HINT: Keys = ("ENTER  CONFIRMAR    ESC  CANCELAR", "A  CONFIRMAR    B  CANCELAR");
+/// What's shown in the pause, on the right. The way to walk is its own row, first.
+const PLAY_KEYS: [(&str, &str); 13] = [
+    (actions::RUN, "Correr"),
+    (actions::JUMP, "Pular"),
+    (actions::ROLL, "Rolar"),
+    (actions::INTERACT, "Usar"),
+    (actions::ATTACK, "Golpear"),
+    (actions::GUARD, "Defender"),
+    (actions::LOCK_ON, "Travar alvo"),
+    (crate::bag::OPEN_BAG, "Mochila"),
+    crate::spells::CONTROL_NAMES[0],
+    crate::spells::CONTROL_NAMES[1],
+    crate::guns::CONTROL_NAMES[0],
+    crate::tale::CONTROL_NAME,
+    (QUICK_SAVE, "Salvar"),
+];
+const PLAY_KEY_ROW: f32 = 24.0;
+/// Under this width there's no room for them next to the list.
+const PLAY_KEYS_FROM: f32 = 1000.0;
+/// Where a game can be saved.
+const SLOTS: [(&str, &str); 5] = [
+    (QUICK_SLOT, "Salvamento rápido"),
+    ("slot_1", "Jogo 1"),
+    ("slot_2", "Jogo 2"),
+    ("slot_3", "Jogo 3"),
+    ("slot_4", "Jogo 4"),
+];
+const MENU_SAVE: &str = "Salvar";
+const MENU_LOAD: &str = "Carregar";
 const MENU_VIDEO: &str = "Vídeo";
 const MENU_CONTROLS: &str = "Controles";
 const RESTORE: &str = "Restaurar padrão";
@@ -70,6 +128,25 @@ enum Screen {
     Options,
     Video,
     Controls,
+    /// The slots, to save in one or else to load from one.
+    Saves {
+        saving: bool,
+    },
+}
+
+/// A second press is needed to do this to a slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Sure {
+    Overwrite(usize),
+    Delete(usize),
+}
+
+impl Sure {
+    fn slot(self) -> usize {
+        match self {
+            Self::Overwrite(slot) | Self::Delete(slot) => slot,
+        }
+    }
 }
 
 /// What the player asked for this frame.
@@ -77,8 +154,9 @@ enum Screen {
 enum Action {
     NewGame,
     Load,
+    LoadSlot(usize),
     Resume,
-    Save,
+    OpenSaves(bool),
     OpenOptions,
     OpenVideo,
     OpenControls,
@@ -100,6 +178,10 @@ pub struct Menu {
     stored: Options,
     /// The newest saved game, read when a menu opens and after saving.
     latest_save: Option<String>,
+    /// How long ago each of [`SLOTS`] was saved, in seconds, if it was.
+    slot_ages: [Option<u64>; SLOTS.len()],
+    /// The slot waiting for its second press.
+    sure: Option<Sure>,
     /// Where the title screen looks from: the scene's own camera.
     title_camera: Camera,
     /// The controls as the game defines them, for "Restaurar padrão".
@@ -110,13 +192,16 @@ pub struct Menu {
 
 impl Menu {
     fn refresh_saves(&mut self, saves: &SaveStore) {
-        self.latest_save = match saves.slots() {
-            Ok(slots) => slots.into_iter().next().map(|slot| slot.name),
-            Err(err) => {
-                eprintln!("[sandbox] warning: can't list the saved games: {err:#}");
-                None
-            }
-        };
+        let slots = saves.slots().unwrap_or_else(|err| {
+            eprintln!("[sandbox] warning: can't list the saved games: {err:#}");
+            Vec::new()
+        });
+        self.latest_save = slots.first().map(|slot| slot.name.clone());
+        let now = std::time::SystemTime::now();
+        for (age, (name, _)) in self.slot_ages.iter_mut().zip(SLOTS) {
+            let slot = slots.iter().find(|slot| slot.name == name);
+            *age = slot.map(|slot| now.duration_since(slot.modified).map_or(0, |since| since.as_secs()));
+        }
     }
 
     fn store_options(&mut self) {
@@ -141,10 +226,15 @@ impl Sandbox {
     /// Reads the options and picks the first screen. Called once from `init`.
     pub(crate) fn start_menu(&mut self, ctx: &mut Context) {
         self.menu.title_camera = ctx.camera;
+        ctx.ui.theme = MENU_THEME;
         let controls = &mut ctx.input.actions;
         controls.add(TOGGLE_FLY, [Binding::Key(KeyCode::Tab)]);
         controls.add(QUICK_SAVE, [Binding::Key(KeyCode::F6)]);
         controls.add(QUICK_LOAD, [Binding::Key(KeyCode::F9)]);
+        controls.add(crate::tale::OPEN_JOURNAL, [Binding::Key(KeyCode::KeyJ), Binding::Pad(PadButton::RightStick)]);
+        crate::bag::add_controls(controls);
+        crate::spells::add_controls(controls);
+        crate::guns::add_controls(controls);
         self.menu.default_controls = controls.clone();
         let config = ctx.config();
         let automated = config.screenshot.is_some() || config.frames.is_some();
@@ -167,11 +257,37 @@ impl Sandbox {
             Some("pause") => self.menu.scheduled = Some((vec![Screen::Pause], warmup)),
             Some("options") => self.menu.scheduled = Some((vec![Screen::Pause, Screen::Options], warmup)),
             Some("video") => self.menu.scheduled = Some((vec![Screen::Pause, Screen::Options, Screen::Video], warmup)),
+            Some("save") => {
+                self.menu.scheduled = Some((vec![Screen::Pause, Screen::Saves { saving: true }], warmup));
+            }
+            Some("load") => {
+                self.menu.scheduled = Some((vec![Screen::Pause, Screen::Saves { saving: false }], warmup));
+            }
+            Some("inventory") => self.bag.scheduled = Some((false, warmup)),
+            Some(name @ ("dialogue" | "shop" | "rest" | "death" | "area")) => {
+                self.tale.scheduled = Some((name.to_owned(), warmup));
+            }
+            Some(journal) if journal.starts_with("journal") => {
+                self.tale.scheduled = Some((journal.to_owned(), warmup));
+            }
+            Some("hud") => self.hud.demo = true,
+            Some("chest") => self.bag.scheduled = Some((true, warmup)),
+            Some(gear) if gear.starts_with("gear:") => {
+                self.bag.gear.scheduled = Some(gear["gear:".len()..].to_owned());
+            }
+            Some(gun) if gun.starts_with("gun:") => {
+                self.guns.scheduled = Some((gun["gun:".len()..].to_owned(), warmup));
+            }
+            Some(spell) if spell.starts_with("spell:") => {
+                self.spells.scheduled = Some((spell["spell:".len()..].to_owned(), warmup));
+            }
             Some("controls") => {
                 self.menu.scheduled = Some((vec![Screen::Pause, Screen::Options, Screen::Controls], warmup));
             }
             Some(other) => {
-                eprintln!("[sandbox] unknown menu {other:?}: use title, pause, options, video or controls");
+                eprintln!(
+                    "[sandbox] unknown menu {other:?}: use title, pause, options, video, controls, save, load, inventory or chest"
+                );
                 ctx.exit();
             }
         }
@@ -202,6 +318,14 @@ impl Sandbox {
             if !escape {
                 return false;
             }
+            // The screen of things isn't a menu: Esc just closes it.
+            if self.bag.open {
+                self.bag.close();
+                return false;
+            }
+            if self.tale.panel.take().is_some() {
+                return false;
+            }
             escape = false;
             self.menu.stack.push(Screen::Pause);
             self.menu.refresh_saves(&ctx.saves);
@@ -213,6 +337,10 @@ impl Sandbox {
             self.capture_control(ctx);
             escape = false;
         }
+        // Esc takes back the question first.
+        if escape && self.menu.sure.take().is_some() {
+            escape = false;
+        }
 
         let screen = self.menu.stack[self.menu.stack.len() - 1];
         let can_load = self.menu.latest_save.is_some();
@@ -221,7 +349,10 @@ impl Sandbox {
                 self.live_scene(ctx);
                 (draw_title(&mut ctx.ui, can_load), TITLE_HINT)
             }
-            Screen::Pause => (draw_pause(&mut ctx.ui, can_load), PAUSE_HINT),
+            Screen::Pause => {
+                let keys = play_keys(&ctx.input);
+                (draw_pause(&mut ctx.ui, can_load, &keys), PAUSE_HINT)
+            }
             Screen::Options => {
                 let (changed, action) = draw_options(&mut ctx.ui, &mut self.menu.options);
                 if changed {
@@ -241,7 +372,17 @@ impl Sandbox {
                 let action = self.draw_controls(ctx);
                 (action, if self.menu.capturing.is_some() { CAPTURE_HINT } else { CONTROLS_HINT })
             }
+            Screen::Saves { saving } => {
+                let action = self.draw_saves(ctx, saving);
+                let keys = match (self.menu.sure, saving) {
+                    (Some(_), _) => SURE_HINT,
+                    (None, true) => SAVE_HINT,
+                    (None, false) => LOAD_HINT,
+                };
+                (action, keys)
+            }
         };
+        let hint = if ctx.input.gamepad_last() { hint.1 } else { hint.0 };
         self.hud.draw_with_hint(ctx, hint);
         if escape && screen != Screen::Title {
             action = Some(if screen == Screen::Pause { Action::Resume } else { Action::Back });
@@ -266,9 +407,16 @@ impl Sandbox {
                 }
             }
             Action::Resume => self.close_menu(ctx),
-            Action::Save => {
-                self.save(ctx, QUICK_SLOT);
+            Action::OpenSaves(saving) => {
+                self.menu.stack.push(Screen::Saves { saving });
+                self.menu.sure = None;
                 self.menu.refresh_saves(&ctx.saves);
+                ctx.ui.reset_focus();
+            }
+            Action::LoadSlot(slot) => {
+                if self.load(ctx, SLOTS[slot].0) {
+                    self.close_menu(ctx);
+                }
             }
             Action::OpenOptions => {
                 self.menu.stack.push(Screen::Options);
@@ -286,10 +434,13 @@ impl Sandbox {
                 self.menu.store_options();
                 let left = self.menu.stack.pop();
                 self.menu.capturing = None;
+                self.menu.sure = None;
                 // Back where the player came from.
                 ctx.ui.set_focus(match left {
                     Some(Screen::Video) => MENU_VIDEO,
                     Some(Screen::Controls) => MENU_CONTROLS,
+                    Some(Screen::Saves { saving: true }) => MENU_SAVE,
+                    Some(Screen::Saves { saving: false }) => MENU_LOAD,
                     _ => MENU_OPTIONS,
                 });
             }
@@ -332,22 +483,26 @@ impl Sandbox {
 
     /// The camera options and a row per action, two to a line.
     fn draw_controls(&mut self, ctx: &mut Context) -> Option<Action> {
-        let text_size = ctx.ui.theme.text_size;
-        ctx.ui.theme.text_size = CONTROL_TEXT;
         let gamepad = ctx.input.gamepad_last();
         let capturing = self.menu.capturing;
         let rows = 2 + CONTROLS.len().div_ceil(2) as u32;
         let ui = &mut ctx.ui;
         let wide = Vec2::new(CONTROL_ROW.x * 2.0 + CONTROL_GAP, CONTROL_ROW.y);
-        veil(ui, 0.45);
-        let mut column = menu_panel(ui, MENU_CONTROLS, rows, wide);
+        ui.theme.text_size = CONTROL_TEXT;
+        let mut column = menu_list(ui, MENU_CONTROLS, rows, wide);
         let (mut left, mut right) = {
             let row = column.row();
             (Rect::new(row.min, CONTROL_ROW), Rect::new(row.min + Vec2::X * (row.size.x - CONTROL_ROW.x), CONTROL_ROW))
         };
         let options = &mut self.menu.options;
-        let mut changed =
-            ui.slider(left, "Sensibilidade", &mut options.look_sensitivity, SENSITIVITY_RANGE, SENSITIVITY_STEP);
+        let mut changed = ui.number_slider(
+            left,
+            "Sensibilidade",
+            &mut options.look_sensitivity,
+            SENSITIVITY_RANGE,
+            SENSITIVITY_STEP,
+            2,
+        );
         changed |= ui.toggle(right, "Inverter eixo Y", &mut options.invert_look_y);
         let mut wanted = None;
         for pair in CONTROLS.chunks(2) {
@@ -372,7 +527,6 @@ impl Sandbox {
             (Rect::new(row.min, CONTROL_ROW), Rect::new(row.min + Vec2::X * (row.size.x - CONTROL_ROW.x), CONTROL_ROW));
         let restore = ui.button(left, RESTORE);
         let back = ui.button(right, "Voltar");
-        ui.theme.text_size = text_size;
 
         if restore {
             ctx.input.actions = self.menu.default_controls.clone();
@@ -389,6 +543,59 @@ impl Sandbox {
         back.then_some(Action::Back)
     }
 
+    /// The slots. Writing over a game or deleting one takes a second press, and moving away
+    /// takes the question back.
+    fn draw_saves(&mut self, ctx: &mut Context, saving: bool) -> Option<Action> {
+        let deleting = ctx.input.just_pressed(KeyCode::Delete) || ctx.input.pad_just_pressed(PadButton::West);
+        let ages = self.menu.slot_ages;
+        let sure = self.menu.sure;
+        let ui = &mut ctx.ui;
+        ui.theme.text_size = OPTION_TEXT;
+        let heading = if saving { MENU_SAVE } else { MENU_LOAD };
+        let mut column = menu_list(ui, heading, SLOTS.len() as u32 + 1, OPTION_ROW);
+        let mut used = None;
+        let mut focused = None;
+        for (slot, (_, label)) in SLOTS.iter().enumerate() {
+            let value = match sure.filter(|sure| sure.slot() == slot) {
+                Some(Sure::Overwrite(_)) => "Escrever por cima?".to_owned(),
+                Some(Sure::Delete(_)) => "Apagar?".to_owned(),
+                None => ages[slot].map_or_else(|| "Vazio".to_owned(), ago),
+            };
+            if ui.button_row_if(saving || ages[slot].is_some(), column.row(), label, &value) {
+                used = Some(slot);
+            }
+            if ui.is_focused(label) {
+                focused = Some(slot);
+            }
+        }
+        let back = ui.button(column.row(), "Voltar");
+
+        if sure.is_some_and(|sure| Some(sure.slot()) != focused) {
+            self.menu.sure = None;
+        }
+        if deleting && let Some(slot) = focused.filter(|slot| ages[*slot].is_some()) {
+            self.menu.sure = Some(Sure::Delete(slot));
+        }
+        let Some(slot) = used else { return back.then_some(Action::Back) };
+        let name = SLOTS[slot].0;
+        match self.menu.sure.take() {
+            Some(Sure::Delete(_)) => {
+                if let Err(err) = ctx.saves.delete(name) {
+                    eprintln!("[sandbox] can't delete a saved game: {err:#}");
+                }
+                self.hud.notify(ctx, "Jogo apagado", true);
+                self.menu.refresh_saves(&ctx.saves);
+            }
+            None if !saving => return Some(Action::LoadSlot(slot)),
+            None if ages[slot].is_some() => self.menu.sure = Some(Sure::Overwrite(slot)),
+            _ => {
+                self.save(ctx, name);
+                self.menu.refresh_saves(&ctx.saves);
+            }
+        }
+        None
+    }
+
     fn close_menu(&mut self, ctx: &mut Context) {
         self.menu.stack.clear();
         ctx.set_paused(false);
@@ -402,11 +609,13 @@ impl Sandbox {
         self.heart_asleep = false;
         self.heart_glow = 1.0;
         self.steps = Default::default();
+        self.bag.reset();
+        self.tale.restart();
         self.hud.clear_notice();
     }
 
     /// Nobody is playing on the title screen, but the scene goes on: the
-    /// wanderer stands idle with the lantern and the others keep their routines,
+    /// wanderer stands idle and the others keep their routines,
     /// with no interest in it. Starting or loading a game ends that.
     fn live_scene(&mut self, ctx: &mut Context) {
         let dt = ctx.time.delta();
@@ -417,13 +626,9 @@ impl Sandbox {
         if let Some(transform) = ctx.world.get_mut::<Transform>(self.avatar) {
             *transform = player.transform();
         }
+        let moveset = crate::moveset_of(&ctx.world, self.avatar);
         if let Some(animator) = ctx.world.get_mut::<Animator>(self.avatar) {
-            animate(animator, player, &Input::default());
-        }
-        if let Some(joint) = ctx.world.joint_transform(self.avatar, "lantern")
-            && let Some(lantern) = ctx.world.get_mut::<Transform>(self.lantern)
-        {
-            *lantern = joint;
+            animate(animator, moveset, player, &Input::default());
         }
         let center = player.body.center();
         ctx.world.update_npcs(&mut ctx.physics, center, dt);
@@ -434,18 +639,22 @@ impl Sandbox {
 const MENU_OPTIONS: &str = "Opções";
 
 /// Hands out rows down the screen, each `size` wide and tall, `GAP` apart.
-struct Column {
+pub(crate) struct Column {
     x: f32,
     y: f32,
     size: Vec2,
 }
 
 impl Column {
-    fn new(center_x: f32, top: f32, size: Vec2) -> Self {
-        Self { x: center_x - size.x * 0.5, y: top, size }
+    pub(crate) fn x(&self) -> f32 {
+        self.x
     }
 
-    fn row(&mut self) -> Rect {
+    pub(crate) fn y(&self) -> f32 {
+        self.y
+    }
+
+    pub(crate) fn row(&mut self) -> Rect {
         let rect = Rect::new(Vec2::new(self.x, self.y), self.size);
         self.y += self.size.y + GAP;
         rect
@@ -456,31 +665,45 @@ fn column_height(rows: u32, size: Vec2) -> f32 {
     rows as f32 * size.y + (rows - 1) as f32 * GAP
 }
 
-/// Darkens the scene so that menus read over any of it.
-fn veil(ui: &mut Ui, alpha: f32) {
-    ui.rect(ui.screen(), Vec4::new(0.02, 0.015, 0.03, alpha));
+/// How long ago, for a person: `seconds` of it.
+fn ago(seconds: u64) -> String {
+    match seconds {
+        0..60 => "Agora".to_owned(),
+        60..3600 => format!("Há {} min", seconds / 60),
+        3600..86_400 => format!("Há {} h", seconds / 3600),
+        86_400..172_800 => "Há 1 dia".to_owned(),
+        _ => format!("Há {} dias", seconds / 86_400),
+    }
 }
 
-/// The title screen sits on the left, on a darkness that fades out towards
-/// the middle, which leaves the scene's centre and the wanderer to look at.
+/// Where the menus' lists start.
+pub(crate) fn left_margin(ui: &Ui) -> f32 {
+    (ui.size().x * 0.06).max(24.0)
+}
+
+/// Darkness over the left of the screen up to `width`, fading out after it, which leaves the
+/// rest of the scene to look at.
+fn shade(ui: &mut Ui, width: f32) {
+    let height = ui.size().y;
+    // A dither all the way, since a flat dark next to one shows where they meet.
+    ui.dither(Rect::new(Vec2::ZERO, Vec2::new(width, height)), SHADE, SHADE.w, false);
+    ui.dither(Rect::new(Vec2::X * width, Vec2::new(SHADE_FADE, height)), SHADE, 0.0, false);
+}
+
+/// The title's name and list, in the middle of the left of the screen.
 fn title_column(ui: &Ui) -> (Vec2, Column) {
-    let height = TITLE_SIZE + TITLE_GAP + column_height(4, BUTTON);
-    let left = (ui.size().x * 0.06).max(24.0);
+    let height = TITLE_SIZE + TITLE_GAP + column_height(5, BUTTON);
+    let left = left_margin(ui);
     let top = ((ui.size().y - height) * 0.5).max(8.0);
     let column = Column { x: left, y: top + TITLE_SIZE + TITLE_GAP, size: BUTTON };
     (Vec2::new(left, top), column)
 }
 
 fn draw_title(ui: &mut Ui, can_continue: bool) -> Option<Action> {
-    const STEPS: u32 = 48;
-    let size = ui.size();
-    let strip = Vec2::new((size.x * 0.65 / STEPS as f32).ceil(), size.y);
-    for step in 0..STEPS {
-        let alpha = 0.9 * (1.0 - step as f32 / STEPS as f32).powf(1.5);
-        ui.rect(Rect::new(Vec2::X * strip.x * step as f32, strip), Vec4::new(0.02, 0.015, 0.03, alpha));
-    }
+    ui.theme.text_size = BUTTON_TEXT;
     let (at, mut column) = title_column(ui);
-    ui.text(at, TITLE, &TextStyle::new(TITLE_SIZE).color(GOLD));
+    shade(ui, at.x + BUTTON.x);
+    ui.text(at, TITLE, &TextStyle::new(TITLE_SIZE).color(PALE).outline(Vec4::ZERO));
 
     let mut action = None;
     if ui.button(column.row(), "Novo jogo") {
@@ -488,6 +711,9 @@ fn draw_title(ui: &mut Ui, can_continue: bool) -> Option<Action> {
     }
     if ui.button_if(can_continue, column.row(), "Continuar") {
         action = Some(Action::Load);
+    }
+    if ui.button_if(can_continue, column.row(), MENU_LOAD) {
+        action = Some(Action::OpenSaves(false));
     }
     if ui.button(column.row(), MENU_OPTIONS) {
         action = Some(Action::OpenOptions);
@@ -498,32 +724,47 @@ fn draw_title(ui: &mut Ui, can_continue: bool) -> Option<Action> {
     action
 }
 
-/// A centered panel with a heading, and the column to fill it.
-fn menu_panel(ui: &mut Ui, heading: &str, rows: u32, row: Vec2) -> Column {
-    let row = Vec2::new(row.x.min(ui.size().x - 2.0 * PANEL_PADDING - 16.0), row.y);
-    let heading_gap = 20.0;
-    let height = HEADING_SIZE + heading_gap + column_height(rows, row);
-    let center = ui.size() * 0.5;
-    let top = ((ui.size().y - height) * 0.5 - 12.0).max(PANEL_PADDING);
-    let panel = Rect::new(Vec2::new(center.x - row.x * 0.5, top), Vec2::new(row.x, height));
-    ui.panel(panel.expand(PANEL_PADDING), PANEL, BORDER);
-    let style = TextStyle::new(HEADING_SIZE).color(GOLD).anchor(Anchor::Top);
-    ui.text(Vec2::new(center.x, top), heading, &style);
-    Column::new(center.x, top + HEADING_SIZE + heading_gap, row)
+/// A heading and a list on the left of the screen, on the dark.
+pub(crate) fn menu_list(ui: &mut Ui, heading: &str, rows: u32, row: Vec2) -> Column {
+    let left = left_margin(ui);
+    let row = Vec2::new(row.x.min(ui.size().x - left * 2.0), row.y);
+    let height = HEADING_SIZE + HEADING_GAP + column_height(rows, row);
+    let top = ((ui.size().y - height) * 0.5).max(8.0);
+    shade(ui, left + row.x);
+    let style = TextStyle::new(HEADING_SIZE).color(PALE);
+    ui.text(Vec2::new(left, top), &heading.to_uppercase(), &style);
+    let under = Rect::new(Vec2::new(left, top + HEADING_SIZE + HEADING_GAP * 0.4), Vec2::new(row.x, ui.line()));
+    ui.dither(under, LINE, 0.0, false);
+    Column { x: left, y: top + HEADING_SIZE + HEADING_GAP, size: row }
 }
 
-fn draw_pause(ui: &mut Ui, can_load: bool) -> Option<Action> {
-    veil(ui, 0.45);
-    let mut column = menu_panel(ui, "Pausa", 6, BUTTON);
+/// What the keys do while playing, with the ones of this device.
+fn play_keys(input: &Input) -> Vec<(&'static str, String)> {
+    let gamepad = input.gamepad_last();
+    let walking = if gamepad {
+        "Analógico".to_owned()
+    } else {
+        let walk = [actions::MOVE_FORWARD, actions::MOVE_LEFT, actions::MOVE_BACK, actions::MOVE_RIGHT];
+        walk.map(|action| input.actions.label(action, false)).join(" ")
+    };
+    let mut keys = vec![("Andar", walking)];
+    keys.extend(PLAY_KEYS.iter().map(|(action, name)| (*name, input.actions.label(action, gamepad))));
+    keys
+}
+
+fn draw_pause(ui: &mut Ui, can_load: bool, keys: &[(&str, String)]) -> Option<Action> {
+    ui.theme.text_size = BUTTON_TEXT;
+    draw_play_keys(ui, keys);
+    let mut column = menu_list(ui, "Pausa", 6, BUTTON);
     let mut action = None;
     if ui.button(column.row(), "Continuar") {
         action = Some(Action::Resume);
     }
-    if ui.button(column.row(), "Salvar") {
-        action = Some(Action::Save);
+    if ui.button(column.row(), MENU_SAVE) {
+        action = Some(Action::OpenSaves(true));
     }
-    if ui.button_if(can_load, column.row(), "Carregar") {
-        action = Some(Action::Load);
+    if ui.button_if(can_load, column.row(), MENU_LOAD) {
+        action = Some(Action::OpenSaves(false));
     }
     if ui.button(column.row(), MENU_OPTIONS) {
         action = Some(Action::OpenOptions);
@@ -537,10 +778,33 @@ fn draw_pause(ui: &mut Ui, can_load: bool) -> Option<Action> {
     action
 }
 
+/// On the right of the pause: what each thing does while playing. No box, only a dark that
+/// comes from the edge of the screen.
+fn draw_play_keys(ui: &mut Ui, keys: &[(&str, String)]) {
+    let size = ui.size();
+    if size.x < PLAY_KEYS_FROM {
+        return;
+    }
+    const WIDTH: f32 = 300.0;
+    let right = size.x - left_margin(ui);
+    let from = right - WIDTH;
+    ui.dither(Rect::new(Vec2::X * (from - 16.0), Vec2::new(size.x - from + 16.0, size.y)), SHADE, SHADE.w, false);
+    let fade = Rect::new(Vec2::X * (from - 16.0 - SHADE_FADE), Vec2::new(SHADE_FADE, size.y));
+    ui.dither(fade, Vec4::new(SHADE.x, SHADE.y, SHADE.z, 0.0), SHADE.w, false);
+    let top = (size.y - PLAY_KEY_ROW * keys.len() as f32) * 0.5;
+    let name = TextStyle::new(16.0).color(DIM).anchor(Anchor::Left);
+    let key = TextStyle::new(16.0).color(PALE).anchor(Anchor::Right);
+    for (row, (what, control)) in keys.iter().enumerate() {
+        let y = top + PLAY_KEY_ROW * (row as f32 + 0.5);
+        ui.text(Vec2::new(from, y), &what.to_uppercase(), &name);
+        ui.text(Vec2::new(right, y), &control.to_uppercase(), &key);
+    }
+}
+
 /// Returns whether anything changed, and what was asked for.
 fn draw_options(ui: &mut Ui, options: &mut Options) -> (bool, Option<Action>) {
-    veil(ui, 0.45);
-    let mut column = menu_panel(ui, MENU_OPTIONS, 7, OPTION_ROW);
+    ui.theme.text_size = OPTION_TEXT;
+    let mut column = menu_list(ui, MENU_OPTIONS, 7, OPTION_ROW);
     let mut changed = false;
     changed |= ui.slider(column.row(), "Volume geral", &mut options.master_volume, 0.0..=1.0, VOLUME_STEP);
     changed |= ui.slider(column.row(), "Ambiente", &mut options.ambient_volume, 0.0..=1.0, VOLUME_STEP);
@@ -566,8 +830,8 @@ fn draw_options(ui: &mut Ui, options: &mut Options) -> (bool, Option<Action>) {
 /// Returns whether anything changed, and what was asked for. `size` is the
 /// window's, to show the closest resolution until the player picks one.
 fn draw_video(ui: &mut Ui, options: &mut Options, size: (u32, u32)) -> (bool, Option<Action>) {
-    veil(ui, 0.45);
-    let mut column = menu_panel(ui, MENU_VIDEO, 6, OPTION_ROW);
+    ui.theme.text_size = OPTION_TEXT;
+    let mut column = menu_list(ui, MENU_VIDEO, 7, OPTION_ROW);
     let mut changed = ui.toggle(column.row(), "Tela cheia", &mut options.fullscreen);
     let current = options.resolution.unwrap_or(size);
     let mut resolution = grimora::RESOLUTIONS
@@ -584,6 +848,7 @@ fn draw_video(ui: &mut Ui, options: &mut Options, size: (u32, u32)) -> (bool, Op
         options.shadows = ShadowQuality::ALL[shadows];
         changed = true;
     }
+    changed |= ui.toggle(column.row(), "Texturas suaves", &mut options.smooth_textures);
     changed |= ui.toggle(column.row(), "Antisserrilhado (ao reiniciar)", &mut options.antialiasing);
     let back = ui.button(column.row(), "Voltar");
     (changed, back.then_some(Action::Back))
@@ -754,9 +1019,7 @@ mod tests {
         assert!(ctx.world.get::<Guard>(game.avatar).unwrap().raised);
 
         let avatar = game.avatar;
-        for (block, stance) in
-            [("sword_block_2", "sword_guard_2"), ("sword_block_3", "sword_guard_3"), ("sword_block_1", "sword_guard_1")]
-        {
+        for (block, stance) in [("sword_block_2", "sword_guard_2"), ("sword_block_1", "sword_guard_1")] {
             game.on_blocked(&mut ctx, avatar, Vec3::Y, Vec3::Z);
             frames(&mut game, &mut ctx, 1);
             assert_eq!(over(&game, &ctx).as_deref(), Some(block));
@@ -788,15 +1051,15 @@ mod tests {
         let dir = Folder::new("rebound_play");
         let (mut game, mut ctx) = start_with(EngineConfig { load: Some("none".into()), ..Default::default() }, &dir.0);
         frames(&mut game, &mut ctx, 30);
-        ctx.input.actions.rebind(actions::MOVE_FORWARD, Binding::Key(KeyCode::KeyI));
+        ctx.input.actions.rebind(actions::MOVE_FORWARD, Binding::Key(KeyCode::KeyO));
         let start = game.player.as_ref().unwrap().body.position;
         ctx.input.key_down(KeyCode::KeyW);
         frames(&mut game, &mut ctx, 20);
         ctx.input.key_up(KeyCode::KeyW);
         assert!(game.player.as_ref().unwrap().body.position.distance(start) < 0.05);
-        ctx.input.key_down(KeyCode::KeyI);
+        ctx.input.key_down(KeyCode::KeyO);
         frames(&mut game, &mut ctx, 40);
-        ctx.input.key_up(KeyCode::KeyI);
+        ctx.input.key_up(KeyCode::KeyO);
         assert!(game.player.as_ref().unwrap().body.position.distance(start) > 0.5);
     }
 
@@ -1137,8 +1400,15 @@ mod tests {
         press(&mut game, &mut ctx, KeyCode::ArrowDown);
         assert!(ctx.ui.is_focused("Salvar"));
         press(&mut game, &mut ctx, KeyCode::Enter);
+        assert_eq!(screen(&game), Some(Screen::Saves { saving: true }));
+        frames(&mut game, &mut ctx, 1);
+        press(&mut game, &mut ctx, KeyCode::Enter);
         assert!(ctx.saves.exists(QUICK_SLOT));
-        assert_eq!(screen(&game), Some(Screen::Pause), "saving stays in the menu");
+        assert_eq!(screen(&game), Some(Screen::Saves { saving: true }), "saving stays in the menu");
+        press(&mut game, &mut ctx, KeyCode::Escape);
+        assert_eq!(screen(&game), Some(Screen::Pause));
+        frames(&mut game, &mut ctx, 1);
+        assert!(ctx.ui.is_focused("Salvar"), "back where the player came from");
 
         press(&mut game, &mut ctx, KeyCode::ArrowDown);
         assert!(ctx.ui.is_focused("Carregar"), "it can be used now");
@@ -1155,6 +1425,63 @@ mod tests {
         assert!(ctx.ui.is_focused("Continuar"));
         press(&mut game, &mut ctx, KeyCode::Enter);
         assert_eq!(screen(&game), None, "the saved game loaded");
+    }
+
+    #[test]
+    fn a_game_saved_in_a_slot_is_only_replaced_or_deleted_on_a_second_press() {
+        let dir = Folder::new("slots");
+        let (mut game, mut ctx) = start_with(EngineConfig { load: Some("none".into()), ..Default::default() }, &dir.0);
+        frames(&mut game, &mut ctx, 5);
+        press(&mut game, &mut ctx, KeyCode::Escape);
+        press(&mut game, &mut ctx, KeyCode::ArrowDown);
+        press(&mut game, &mut ctx, KeyCode::Enter);
+        frames(&mut game, &mut ctx, 1);
+        press(&mut game, &mut ctx, KeyCode::ArrowDown);
+        assert!(ctx.ui.is_focused("Jogo 1"));
+        press(&mut game, &mut ctx, KeyCode::Enter);
+        assert!(ctx.saves.exists("slot_1"), "an empty slot asks nothing");
+        let saved = std::fs::metadata(ctx.saves.path("slot_1").unwrap()).unwrap().modified().unwrap();
+
+        press(&mut game, &mut ctx, KeyCode::Enter);
+        assert_eq!(game.menu.sure, Some(Sure::Overwrite(1)));
+        press(&mut game, &mut ctx, KeyCode::ArrowDown);
+        frames(&mut game, &mut ctx, 1);
+        assert_eq!(game.menu.sure, None, "moving away takes the question back");
+        assert_eq!(std::fs::metadata(ctx.saves.path("slot_1").unwrap()).unwrap().modified().unwrap(), saved);
+
+        press(&mut game, &mut ctx, KeyCode::ArrowUp);
+        press(&mut game, &mut ctx, KeyCode::Delete);
+        assert_eq!(game.menu.sure, Some(Sure::Delete(1)));
+        press(&mut game, &mut ctx, KeyCode::Escape);
+        assert_eq!(game.menu.sure, None);
+        assert_eq!(screen(&game), Some(Screen::Saves { saving: true }), "Esc took back the question only");
+        assert!(ctx.saves.exists("slot_1"));
+
+        press(&mut game, &mut ctx, KeyCode::Delete);
+        press(&mut game, &mut ctx, KeyCode::Enter);
+        assert!(!ctx.saves.exists("slot_1"));
+    }
+
+    #[test]
+    fn a_slot_is_loaded_from_its_row() {
+        let dir = Folder::new("load_slot");
+        let (mut game, mut ctx) = start_with(EngineConfig { load: Some("none".into()), ..Default::default() }, &dir.0);
+        frames(&mut game, &mut ctx, 5);
+        game.save(&ctx, "slot_2");
+        game.apply_menu_action(&mut ctx, Action::OpenSaves(false));
+        frames(&mut game, &mut ctx, 2);
+        assert!(ctx.ui.is_focused("Jogo 2"), "the only one that can be loaded");
+        press(&mut game, &mut ctx, KeyCode::Enter);
+        assert_eq!(screen(&game), None);
+    }
+
+    #[test]
+    fn how_long_ago_reads_like_a_person() {
+        assert_eq!(ago(5), "Agora");
+        assert_eq!(ago(300), "Há 5 min");
+        assert_eq!(ago(7200), "Há 2 h");
+        assert_eq!(ago(90_000), "Há 1 dia");
+        assert_eq!(ago(400_000), "Há 4 dias");
     }
 
     #[test]
@@ -1205,6 +1532,10 @@ mod tests {
         press(&mut game, &mut ctx, KeyCode::ArrowDown);
         press(&mut game, &mut ctx, KeyCode::ArrowRight);
         assert_eq!(ctx.shadow_quality(), ShadowQuality::High);
+        assert!(ctx.smooth_textures(), "filtered unless the player says otherwise");
+        press(&mut game, &mut ctx, KeyCode::ArrowDown);
+        press(&mut game, &mut ctx, KeyCode::Enter);
+        assert!(!ctx.smooth_textures());
         assert!(!dir.options_file().exists(), "written on the way out, not on every change");
 
         press(&mut game, &mut ctx, KeyCode::Escape);
@@ -1226,6 +1557,7 @@ mod tests {
         assert!(ctx.is_fullscreen());
         assert!(!ctx.vsync());
         assert_eq!(ctx.shadow_quality(), ShadowQuality::High);
+        assert!(!ctx.smooth_textures());
     }
 
     #[test]
@@ -1267,6 +1599,7 @@ mod tests {
         let (_, mut column) = title_column(&ctx.ui);
         let _new_game = column.row();
         let continue_game = column.row().point(Anchor::Center);
+        let _load = column.row();
         let options = column.row().point(Anchor::Center);
         click(&mut game, &mut ctx, continue_game);
         assert_eq!(screen(&game), Some(Screen::Title), "Continuar is disabled with no save");

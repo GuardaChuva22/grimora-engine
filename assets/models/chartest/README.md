@@ -18,10 +18,15 @@ surface correction limits are recorded in `right_hand_grip.json`.
 `chartest.gltf` is the runtime asset. `chartest.blend` is the adapted, editable copy;
 the original file is never saved over. The previous wanderer remains in its own folder.
 
-Reimport from the repository root:
+The default look is the user's `Chartest-Grimora-v02-128.png`, with nearest filtering.
+`chartest_source.blend` is the user's copy of the original with that texture packed;
+its mesh, weights and UVs are identical to the original's, so the texture fits the
+runtime asset as is. To change the look, replace the PNG under the same name.
+
+Reimport from the repository root (a source without the texture exports an untextured glTF):
 
 ```powershell
-& 'C:/Program Files/Blender Foundation/Blender 5.2/blender.exe' --background --python tools/blender/import_chartest.py -- --source '<path-to-original>/chartest.blend'
+& 'C:/Program Files/Blender Foundation/Blender 5.2/blender.exe' --background --python tools/blender/import_chartest.py -- --source 'assets/models/chartest/chartest_source.blend'
 ```
 
 The legacy idle, walk, run, attack, hurt and death clips are retargeted from the

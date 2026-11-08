@@ -1,0 +1,35 @@
+// What a flying spear leaves in the air: a thin line of cold that hangs a moment, and motes.
+[
+    // the line
+    (
+        rate: 70.0,
+        lifetime: (0.32, 0.6),
+        area: (0.012, 0.012, 0.012),
+        speed: (0.0, 0.1),
+        sizes: [0.05, 0.1, 0.13],
+        colors: [(1.0, 1.0, 1.0, 0.5), (1.0, 1.0, 1.0, 0.25), (1.0, 1.0, 1.0, 0.0)],
+        ramp: [(0.08, 0.26, 0.7, 0.3), (0.26, 0.6, 1.0, 1.1), (0.75, 0.92, 1.0, 3.6)],
+        emissive: 0.9,
+        additive: 1.0,
+        max_particles: 80,
+    ),
+    // motes that stay behind and turn in the air
+    (
+        rate: 30.0,
+        lifetime: (0.5, 1.1),
+        area: (0.04, 0.04, 0.04),
+        speed: (0.1, 0.5),
+        acceleration: (0.0, -0.8, 0.0),
+        drag: 1.5,
+        curl: 1.0,
+        curl_scale: 1.5,
+        sizes: [0.024, 0.016, 0.0],
+        size_jitter: 0.5,
+        colors: [(0.9, 0.98, 1.0, 1.0), (0.6, 0.85, 1.0, 0.8)],
+        emissive: 6.0,
+        additive: 1.0,
+        twinkle: 0.7,
+        shape: Diamond,
+        max_particles: 50,
+    ),
+]

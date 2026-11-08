@@ -1,0 +1,56 @@
+// Where a waterfall lands: mist rolling away from it, drops thrown up and sheets of foam
+// sliding off on the surface. Written for a river 12 meters wide; the scale follows the river.
+[
+    // the mist
+    (
+        rate: 16.0,
+        lifetime: (2.2, 4.2),
+        area: (6.0, 0.4, 2.5),
+        direction: (0.0, 1.0, 0.0),
+        spread: 45.0,
+        speed: (0.8, 2.6),
+        acceleration: (0.0, 0.25, 0.0),
+        drag: 0.7,
+        turbulence: 0.5,
+        sizes: [2.5, 5.0, 7.5],
+        size_jitter: 0.4,
+        colors: [(0.92, 0.97, 1.0, 0.0), (0.92, 0.97, 1.0, 0.18), (0.92, 0.97, 1.0, 0.0)],
+        lit: 0.9,
+        emissive: 0.15,
+        soft: 1.5,
+        pixels: 9.0,
+    ),
+    // drops
+    (
+        rate: 55.0,
+        lifetime: (0.5, 1.1),
+        area: (5.5, 0.1, 1.5),
+        direction: (0.0, 1.0, 0.0),
+        spread: 35.0,
+        speed: (2.5, 6.5),
+        acceleration: (0.0, -10.0, 0.0),
+        sizes: [0.1, 0.07, 0.04],
+        size_jitter: 0.6,
+        colors: [(0.95, 1.0, 1.0, 0.9), (0.9, 0.97, 1.0, 0.5)],
+        lit: 0.85,
+        emissive: 0.2,
+        stretch: 0.03,
+        pixels: 32.0,
+    ),
+    // foam lying on the water
+    (
+        rate: 7.0,
+        lifetime: (1.6, 3.0),
+        area: (6.0, 0.03, 2.5),
+        direction: (0.0, 0.0, 0.0),
+        speed: (0.0, 0.0),
+        sizes: [1.2, 3.2],
+        size_jitter: 0.5,
+        colors: [(0.95, 1.0, 1.0, 0.0), (0.95, 1.0, 1.0, 0.55), (0.95, 1.0, 1.0, 0.0)],
+        lit: 0.9,
+        emissive: 0.1,
+        flat: true,
+        shape: Ring,
+        pixels: 14.0,
+    ),
+]

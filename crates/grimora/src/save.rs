@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, bail};
-use grimora_core::{Camera, Transform, Vec3};
+use grimora_core::{Camera, Transform, Vec3, Weather, WorldPos, WorldTransform};
 use grimora_physics::Physics;
 use grimora_scene::Interactable;
 use serde::de::DeserializeOwned;
@@ -19,7 +19,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::World;
 use crate::combat::Health;
+use crate::fauna::FaunaCount;
+use crate::generated::{GenState, Generated};
 use crate::interaction::TriggerState;
+use crate::items::ItemState;
 use crate::world::{Body, Renderable};
 
 /// Version of the [`SaveFile`] layout. Files written by a newer engine are refused.
@@ -62,11 +65,25 @@ pub struct WorldState {
     /// The hour, in a scene with a day cycle.
     #[serde(default)]
     pub time_of_day: Option<f32>,
+    /// The weather, in a scene with a day cycle.
+    #[serde(default)]
+    pub weather: Option<Weather>,
+    /// What was taken from the world, what's in the chests and what was dropped.
+    #[serde(default)]
+    pub items: ItemState,
+    /// How many animals are left in each group.
+    #[serde(default)]
+    pub fauna: Vec<FaunaCount>,
+    /// What differs from the generated world (`--world`), by [`crate::GenId`]: only what was
+    /// removed, moved or used, so a long walk still saves in a few KB.
+    #[serde(default, skip_serializing_if = "GenState::is_empty")]
+    pub generated: GenState,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct CameraState {
-    pub position: Vec3,
+    /// In the world. Saves from before the origin moved had it local to zero, which is the same.
+    pub position: WorldPos,
     pub yaw: f32,
     pub pitch: f32,
 }
@@ -79,7 +96,8 @@ pub struct ObjectState {
     /// doesn't move the wrong object.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    pub transform: Transform,
+    /// In the world, like [`CameraState::position`].
+    pub transform: WorldTransform,
     #[serde(default = "visible_default", skip_serializing_if = "is_visible")]
     pub visible: bool,
     /// Dynamic bodies still in motion: linear and angular velocity.
@@ -113,13 +131,14 @@ impl WorldState {
     /// from the scene file: moved, hidden, still tumbling, used up or despawned.
     pub fn capture(world: &World, physics: &Physics, camera: &Camera) -> Self {
         let live = world.scene_entities();
+        let origin = world.origin();
         let mut objects = Vec::new();
         for (index, desc) in world.scene_objects.iter().enumerate() {
             let Some(&entity) = live.get(&index) else {
                 objects.push(ObjectState {
                     index,
                     name: desc.name.clone(),
-                    transform: desc.transform,
+                    transform: origin.transform_to_world(&desc.transform),
                     visible: true,
                     velocity: None,
                     removed: true,
@@ -146,7 +165,7 @@ impl WorldState {
                 objects.push(ObjectState {
                     index,
                     name: desc.name.clone(),
-                    transform: *transform,
+                    transform: origin.transform_to_world(transform),
                     visible,
                     velocity,
                     removed: false,
@@ -155,8 +174,21 @@ impl WorldState {
                 });
             }
         }
-        let camera = CameraState { position: camera.position, yaw: camera.yaw, pitch: camera.pitch };
-        Self { camera, objects, triggers: world.trigger_state.clone(), time_of_day: world.time_of_day() }
+        let mut generated = world.generated.clone();
+        for (transform, made) in world.ecs.query::<(&Transform, &Generated)>().iter() {
+            generated.note_place(made.id, &made.made, origin.transform_to_world(transform));
+        }
+        let camera = CameraState { position: origin.to_world(camera.position), yaw: camera.yaw, pitch: camera.pitch };
+        Self {
+            camera,
+            objects,
+            triggers: world.trigger_state.clone(),
+            time_of_day: world.time_of_day(),
+            weather: world.weather(),
+            items: world.item_state.clone(),
+            fauna: world.fauna.census(),
+            generated,
+        }
     }
 
     /// Puts the scene objects back as the scene file placed them (respawning
@@ -168,6 +200,7 @@ impl WorldState {
     /// longer match the scene.
     pub fn restore(&self, world: &mut World, physics: &mut Physics, camera: &mut Camera) -> usize {
         let live = world.reset_scene_objects(physics);
+        let origin = world.origin();
         let mut unmatched = 0;
         for saved in &self.objects {
             let in_scene = world.scene_objects.get(saved.index).is_some_and(|o| o.name == saved.name);
@@ -182,13 +215,14 @@ impl WorldState {
             }
             let query = world.ecs.query_one_mut::<(&mut Transform, Option<&mut Renderable>, Option<&Body>)>(entity);
             let Ok((transform, renderable, body)) = query else { continue };
-            *transform = saved.transform;
+            *transform = origin.transform_to_local(&saved.transform);
+            let saved_transform = *transform;
             if let Some(renderable) = renderable {
                 renderable.visible = saved.visible;
             }
             if let Some(Body(body)) = body {
                 let (linear, angular) = saved.velocity.unwrap_or_default();
-                physics.set_body_state(*body, saved.transform.position, saved.transform.rotation, linear, angular);
+                physics.set_body_state(*body, saved_transform.position, saved_transform.rotation, linear, angular);
             }
             if saved.used {
                 let _ = world.ecs.remove_one::<Interactable>(entity);
@@ -201,12 +235,21 @@ impl WorldState {
         if let Some(hour) = self.time_of_day {
             world.set_time_of_day(hour);
         }
-        camera.position = self.camera.position;
+        if let Some(weather) = self.weather
+            && world.weather() != Some(weather)
+        {
+            world.set_weather(weather);
+        }
+        camera.position = origin.to_local(self.camera.position);
         camera.yaw = self.camera.yaw;
         camera.pitch = self.camera.pitch;
         world.trigger_state = self.triggers.clone();
         world.place_agents(physics);
+        world.restore_items(&self.items, physics);
+        world.generated = self.generated.clone();
+        world.reset_flora(physics);
         world.reload_streaming(camera.position, physics);
+        world.restore_fauna(&self.fauna);
         unmatched
     }
 }

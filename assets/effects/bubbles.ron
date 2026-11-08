@@ -1,0 +1,24 @@
+// Breath let out under the water. They wobble on the way up and vanish in a few seconds,
+// usually before they get to the surface.
+[
+    (
+        rate: 0.0,
+        burst: 7,
+        lifetime: (1.2, 2.6),
+        area: (0.06, 0.06, 0.06),
+        direction: (0.0, 1.0, 0.0),
+        spread: 18.0,
+        speed: (0.5, 1.1),
+        acceleration: (0.0, 0.8, 0.0),
+        drag: 0.6,
+        turbulence: 1.6,
+        sizes: [0.05, 0.1, 0.12],
+        size_jitter: 0.6,
+        colors: [(0.85, 0.97, 1.0, 0.8), (0.85, 0.97, 1.0, 0.6), (0.85, 0.97, 1.0, 0.0)],
+        lit: 0.5,
+        emissive: 0.5,
+        additive: 0.4,
+        shape: Ring,
+        pixels: 90.0,
+    ),
+]
