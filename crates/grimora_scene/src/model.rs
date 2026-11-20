@@ -51,7 +51,7 @@ pub fn load_model(path: &Path, max_texture_size: u32) -> Result<MeshData> {
     {
         return Ok(mesh.clone());
     }
-    let mut mesh = import(path, max)?;
+    let mut mesh = import(path, max, None)?;
     let fit = hold_grip(path, &mut mesh);
     add_pose_clips(path, &mut mesh);
     keys::add_key_clips(path, &mut mesh);
@@ -64,6 +64,26 @@ pub fn load_model(path: &Path, max_texture_size: u32) -> Result<MeshData> {
     }
     cache().lock().unwrap().insert(key, (mtime, mesh.clone()));
     Ok(mesh)
+}
+
+/// A model cut in two at the node named `part`: everything else, then that node and its
+/// children moved so the node's origin is at zero (a door leaf turning on its hinge), then
+/// where that origin was in the model. Not cached: for the few things that move a piece.
+pub fn load_model_split(path: &Path, part: &str) -> Result<(MeshData, MeshData, Vec3)> {
+    let rest = import(path, DEFAULT_MAX_TEXTURE_SIZE, Some((part, false)))?;
+    let (document, _, _) = gltf::import(path).with_context(|| format!("importing {}", path.display()))?;
+    let scene = document.default_scene().or_else(|| document.scenes().next()).context("no scene")?;
+    let nodes = NodeTree::new(&document, &scene);
+    let node = document
+        .nodes()
+        .find(|n| n.name() == Some(part))
+        .with_context(|| format!("{}: no node {part}", path.display()))?;
+    let pivot = nodes.world[&node.index()].w_axis.truncate();
+    let mut piece = import(path, DEFAULT_MAX_TEXTURE_SIZE, Some((part, true)))?;
+    for vertex in &mut piece.vertices {
+        vertex.position = (Vec3::from(vertex.position) - pivot).to_array();
+    }
+    Ok((rest, piece, pivot))
 }
 
 /// The folder of a model's clips written as poses: `wanderer_clips` for `wanderer.gltf`.
@@ -128,7 +148,8 @@ fn add_pose_clips(model: &Path, mesh: &mut MeshData) {
     mesh.skeleton = Some(Arc::new(skeleton));
 }
 
-fn import(path: &Path, max_texture_size: u32) -> Result<MeshData> {
+/// `part`: only the node of that name and its children (`true`), or all but them (`false`).
+fn import(path: &Path, max_texture_size: u32, part: Option<(&str, bool)>) -> Result<MeshData> {
     let started = std::time::Instant::now();
     let (document, buffers, images) = gltf::import(path).with_context(|| format!("importing {}", path.display()))?;
     let decoded = started.elapsed();
@@ -167,12 +188,20 @@ fn import(path: &Path, max_texture_size: u32) -> Result<MeshData> {
             mesh.wind = mesh.wind.max(wind);
         }
         let Some(gltf_mesh) = node.mesh() else { continue };
+        if let Some((name, only)) = part {
+            let inside = nodes
+                .ancestors(node_index)
+                .any(|n| document.nodes().nth(n).and_then(|n| n.name().map(|s| s == name)) == Some(true));
+            if inside != only {
+                continue;
+            }
+        }
         let world = nodes.world[&node_index];
         let role = nodes.ancestors(node_index).find_map(|n| node_role(&document.nodes().nth(n)?));
         let target = match role {
             Some(Role::Collision) => {
                 for primitive in gltf_mesh.primitives() {
-                    append_primitive(&mut collision, &primitive, &buffers, world, Binding::None, 0);
+                    append_primitive(&mut collision, &primitive, &buffers, world, Binding::None, 0, &[]);
                 }
                 continue;
             }
@@ -198,6 +227,7 @@ fn import(path: &Path, max_texture_size: u32) -> Result<MeshData> {
             },
             (None, _) => (world, Binding::None),
         };
+        let target_names = target_names(&gltf_mesh);
         for primitive in gltf_mesh.primitives() {
             if primitive.mode() != gltf::mesh::Mode::Triangles {
                 log::warn!(
@@ -208,7 +238,7 @@ fn import(path: &Path, max_texture_size: u32) -> Result<MeshData> {
                 continue;
             }
             let material = primitive.material().index().unwrap_or(default_material);
-            append_primitive(target, &primitive, &buffers, placement, binding, material);
+            append_primitive(target, &primitive, &buffers, placement, binding, material, &target_names);
         }
     }
     mesh.skeleton = rig.map(|rig| Arc::new(rig.skeleton));
@@ -593,6 +623,20 @@ enum Binding {
     Skinned,
 }
 
+/// The names of a mesh's morph targets, from its `extras.targetNames` (what Blender writes).
+fn target_names(mesh: &gltf::Mesh) -> Vec<String> {
+    let Some(extras) = mesh.extras() else { return Vec::new() };
+    let text = extras.get();
+    let Some(start) = text.find("\"targetNames\"") else { return Vec::new() };
+    let Some(open) = text[start..].find('[').map(|i| start + i) else { return Vec::new() };
+    let Some(close) = text[open..].find(']').map(|i| open + i) else { return Vec::new() };
+    text[open + 1..close]
+        .split(',')
+        .map(|name| name.trim().trim_matches('"').to_owned())
+        .filter(|n| !n.is_empty())
+        .collect()
+}
+
 fn append_primitive(
     mesh: &mut MeshData,
     primitive: &gltf::Primitive,
@@ -600,6 +644,7 @@ fn append_primitive(
     world: Mat4,
     binding: Binding,
     material: usize,
+    target_names: &[String],
 ) {
     let reader = primitive.reader(|buffer| buffers.get(buffer.index()).map(|data| &data.0[..]));
     let Some(positions) = reader.read_positions() else {
@@ -671,6 +716,27 @@ fn append_primitive(
         joints: skin[i].0,
         weights: skin[i].1,
     }));
+    // Shape keys: only what moves is kept, in the same space as the vertices.
+    for (k, (moved, turned, _)) in reader.read_morph_targets().enumerate() {
+        let name = target_names.get(k).cloned().unwrap_or_else(|| format!("morph{k}"));
+        let moved: Vec<Vec3> = moved
+            .map_or_else(|| vec![Vec3::ZERO; count], |m| m.map(|p| world.transform_vector3(Vec3::from(p))).collect());
+        let turned: Vec<Vec3> =
+            turned.map_or_else(|| vec![Vec3::ZERO; count], |n| n.map(|n| normal_matrix * Vec3::from(n)).collect());
+        let index = match mesh.morphs.iter().position(|m| m.name == name) {
+            Some(index) => index,
+            None => {
+                mesh.morphs.push(grimora_core::Morph { name, moves: Vec::new() });
+                mesh.morphs.len() - 1
+            }
+        };
+        let moves = &mut mesh.morphs[index].moves;
+        for i in 0..count.min(moved.len()) {
+            if moved[i].length_squared() > 1e-12 || turned.get(i).is_some_and(|n| n.length_squared() > 1e-12) {
+                moves.push((base + i as u32, moved[i], turned.get(i).copied().unwrap_or(Vec3::ZERO)));
+            }
+        }
+    }
     let start = mesh.indices.len() as u32;
     mesh.indices.extend(indices.iter().map(|i| i + base));
     mesh.submeshes.push(Submesh { indices: start..mesh.indices.len() as u32, material });

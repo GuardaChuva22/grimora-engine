@@ -12,28 +12,78 @@
 // `patch_size` meters across; `biome_tint` tints it like the ground's grass; `coast: Some((near,
 // far))` grows it only between those meters inland of the coast. A model with a `*_COL` node
 // (assets/models/savana) is solid near the player; `solid: true` gives any other mesh its hull.
+// `far: (reach, share)` draws `share` of the copies out to that farther reach, so the ground
+// away from the camera isn't bare; every part dithers away before its own reach.
 LifeBook(
     plants: [
+        // ---- the sea floor (`depth`: meters under the sea, shallowest and deepest)
+        // Reefs: every coral there is, in thick patches on the terrace off the beach.
+        (name: "coral_recife", meshes: [
+             Model(path: "../models/animals/corais/Coral-01-Galhada-Marfin.glb"),
+             Model(path: "../models/animals/corais/Coral-02-Mesa-Ocre.glb"),
+             Model(path: "../models/animals/corais/Coral-03-Leque-de-Vinho.glb"),
+             Model(path: "../models/animals/corais/Coral-04-Trombetas-de-Jade.glb"),
+             Model(path: "../models/animals/corais/Coral-05-Cerebro-Oliva.glb"),
+             Model(path: "../models/animals/corais/Coral-06-Espiral-Malva.glb"),
+             Model(path: "../models/animals/corais/Coral-07-Couve-Pessego.glb"),
+             Model(path: "../models/animals/corais/Coral-08-Chicotes-Indigo.glb"),
+             Model(path: "../models/animals/corais/Coral-09-Estrelas-Douradas.glb"),
+             Model(path: "../models/animals/corais/Coral-10-Pilares-Carmim.glb"),
+             Model(path: "../models/animals/corais/Coral-11-Alface-Marinha.glb"),
+             Model(path: "../models/animals/corais/Coral.glb"),
+         ], variants: 24, density: 300.0, reach: 55.0, scale: (0.7, 2.1), color: (1.7, 1.65, 1.6), color_jitter: 0.12, tilt: 7.0, sink: 0.06,
+         patches: 0.8, patch_size: 48.0, depth: (2.5, 24.0)),
+        // A few low corals alone on the sand, closer in.
+        (name: "coral_raso", meshes: [
+             Model(path: "../models/animals/corais/Coral-05-Cerebro-Oliva.glb"),
+             Model(path: "../models/animals/corais/Coral-09-Estrelas-Douradas.glb"),
+             Model(path: "../models/animals/corais/Coral-07-Couve-Pessego.glb"),
+             Model(path: "../models/animals/corais/Coral-11-Alface-Marinha.glb"),
+         ], variants: 8, density: 30.0, reach: 55.0, scale: (0.6, 1.3), color: (1.7, 1.65, 1.6), color_jitter: 0.12, tilt: 5.0, sink: 0.05,
+         patches: 0.4, patch_size: 30.0, depth: (1.3, 7.0)),
+        // Kelp forests, tall, farther out and deeper.
+        (name: "kelp", meshes: [
+             Model(path: "../models/objects/algas/Alga-01-Kelp-de-Bronze.glb"),
+         ], variants: 6, density: 110.0, reach: 75.0, scale: (1.7, 4.0), color: (1.5, 1.5, 1.35), color_jitter: 0.15, tilt: 5.0, sink: 0.04,
+         patches: 0.92, patch_size: 75.0, depth: (5.0, 32.0), sway: 0.1),
+        // Low seaweed in beds, from the wading water down.
+        (name: "algas", meshes: [
+             Model(path: "../models/objects/algas/Alga-02-Sargaco-de-Boias.glb"),
+             Model(path: "../models/objects/algas/Alga-03-Ulva-Esmeralda.glb"),
+             Model(path: "../models/objects/algas/Alga-04-Uvas-do-Mar.glb"),
+             Model(path: "../models/objects/algas/Alga-05-Gracilaria-Vinho.glb"),
+             Model(path: "../models/objects/algas/Alga-06-Penacho-Azul.glb"),
+         ], variants: 10, density: 230.0, reach: 42.0, scale: (0.7, 1.7), color: (1.5, 1.5, 1.45), color_jitter: 0.15, tilt: 6.0, sink: 0.04,
+         patches: 0.7, patch_size: 26.0, depth: (0.9, 18.0), sway: 0.22),
+        // Sunken rocks, from pebbles to boulders, down to the open sea's floor.
+        (name: "rocha_do_fundo", meshes: [
+             Model(path: "../models/objects/Rocha-01-Macica.glb"),
+             Model(path: "../models/objects/Rocha-02-Escarpada.glb"),
+             Model(path: "../models/objects/Rocha-03-Laje.glb"),
+             Model(path: "../models/objects/Rocha-04-Cunha.glb"),
+             Model(path: "../models/objects/Rocha-05-Arredondada.glb"),
+         ], variants: 10, density: 26.0, reach: 110.0, scale: (0.7, 3.4), color: (0.75, 0.8, 0.82), color_jitter: 0.15,
+         tilt: 14.0, sink: 0.3, patches: 0.7, patch_size: 60.0, depth: (1.5, 55.0), solid: true),
         // ---- grasses: tall dry savanna grass in sweeps, low weeds between
         (name: "capim", mesh: Sprite(texture: "../textures/capim_alto.png", size: 1.3),
          biomes: ["savana_tropical", "floresta_seca_tropical", "estepe_quente"],
          density: 2600.0, reach: 70.0, scale: (0.7, 1.4), color: (0.86, 0.95, 1.1), color_jitter: 0.18,
          biome_tint: true, tilt: 0.0, sink: 0.03, patches: 0.55, patch_size: 22.0,
-         water: (gap: 1.0, edge: 1.6, reach: 25.0, far: 1.0)),
+         water: (gap: 1.0, edge: 1.6, reach: 25.0, far: 1.0), far: (reach: 240.0, share: 0.15)),
         (name: "mato_baixo", mesh: Sprite(texture: "../textures/mato2.png", size: 0.8),
          density: 1800.0, reach: 55.0, scale: (0.6, 1.2), color: (0.8, 0.95, 1.15), color_jitter: 0.15,
          biome_tint: true, tilt: 0.0, sink: 0.03, patches: 0.3, patch_size: 14.0,
-         water: (gap: 1.0, edge: 1.4, reach: 20.0, far: 1.0)),
+         water: (gap: 1.0, edge: 1.4, reach: 20.0, far: 1.0), far: (reach: 180.0, share: 0.1)),
         (name: "mato_ralo", mesh: Sprite(texture: "../textures/mato4.png", size: 0.9),
          density: 700.0, reach: 55.0, scale: (0.7, 1.3), color: (0.8, 0.95, 1.15), color_jitter: 0.15,
-         biome_tint: true, tilt: 0.0, sink: 0.03, patches: 0.4, patch_size: 30.0),
+         biome_tint: true, tilt: 0.0, sink: 0.03, patches: 0.4, patch_size: 30.0, far: (reach: 180.0, share: 0.15)),
         // Dry tussocks and seed heads in the tall grass, and the odd flower and aloe.
         (name: "touceira", mesh: Sprite(texture: "../textures/capim_touceira_seca.png", size: 1.2),
          density: 500.0, reach: 70.0, scale: (0.7, 1.3), color_jitter: 0.15, tilt: 0.0, sink: 0.03,
-         patches: 0.5, patch_size: 26.0, water: (gap: 2.0, edge: 0.5, reach: 20.0, far: 1.0)),
+         patches: 0.5, patch_size: 26.0, water: (gap: 2.0, edge: 0.5, reach: 20.0, far: 1.0), far: (reach: 240.0, share: 0.25)),
         (name: "espigas", mesh: Sprite(texture: "../textures/capim_espigas.png", size: 1.4),
          density: 300.0, reach: 70.0, scale: (0.7, 1.3), color_jitter: 0.15, tilt: 0.0, sink: 0.03,
-         patches: 0.6, patch_size: 18.0),
+         patches: 0.6, patch_size: 18.0, far: (reach: 220.0, share: 0.25)),
         (name: "flores", mesh: Sprite(texture: "../textures/flores_savana.png", size: 0.45),
          density: 120.0, reach: 40.0, scale: (0.7, 1.3), color_jitter: 0.1, tilt: 0.0, sink: 0.02,
          patches: 0.8, patch_size: 10.0),
@@ -46,13 +96,13 @@ LifeBook(
         // ---- by the water: green grass on the banks, reeds on the very bank, ferns a little further
         (name: "juncos", mesh: Sprite(texture: "../textures/juncos.png", size: 1.4),
          density: 2600.0, reach: 110.0, scale: (0.8, 1.3), color_jitter: 0.1, tilt: 0.0, sink: 0.05,
-         above: 1.0, flat: 0.6, water: (gap: 0.2, edge: 1.0, reach: 5.0, far: 0.0)),
+         above: 1.0, flat: 0.6, water: (gap: 0.2, edge: 1.0, reach: 5.0, far: 0.0), far: (reach: 300.0, share: 0.2)),
         (name: "taboas", mesh: Sprite(texture: "../textures/taboas.png", size: 1.7),
          density: 1300.0, reach: 110.0, scale: (0.8, 1.2), color_jitter: 0.1, tilt: 0.0, sink: 0.05,
-         above: 1.0, flat: 0.6, patches: 0.5, patch_size: 12.0, water: (gap: 0.1, edge: 1.0, reach: 4.0, far: 0.0)),
+         above: 1.0, flat: 0.6, patches: 0.5, patch_size: 12.0, water: (gap: 0.1, edge: 1.0, reach: 4.0, far: 0.0), far: (reach: 300.0, share: 0.2)),
         (name: "capim_margem", mesh: Sprite(texture: "../textures/capim_verde_margem.png", size: 1.2),
          density: 1500.0, reach: 90.0, scale: (0.8, 1.3), color_jitter: 0.12, tilt: 0.0, sink: 0.03,
-         above: 1.0, flat: 0.6, water: (gap: 0.5, edge: 1.0, reach: 12.0, far: 0.0)),
+         above: 1.0, flat: 0.6, water: (gap: 0.5, edge: 1.0, reach: 12.0, far: 0.0), far: (reach: 260.0, share: 0.2)),
         (name: "arbusto_verde", meshes: [
              Model(path: "../models/savana/Arbusto-Verde-01-Redondo.glb"),
              Model(path: "../models/savana/Arbusto-Verde-02-Largo.glb"),
@@ -60,7 +110,7 @@ LifeBook(
          patches: 0.4, patch_size: 30.0, water: (gap: 2.0, edge: 1.0, reach: 25.0, far: 0.0)),
         (name: "samambaia", mesh: Sprite(texture: "../textures/samambaia.png", size: 1.0),
          density: 700.0, reach: 80.0, scale: (0.8, 1.5), color_jitter: 0.15, tilt: 0.0, sink: 0.03,
-         water: (gap: 2.0, edge: 1.0, reach: 18.0, far: 0.0)),
+         water: (gap: 2.0, edge: 1.0, reach: 18.0, far: 0.0), far: (reach: 220.0, share: 0.2)),
         // ---- shrubs, scattered and thicker along the streams
         (name: "arbusto", mesh: Sprite(texture: "../textures/arbusto_seco.png", size: 1.6, sway: 0.06),
          density: 60.0, reach: 450.0, scale: (1.0, 2.0), color: (1.05, 1.0, 0.9), color_jitter: 0.12,
@@ -201,6 +251,10 @@ LifeBook(
         (species: "../fauna/arraia.ron", offshore: 25.0, radius: 22.0, count: 4, every: 4, first: 1),
         (species: "../fauna/agua_viva.ron", offshore: 140.0, radius: 40.0, count: 16, every: 4, first: 2),
         (species: "../fauna/sardinha.ron", offshore: 110.0, radius: 30.0, count: 120, every: 3),
+        // Over the reef and out by the drop: bigger schools, more rays, more jellyfish.
+        (species: "../fauna/sardinha.ron", offshore: 230.0, radius: 45.0, count: 200, every: 4, first: 1),
+        (species: "../fauna/arraia.ron", offshore: 70.0, radius: 30.0, count: 3, every: 5, first: 3),
+        (species: "../fauna/agua_viva.ron", offshore: 320.0, radius: 60.0, count: 22, every: 5, first: 4),
     ],
     // Fish only where a pond is deep and wide enough to hold a school.
     pond_fauna: [

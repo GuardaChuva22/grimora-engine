@@ -3,6 +3,7 @@
 [
     // the ring
     (
+        light: (color: (0.55, 0.85, 1.0), intensity: 4.0, radius: 9.0, linger: 0.25),
         rate: 0.0,
         burst: 1,
         lifetime: (0.7, 0.7),

@@ -46,6 +46,8 @@ pub enum Life {
     Gliding,
     /// Where the water takes it, on `drift`.
     Drifting,
+    /// Cattle on the ground, in a village's pen and pasture.
+    Grazing,
 }
 
 /// What a kind of animal is like: the file in `assets/fauna`.

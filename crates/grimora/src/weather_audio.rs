@@ -10,9 +10,16 @@ use crate::World;
 
 const RAIN_VOLUME: f32 = 0.6;
 const SNOW_VOLUME: f32 = 0.35;
+/// The wind's loop: heard from `WIND_FROM` m/s, full at `WIND_FULL` (gusts included).
+const WIND_VOLUME: f32 = 0.6;
+const WIND_FROM: f32 = 7.0;
+const WIND_FULL: f32 = 18.0;
 const THUNDER_VOLUME: f32 = 0.8;
 const SEA_VOLUME: f32 = 0.55;
-const RIVER_VOLUME: f32 = 0.6;
+/// `river_small.wav` is mixed at -24 LUFS and `river_big.wav` at -21: the brook stays the
+/// quieter of the two at the same volume.
+const BROOK_VOLUME: f32 = 0.75;
+const RIVER_VOLUME: f32 = 0.7;
 const UNDERWATER_VOLUME: f32 = 0.9;
 /// How much of the sea and the rivers is still heard from under the water.
 const THROUGH_WATER: f32 = 0.2;
@@ -25,9 +32,11 @@ const SPLASH_FAR: f32 = 70.0;
 pub(crate) struct WeatherAudio {
     rain: Loop,
     snow: Loop,
+    wind: Loop,
     thunders: u32,
     sea: Loop,
     river: Loop,
+    river_big: Loop,
     underwater: Loop,
     splashes: u32,
     /// A generated world's loops by biome, with how loud each is now.
@@ -44,19 +53,31 @@ impl WeatherAudio {
         let falling = world.environment.precipitation;
         self.rain.follow(audio, world.weather_sounds.rain.as_deref(), falling.rain * RAIN_VOLUME);
         self.snow.follow(audio, world.weather_sounds.snow.as_deref(), falling.snow * SNOW_VOLUME);
+        // How hard it blows here, gust and all; the snow's loop already carries a blizzard's hiss.
+        let blowing = world.wind_at(camera).length();
+        let t = ((blowing - WIND_FROM) / (WIND_FULL - WIND_FROM)).clamp(0.0, 1.0);
+        let under = world.environment.water.submerged;
+        let wind = t * t * (3.0 - 2.0 * t) * (1.0 - 0.6 * falling.snow) * (1.0 - under);
+        self.wind.follow(audio, world.weather_sounds.wind.as_deref(), wind * WIND_VOLUME);
         if world.take_thunder() && !world.weather_sounds.thunder.is_empty() {
             self.thunders += 1;
             let sounds = &world.weather_sounds.thunder;
-            let pitch = 0.85 + 0.1 * (self.thunders % 4) as f32;
-            audio.play_pitched(&sounds[self.thunders as usize % sounds.len()], THUNDER_VOLUME, pitch);
+            // Every recording in turn, in an order that changes each time around, and never
+            // quite at the same pitch.
+            let turn = self.thunders as usize;
+            let pick = (turn * 3 + turn / sounds.len()) % sounds.len();
+            let pitch = 0.94 + 0.04 * (turn * 7 % 4) as f32;
+            audio.play_pitched(&sounds[pick], THUNDER_VOLUME, pitch);
         }
     }
 
     pub(crate) fn stop(&mut self, audio: &mut Audio) {
         self.rain.stop(audio);
         self.snow.stop(audio);
+        self.wind.stop(audio);
         self.sea.stop(audio);
         self.river.stop(audio);
+        self.river_big.stop(audio);
         self.underwater.stop(audio);
         for (sound, _) in &mut self.ambience {
             sound.stop(audio);
@@ -78,12 +99,18 @@ impl WeatherAudio {
 
     fn update_water(&mut self, audio: &mut Audio, world: &mut World, camera: Vec3) {
         let under = world.environment.water.submerged;
-        let (sea, river) = world.water_noise(camera);
+        let (sea, brook, river) = world.water_noise(camera);
         let through = 1.0 - under * (1.0 - THROUGH_WATER);
         let splashes = world.take_splashes();
         let sounds = &world.water_sounds;
         self.sea.follow(audio, sounds.sea.as_deref(), sea * through * SEA_VOLUME);
-        self.river.follow(audio, sounds.river.as_deref(), river * through * RIVER_VOLUME);
+        // Without a wide river's own loop, the brook's plays for both.
+        let (brook, river) = match sounds.river_big {
+            Some(_) => (brook, river),
+            None => (brook.max(river), 0.0),
+        };
+        self.river.follow(audio, sounds.river.as_deref(), brook * through * BROOK_VOLUME);
+        self.river_big.follow(audio, sounds.river_big.as_deref(), river * through * RIVER_VOLUME);
         self.underwater.follow(audio, sounds.underwater.as_deref(), under * UNDERWATER_VOLUME);
         if sounds.splash.is_empty() {
             return;

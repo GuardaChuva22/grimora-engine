@@ -167,3 +167,51 @@ fn animals_live_at_sea_and_in_the_deep_ponds() {
     assert!(places.iter().any(|p| p.name.starts_with("sardinha")));
     assert_eq!(places, fauna_places(&island(), &book), "same seed, same places");
 }
+
+#[test]
+fn the_sea_floor_goes_down_in_steps_and_things_grow_on_it() {
+    let (relief, book) = (island(), book());
+    let start = glam::DVec2::new(4476.0, 1681.0) * grimora_world::METERS_PER_UNIT;
+    // The nearest way out to sea from the start, and a point 300 m off that shore.
+    let mut found = None;
+    'far: for step in 1..400 {
+        for turn in 0..16 {
+            let dir = glam::DVec2::from_angle(turn as f64 * std::f64::consts::TAU / 16.0);
+            let p = start + dir * (step as f64 * 50.0);
+            if relief.shore_at(p.x, p.y) < -300.0 {
+                found = Some((p, dir));
+                break 'far;
+            }
+        }
+    }
+    let (reef, out) = found.expect("there is sea around the island");
+    let unit = reef / grimora_world::METERS_PER_UNIT;
+    println!("reef: --at {:.4},{:.4}", unit.x, unit.y);
+    let depth = |p: glam::DVec2| -relief.height_at(p.x, p.y);
+    for off in [0.0, 100.0, 300.0, 600.0] {
+        let p = reef + out * off;
+        println!("{:.0} m off the shore: {:.1} m deep", -relief.shore_at(p.x, p.y), depth(p));
+    }
+    assert!(depth(reef) > 6.0 && depth(reef + out * 600.0) > 40.0, "a terrace, then the open sea");
+
+    let mut grown = 0;
+    let mut thickest = (0, reef);
+    for name in ["coral_recife", "kelp", "algas", "rocha_do_fundo"] {
+        let index = plant(&book, name);
+        let cell = book.plants[index as usize].cell();
+        let (cx, cz) = ((reef.x / cell).floor() as i64, (reef.y / cell).floor() as i64);
+        for (dx, dz) in (-6..=6).flat_map(|x| (-6..=6).map(move |z| (x, z))) {
+            let spots = place_plants(&relief, &book, FloraKey { plant: index, x: cx + dx, z: cz + dz });
+            if name == "coral_recife" && spots.len() > thickest.0 {
+                thickest = (spots.len(), glam::DVec2::new(spots[0].at.x, spots[0].at.z));
+            }
+            for spot in spots {
+                assert!(spot.at.y < -0.5, "{name} out of the water at {}", spot.at.y);
+                grown += 1;
+            }
+        }
+    }
+    let unit = thickest.1 / grimora_world::METERS_PER_UNIT;
+    println!("{grown} things; corals thickest at --at {:.5},{:.5}, {:.1} m deep", unit.x, unit.y, depth(thickest.1));
+    assert!(grown > 50, "only {grown} things grow there");
+}

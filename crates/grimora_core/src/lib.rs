@@ -15,17 +15,24 @@ mod rng;
 mod time;
 mod transform;
 pub mod water;
+pub mod wind;
 
 pub use actions::{ActionMap, Binding, PadAxis, PadButton};
-pub use animation::{AnimationClip, Animator, ClipEvent, FREE_HAND_CLIP, Skeleton};
+pub use animation::{AnimationClip, Animator, ClipEvent, FREE_HAND_CLIP, JointTransform, Skeleton};
 pub use bounds::{BoundingSphere, Frustum};
 pub use camera::Camera;
 pub use day_cycle::{DayCycle, DayCycleDesc, DayKey, Weather};
-pub use environment::{Environment, PointLight, Precipitation, SkyTextures};
+pub use environment::{Environment, PointLight, Precipitation, RoomBox, SkyTextures};
 pub use input::{Input, KeyCode, MouseButton};
-pub use mesh::{AlphaMode, CollisionMesh, Material, MeshData, MeshLod, Shading, Submesh, TextureData, Vertex};
+pub use mesh::{
+    AlphaMode, AuraLook, AuraPattern, CollisionMesh, Material, MeshData, MeshLod, Morph, Shading, Submesh, TextureData,
+    Vertex,
+};
 pub use origin::{Origin, WorldPos, WorldTransform};
-pub use particles::{ParticleDesc, ParticleEffect, ParticleInstance, ParticleShape, ParticleSystem, WeatherParticles};
+pub use particles::{
+    BLADE_RIBBON, BladeTrail, BladeTrailDesc, ParticleDesc, ParticleEffect, ParticleInstance, ParticleLight,
+    ParticleShape, ParticleSystem, RainSplashes, Spawn, WIND_SPEED, WeatherParticles,
+};
 pub use pose::{
     Control, Controls, POSE_FPS, PoseClip, PoseKey, PoseSampler, Rig, SECOND_GRIP_CLIP, SolvedPose, TWO_HANDS_APART,
 };
@@ -36,6 +43,7 @@ pub use water::{
     HullMap, RiverPoint, Sea, SeaDesc, WaterBed, WaterBody, WaterFrame, WaterHull, WaterLevels, WaterLook, WaterPoint,
     WaterShape, Waters,
 };
+pub use wind::{WindSim, WindState};
 
 pub use glam;
 pub use glam::{DVec2, DVec3, EulerRot, Mat3, Mat4, Quat, Vec2, Vec3, Vec4};

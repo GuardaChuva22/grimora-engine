@@ -4,13 +4,15 @@
 // sea level (y 0); the player starts on the world's `start`.
 SceneDesc(
     environment: (
-        fog: (height_falloff: 0.09, base_height: 0.0, sun_scatter: 0.25),
+        // `air`: how far one sees through the air before the land melts into the sky's haze,
+        // growing slowly near and fast far away; `air_height` thins it over high ground.
+        fog: (height_falloff: 0.09, base_height: 0.0, sun_scatter: 0.25, air: 5500.0, air_height: 1400.0),
         sky: (
             sun_size: 1.6,
             sun_texture: "../textures/sol.png",
             moon_texture: "../textures/moons/maris.png",
             sun_sprite_size: 2.4,
-            moon_sprite_size: 11.0,
+            moon_sprite_size: 4.5,
             halo: 1.0,
             clouds: (scale: 1.2, speed: 1.0),
         ),
@@ -19,6 +21,8 @@ SceneDesc(
         post: (
             contrast: 1.15, saturation: 1.15, vignette: 0.35, grain: 0.02, bloom: 0.25,
             vivid: 0.6, sharpen: 0.6, shadow_tint: (0.0, 0.01, 0.04),
+            // Shafts from the sun and moon, and what is far laid on in brush strokes.
+            rays: 0.7, paint: 0.75, paint_from: 90.0, paint_to: 1200.0,
         ),
         surface: (
             contrast: 1.35, saturation: 0.95, mottle: 0.6, mottle_size: 7.0,
@@ -26,14 +30,15 @@ SceneDesc(
         ),
     ),
 
-    day_cycle: (time: 15.5, day_length: 480.0, sunrise: 40.0, tilt: 52.0, moon_tilt: 76.0, haze: 0.4, weather: Clear),
+    day_cycle: (time: 15.5, day_length: 5760.0, sunrise: 40.0, tilt: 52.0, moon_tilt: 76.0, haze: 0.4, weather: Clear),
 
     player: (position: (0.0, 0.0, 0.0), yaw: 0.0),
     camera: (position: (0.0, 6.0, 10.0), look_at: (0.0, 2.0, 0.0), fov: 60.0),
 
     water_sounds: (
         sea: "../sounds/sea.wav",
-        river: "../sounds/river.wav",
+        river: "../sounds/river_small.wav",
+        river_big: "../sounds/river_big.wav",
         underwater: "../sounds/underwater.wav",
         splash: ["../sounds/splash_1.wav", "../sounds/splash_2.wav"],
         splash_effect: "../effects/splash.ron",
@@ -54,11 +59,14 @@ SceneDesc(
     weather_sounds: (
         rain: "../sounds/rain.wav",
         snow: "../sounds/wind.ogg",
-        thunder: ["../sounds/thunder_1.wav", "../sounds/thunder_2.wav"],
+        // Strong winds only, louder in the gusts: still air is silent.
+        wind: "../sounds/wind.ogg",
+        thunder: ["../sounds/weather/thunder_1.mp3", "../sounds/weather/thunder_2.mp3", "../sounds/weather/thunder_3.mp3", "../sounds/weather/thunder_4.mp3"],
+        // The bolt that comes down with each strike.
+        lightning: "../effects/lightning.ron",
     ),
 
     sounds: [
-        (path: "../sounds/wind.ogg", volume: 0.35),
     ],
 
     items: "../items/items.ron",

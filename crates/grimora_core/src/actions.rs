@@ -13,6 +13,8 @@ pub const MOVE_BACK: &str = "move_back";
 pub const MOVE_LEFT: &str = "move_left";
 pub const MOVE_RIGHT: &str = "move_right";
 pub const RUN: &str = "run";
+/// Held, walks slowly: a careful step, as in Elden Ring.
+pub const SLOW_WALK: &str = "slow_walk";
 pub const JUMP: &str = "jump";
 /// Down, in the water.
 pub const DIVE: &str = "dive";
@@ -165,6 +167,7 @@ impl Default for ActionMap {
         map.add(MOVE_LEFT, [Key(KeyCode::KeyA), Stick(PadAxis::LeftX, false)]);
         map.add(MOVE_RIGHT, [Key(KeyCode::KeyD), Stick(PadAxis::LeftX, true)]);
         map.add(RUN, [Key(KeyCode::ShiftLeft), Key(KeyCode::ShiftRight), Pad(PadButton::LeftBumper)]);
+        map.add(SLOW_WALK, [Key(KeyCode::AltLeft)]);
         map.add(JUMP, [Key(KeyCode::Space), Pad(PadButton::South)]);
         map.add(DIVE, [Key(KeyCode::ControlLeft), Pad(PadButton::East)]);
         map.add(INTERACT, [Key(KeyCode::KeyE), Pad(PadButton::West)]);

@@ -1,0 +1,18 @@
+// Magma: the body turns to a dark crust with glowing cracks that breathe; flames lick out of
+// the cracks, embers fly and the air shimmers.
+(
+    name: "Magma",
+    ramp: [(0.3, 0.02, 0.0, 1.5), (0.9, 0.2, 0.02, 4.0), (1.0, 0.55, 0.1, 8.0), (1.0, 0.9, 0.5, 14.0)],
+    bands: 0.0,
+    skin: [
+        (pattern: Magma, scale: 4.0, speed: 0.5, warp: 0.5, outline: 0.4, edge: 2.5, cover: 0.92, body: 0.05, glow: 3.0, rim: Some((0.25, 0.05, 0.02))),
+        (pattern: Blaze, scale: 2.0, speed: 1.4, warp: 0.6, outline: 0.05, edge: 0.6, cover: 0.25, glow: 0.9),
+    ],
+    wisps: [
+        (rate: 14.0, size: 0.25, tall: 0.0, life: (0.9, 1.5), push: 0.2, rise: 1.0, curl: 1.6, curl_scale: 0.4, shape: Soft, opacity: 0.35, additive: 0.0, grain: 0.8, warp: 0.5, lit: 0.3, windy: 0.6, ramp: [(0.04, 0.02, 0.02, 1.0), (0.1, 0.05, 0.04, 1.0)]),
+    ],
+    sparks: (rate: 26.0, size: 0.022, speed: (0.5, 1.8), rise: 1.0, curl: 2.0, tints: [(1.0, 0.7, 0.3, 1.0), (1.0, 0.25, 0.05, 1.0)]),
+    haze: 0.01,
+    light: (color: (1.0, 0.4, 0.1), intensity: 3.0, radius: 5.0, flicker: 0.25, linger: 0.3),
+    burst: (wave: 6.0, streaks: 40, flash: 10.0),
+)

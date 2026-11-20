@@ -50,6 +50,8 @@ pub struct FreshWaterLook {
     pub sea: Option<WaterLook>,
     /// Played where a stream falls: mist and roar, relative to the world file.
     pub fall_effect: Option<PathBuf>,
+    /// Played at a few points down the falling sheet: spray peeling off it.
+    pub fall_veil: Option<PathBuf>,
     pub fall_sound: Option<PathBuf>,
 }
 
@@ -59,6 +61,7 @@ impl Default for FreshWaterLook {
             texture: Some(PathBuf::from("../textures/agua.png")),
             foam_texture: None,
             fall_effect: Some(PathBuf::from("../effects/waterfall.ron")),
+            fall_veil: Some(PathBuf::from("../effects/waterfall_veil.ron")),
             fall_sound: Some(PathBuf::from("../sounds/waterfall.wav")),
             tile: 3.0,
             waves: 0.03,

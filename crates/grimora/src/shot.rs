@@ -64,6 +64,9 @@ pub struct Shot {
     pub animals: usize,
 }
 
+/// The least a killing shot throws a body, in N·s.
+const SHOT_PUSH: f32 = 150.0;
+
 impl World {
     /// Fires along a line, from `from` and in `direction`.
     pub fn shoot(&mut self, physics: &mut Physics, from: Vec3, direction: Vec3, desc: ShotDesc) -> Shot {
@@ -108,7 +111,8 @@ impl World {
         }
         let damage = desc.damage_at(distance);
         let target = if self.get::<Health>(owner).is_some() {
-            match self.damage(owner, damage, physics) {
+            let push = crate::Push { at: end, impulse: direction * desc.impulse.max(SHOT_PUSH) };
+            match self.damage_from(owner, damage, physics, Some(push)) {
                 Some(killed) => ShotTarget::Hurt { target: owner, damage, killed },
                 None => ShotTarget::Thing(owner),
             }

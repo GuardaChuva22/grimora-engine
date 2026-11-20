@@ -74,8 +74,12 @@ pub struct WeatherSounds {
     pub rain: Option<PathBuf>,
     /// Loops while it snows.
     pub snow: Option<PathBuf>,
+    /// Loops in a strong wind, louder in each gust; still air is silent.
+    pub wind: Option<PathBuf>,
     /// One of these plays, picked at random, after each lightning strike.
     pub thunder: Vec<PathBuf>,
+    /// The effect played where each bolt comes down, somewhere far around the camera.
+    pub lightning: Option<PathBuf>,
 }
 
 /// The sounds of water (`water_sounds:` in the scene file). The engine plays them by how
@@ -85,8 +89,10 @@ pub struct WeatherSounds {
 pub struct WaterSounds {
     /// Loops near a sea: waves on the shore, louder the closer it is to them.
     pub sea: Option<PathBuf>,
-    /// Loops near a river.
+    /// Loops near a narrow stream (or any river, without `river_big`).
     pub river: Option<PathBuf>,
+    /// Loops near a wide river; streams in between are heard as some of both.
+    pub river_big: Option<PathBuf>,
     /// Loops while the camera is under the water.
     pub underwater: Option<PathBuf>,
     /// One of these plays when something falls in.
@@ -101,6 +107,7 @@ impl WaterSounds {
         Self {
             sea: self.sea.as_ref().map(|path| dir.join(path)),
             river: self.river.as_ref().map(|path| dir.join(path)),
+            river_big: self.river_big.as_ref().map(|path| dir.join(path)),
             underwater: self.underwater.as_ref().map(|path| dir.join(path)),
             splash: self.splash.iter().map(|path| dir.join(path)).collect(),
             splash_effect: self.splash_effect.as_ref().map(|path| dir.join(path)),
@@ -114,7 +121,9 @@ impl WeatherSounds {
         Self {
             rain: self.rain.as_ref().map(|path| dir.join(path)),
             snow: self.snow.as_ref().map(|path| dir.join(path)),
+            wind: self.wind.as_ref().map(|path| dir.join(path)),
             thunder: self.thunder.iter().map(|path| dir.join(path)).collect(),
+            lightning: self.lightning.as_ref().map(|path| dir.join(path)),
         }
     }
 }

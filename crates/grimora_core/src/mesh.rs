@@ -155,6 +155,81 @@ pub enum Shading {
     /// vertex's `tangent.xyz`, with ragged borders and two scales of each picture against the
     /// repeats. See `ground_texel` in scene.wgsl.
     Ground,
+    /// A living pattern painted over a body (fire, lightning veins, smoke, magma, a ghost),
+    /// drawn a hair off its skin with its skinning. Blended, with the look in `Material::aura`.
+    Aura,
+}
+
+/// What an aura paints over a body.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum AuraPattern {
+    /// Fire running up the skin.
+    #[default]
+    Fire,
+    /// Thin veins of lightning crawling over it, flickering.
+    Veins,
+    /// Soft smoke.
+    Smoke,
+    /// A dark crust with glowing cracks that breathe.
+    Magma,
+    /// The whole body glows, with currents inside.
+    Ghost,
+    /// A fire that burns around the body as a volume, raymarched through the bones'
+    /// capsules (`Environment::fire_body`): it hugs the skin and licks up off it in
+    /// tongues. Drawn on a box around the owner, not on the skin. `scale` is the
+    /// turbulence's repeats per meter, `speed` how fast it rises (m/s), `outline` how
+    /// thick the burning layer on the skin is (m), `edge` how tall the tongues get (m),
+    /// `warp` how they sway and `cover` how much they hide what is behind.
+    Blaze,
+}
+
+/// How an aura skin looks (`Shading::Aura`). Colors are sRGB.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AuraLook {
+    pub pattern: AuraPattern,
+    /// Color where it is hottest, and at its edges.
+    pub heart: Vec3,
+    pub rim: Vec3,
+    /// Brightness, above 1 for the bloom.
+    pub glow: f32,
+    /// Meters off the skin: just enough not to fight with it.
+    pub thickness: f32,
+    /// Noise cells per meter, and meters a second the pattern climbs.
+    pub scale: f32,
+    pub speed: f32,
+    /// How much the pattern bends itself, the fluid curl.
+    pub warp: f32,
+    /// How much light gathers at the outline, and how hard (fresnel power).
+    pub outline: f32,
+    pub edge: f32,
+    /// How much of the body it hides, `0..1`, and how bright what hides it is (times `rim`):
+    /// a ghost covers in pale light, magma in dark crust.
+    pub cover: f32,
+    pub body: f32,
+    /// Hard color steps (0 smooth) and square pixels per meter (0 smooth).
+    pub bands: f32,
+    pub pixels: f32,
+}
+
+impl Default for AuraLook {
+    fn default() -> Self {
+        Self {
+            pattern: AuraPattern::Fire,
+            heart: Vec3::new(1.0, 0.9, 0.5),
+            rim: Vec3::new(1.0, 0.4, 0.05),
+            glow: 4.0,
+            thickness: 0.004,
+            scale: 4.0,
+            speed: 1.2,
+            warp: 0.35,
+            outline: 0.6,
+            edge: 2.5,
+            cover: 0.0,
+            body: 0.0,
+            bands: 0.0,
+            pixels: 0.0,
+        }
+    }
 }
 
 /// Surface appearance, modeled on glTF's metallic-roughness materials.
@@ -194,12 +269,17 @@ pub struct Material {
     pub emissive_texture: Option<Arc<TextureData>>,
     /// With `Shading::Water`: what it looks like.
     pub water: Option<crate::water::WaterLook>,
+    /// With `Shading::Aura`: what it looks like.
+    pub aura: Option<AuraLook>,
     /// Water: meters one repeat of its picture covers.
     pub water_tile: f32,
     /// A river: how fast its picture moves along its uv, per second.
     pub water_flow: glam::Vec2,
     /// 1 on a river, whose uv runs along it.
     pub water_river: f32,
+    /// Flat distance from the camera (meters) where the surface starts to dither away, and
+    /// where it is gone. Zero = always drawn. Hides things streamed in and out at a range.
+    pub fade: glam::Vec2,
 }
 
 impl Default for Material {
@@ -222,9 +302,11 @@ impl Default for Material {
             occlusion_texture: None,
             emissive_texture: None,
             water: None,
+            aura: None,
             water_tile: 3.0,
             water_flow: glam::Vec2::ZERO,
             water_river: 0.0,
+            fade: glam::Vec2::ZERO,
         }
     }
 }
@@ -237,11 +319,21 @@ pub struct Submesh {
     pub material: usize,
 }
 
+/// A shape key (glTF morph target): how far each vertex it moves goes at weight 1, in the
+/// mesh's space, and how its normal turns. Only vertices that move are listed.
+#[derive(Debug, Clone, Default)]
+pub struct Morph {
+    pub name: String,
+    pub moves: Vec<(u32, Vec3, Vec3)>,
+}
+
 /// CPU-side triangle mesh, ready to upload to the renderer.
 ///
 /// Without `submeshes`, the whole mesh is drawn with the default material.
 #[derive(Debug, Clone, Default)]
 pub struct MeshData {
+    /// Shape keys, applied on the CPU by [`MeshData::morphed`]; the renderer ignores them.
+    pub morphs: Vec<Morph>,
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
     pub materials: Vec<Material>,
@@ -399,5 +491,31 @@ mod tests {
         let mut empty = TextureData { name: "empty".into(), width: 2, height: 1, rgba: rgba.clone() };
         empty.fill_under_alpha();
         assert_eq!(empty.rgba, rgba, "nothing drawn, nothing to copy");
+    }
+}
+
+impl MeshData {
+    /// A copy with its shape keys set to `weights` (by name; unknown names are skipped) and
+    /// baked into the vertices; the copy has no shape keys left.
+    pub fn morphed(&self, weights: &[(&str, f32)]) -> MeshData {
+        let mut mesh = MeshData { morphs: Vec::new(), ..self.clone() };
+        let mut touched = Vec::new();
+        for &(name, weight) in weights {
+            if weight.abs() < 1e-3 {
+                continue;
+            }
+            let Some(morph) = self.morphs.iter().find(|m| m.name == name) else { continue };
+            for &(i, moved, turned) in &morph.moves {
+                let Some(vertex) = mesh.vertices.get_mut(i as usize) else { continue };
+                vertex.position = (Vec3::from(vertex.position) + moved * weight).to_array();
+                vertex.normal = (Vec3::from(vertex.normal) + turned * weight).to_array();
+                touched.push(i as usize);
+            }
+        }
+        for i in touched {
+            let normal = Vec3::from(mesh.vertices[i].normal).normalize_or_zero();
+            mesh.vertices[i].normal = normal.to_array();
+        }
+        mesh
     }
 }

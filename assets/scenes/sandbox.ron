@@ -24,6 +24,8 @@ SceneDesc(
             density: 0.017,
             height_falloff: 0.06,
             base_height: 3.5,
+            // `air: 5500.0, air_height: 1400.0` adds the far haze of the air: the land melts into
+            // the sky by that many meters (see world.ron). Off here, where the fog does it.
             sun_scatter: 0.18,
             // Banks of mist in the low places: `amount` is how much a bank hides per meter,
             // `top` its height in the world, `size` how wide the banks are, in meters, and
@@ -52,6 +54,8 @@ SceneDesc(
         // shadow maps (1-4): more cascades keep nearby shadows sharp.
         shadows: (enabled: true, distance: 120.0, strength: 0.65, cascades: 4),
         post: (
+            // `rays: 0.7` streams shafts from the sun past what stands in front of it, and
+            // `paint: 0.75, paint_from: 90.0, paint_to: 1200.0` lays far things on in brush strokes.
             exposure: 1.25,
             contrast: 1.18,
             saturation: 1.2,
@@ -513,11 +517,14 @@ SceneDesc(
     weather_sounds: (
         rain: "../sounds/rain.wav",
         snow: "../sounds/wind.ogg",
-        thunder: ["../sounds/thunder_1.wav", "../sounds/thunder_2.wav"],
+        // Strong winds only, louder in the gusts: still air is silent.
+        wind: "../sounds/wind.ogg",
+        thunder: ["../sounds/weather/thunder_1.mp3", "../sounds/weather/thunder_2.mp3", "../sounds/weather/thunder_3.mp3", "../sounds/weather/thunder_4.mp3"],
+        // The bolt that comes down with each strike.
+        lightning: "../effects/lightning.ron",
     ),
 
     sounds: [
-        (path: "../sounds/wind.ogg", volume: 0.35),
         // the heart crystal hums softly
         (path: "../sounds/hum.wav", position: (0.0, 1.6, 0.0), volume: 0.4, min_distance: 2.0, max_distance: 14.0),
     ],

@@ -44,6 +44,104 @@ StoryBook(
                  ]),
             ],
         ),
+        (
+            // A villager of this trade; the game fills {saudacao}, {nome}, {papel} and {boato}.
+            object: "oficio:ferreiro",
+            nodes: [
+                (id: "oi", text: "{saudacao} Sou {nome}, {papel}.",
+                 choices: [
+                    (text: "Como vai a forja?", next: "oficio"),
+                    (text: "Alguma novidade?", next: "boato"),
+                    (text: "Até mais."),
+                 ]),
+                (id: "oficio", text: "O fogo come carvão como um boi come capim. Mas o ferro daqui é bom, e a vila precisa de pregos, foices e uma ou outra lâmina.",
+                 choices: [(text: "Entendo.", next: "oi")]),
+                (id: "boato", text: "{boato}",
+                 choices: [(text: "Hm. Obrigado.", next: "oi")]),
+            ],
+        ),
+        (
+            // A villager of this trade; the game fills {saudacao}, {nome}, {papel} and {boato}.
+            object: "oficio:pescador",
+            nodes: [
+                (id: "oi", text: "{saudacao} Sou {nome}, {papel}.",
+                 choices: [
+                    (text: "Tem peixe no riacho?", next: "oficio"),
+                    (text: "Alguma novidade?", next: "boato"),
+                    (text: "Até mais."),
+                 ]),
+                (id: "oficio", text: "Tem, mas é preciso saber a hora. De manhã cedo eles sobem, e com a lua cheia ficam manhosos. O bote é velho, mas ainda boia.",
+                 choices: [(text: "Entendo.", next: "oi")]),
+                (id: "boato", text: "{boato}",
+                 choices: [(text: "Hm. Obrigado.", next: "oi")]),
+            ],
+        ),
+        (
+            // A villager of this trade; the game fills {saudacao}, {nome}, {papel} and {boato}.
+            object: "oficio:taverna",
+            nodes: [
+                (id: "oi", text: "{saudacao} Sou {nome}, {papel}.",
+                 choices: [
+                    (text: "Como vai a taverna?", next: "oficio"),
+                    (text: "Alguma novidade?", next: "boato"),
+                    (text: "Quero comprar.", does: [Shop("vila_taverna")]),
+                    (text: "Até mais."),
+                 ]),
+                (id: "oficio", text: "Cheia toda noite, graças aos céus e à sede de todo mundo. O barril novo veio da costa.",
+                 choices: [(text: "Entendo.", next: "oi")]),
+                (id: "boato", text: "{boato}",
+                 choices: [(text: "Hm. Obrigado.", next: "oi")]),
+            ],
+        ),
+        (
+            // A villager of this trade; the game fills {saudacao}, {nome}, {papel} and {boato}.
+            object: "oficio:curandeira",
+            nodes: [
+                (id: "oi", text: "{saudacao} Sou {nome}, {papel}.",
+                 choices: [
+                    (text: "Você cura gente?", next: "oficio"),
+                    (text: "Alguma novidade?", next: "boato"),
+                    (text: "Quero comprar.", does: [Shop("vila_curandeira")]),
+                    (text: "Até mais."),
+                 ]),
+                (id: "oficio", text: "Curo o que dá para curar. Erva amarga para a febre, tônico para quem perdeu sangue, e conselho para o resto.",
+                 choices: [(text: "Entendo.", next: "oi")]),
+                (id: "boato", text: "{boato}",
+                 choices: [(text: "Hm. Obrigado.", next: "oi")]),
+            ],
+        ),
+        (
+            // A villager of this trade; the game fills {saudacao}, {nome}, {papel} and {boato}.
+            object: "oficio:chefe",
+            nodes: [
+                (id: "oi", text: "{saudacao} Sou {nome}, {papel}.",
+                 choices: [
+                    (text: "Como anda a vila?", next: "oficio"),
+                    (text: "Alguma novidade?", next: "boato"),
+                    (text: "Até mais."),
+                 ]),
+                (id: "oficio", text: "Pequena, mas de pé. Temos água, roça e gente que trabalha. O que falta é paz com os de fora.",
+                 choices: [(text: "Entendo.", next: "oi")]),
+                (id: "boato", text: "{boato}",
+                 choices: [(text: "Hm. Obrigado.", next: "oi")]),
+            ],
+        ),
+        (
+            // A villager of this trade; the game fills {saudacao}, {nome}, {papel} and {boato}.
+            object: "oficio:casa",
+            nodes: [
+                (id: "oi", text: "{saudacao} Sou {nome}, {papel}.",
+                 choices: [
+                    (text: "Como vai a roça?", next: "oficio"),
+                    (text: "Alguma novidade?", next: "boato"),
+                    (text: "Até mais."),
+                 ]),
+                (id: "oficio", text: "A terra é vermelha e teimosa. Dá mandioca e milho, se a chuva ajudar. O varal seca em meia manhã.",
+                 choices: [(text: "Entendo.", next: "oi")]),
+                (id: "boato", text: "{boato}",
+                 choices: [(text: "Hm. Obrigado.", next: "oi")]),
+            ],
+        ),
     ],
     quests: [
         (
@@ -65,6 +163,18 @@ StoryBook(
         ),
     ],
     shops: [
+        (
+            id: "vila_taverna",
+            name: "A taverna da vila",
+            buys_at: 0.4,
+            wares: [(item: "maca")],
+        ),
+        (
+            id: "vila_curandeira",
+            name: "As ervas da curandeira",
+            buys_at: 0.5,
+            wares: [(item: "erva_amarga"), (item: "tonico")],
+        ),
         (
             id: "vela",
             name: "A bolsa de Vela",

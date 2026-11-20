@@ -90,6 +90,8 @@ pub struct Frame<'a> {
     pub water_hulls: &'a [WaterHull],
     /// Pictures of things to draw first, for the [`Ui`].
     pub portraits: &'a [Portrait<'a>],
+    /// The rooms of the houses: indoors.
+    pub rooms: &'a [grimora_core::RoomBox],
 }
 
 /// Counters from the last rendered frame.
@@ -138,7 +140,12 @@ struct Targets {
     /// The depth before the water was drawn, which the water reads while it writes the real one.
     depth_copy: wgpu::Texture,
     depth_copy_view: wgpu::TextureView,
+    /// The shafts of light, worked out at a quarter of the size: they are soft anyway.
+    rays: wgpu::TextureView,
 }
+
+/// How many times smaller than the screen the shafts of light are worked out.
+const RAYS_SHRINK: u32 = 4;
 
 /// The format of the [`Ui`]'s pictures, into which portraits are copied.
 const PORTRAIT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -199,12 +206,18 @@ pub struct Renderer {
     post_buffer: wgpu::Buffer,
     post_layout: wgpu::BindGroupLayout,
     post_group: wgpu::BindGroup,
+    rays_group: wgpu::BindGroup,
+    rays_pipeline: wgpu::RenderPipeline,
+    /// Whether this frame has shafts of light to work out.
+    shafts: bool,
     linear_sampler: wgpu::Sampler,
 
     /// Indexed by [`mesh_pipeline_index`]: culling x alpha-to-coverage.
     mesh_pipelines: [wgpu::RenderPipeline; 4],
     /// Really blended surfaces: culling on and off.
     blend_pipelines: [wgpu::RenderPipeline; 2],
+    /// Aura shells: premultiplied, so alpha 0 adds light like the particles.
+    aura_pipeline: wgpu::RenderPipeline,
     water_pipeline: wgpu::RenderPipeline,
     water_layout: wgpu::BindGroupLayout,
     /// What is behind the water: the depth and the image drawn so far.
@@ -410,6 +423,18 @@ impl Renderer {
                     },
                     count: None,
                 },
+                texture_entry(5, wgpu::TextureSampleType::Float { filterable: true }),
+                // The scene's depth, for what the post-process does by distance.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: msaa > 1,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -504,7 +529,11 @@ impl Renderer {
         });
         let post_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("post"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/post.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(if msaa > 1 {
+                include_str!("shaders/post.wgsl").into()
+            } else {
+                include_str!("shaders/post.wgsl").replace("texture_depth_multisampled_2d", "texture_depth_2d").into()
+            }),
         });
         let material_cache = MaterialCache::new(&device, &queue, msaa > 1);
         let scene_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -625,6 +654,32 @@ impl Renderer {
             blended_pipeline_with("mesh blended", "vs_main", "fs_main", Some(wgpu::Face::Back)),
             blended_pipeline_with("mesh blended double-sided", "vs_main", "fs_main", None),
         ];
+        let aura_target = [Some(wgpu::ColorTargetState {
+            format: HDR_FORMAT,
+            blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+            write_mask: wgpu::ColorWrites::ALL,
+        })];
+        let aura_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("aura"),
+            layout: Some(&scene_layout),
+            vertex: wgpu::VertexState {
+                module: &scene_shader,
+                entry_point: Some("vs_aura"),
+                compilation_options: Default::default(),
+                buffers: &mesh_buffers,
+            },
+            primitive: wgpu::PrimitiveState { cull_mode: Some(wgpu::Face::Back), ..Default::default() },
+            depth_stencil: Some(depth_state(false, SCENE_DEPTH_COMPARE, Default::default())),
+            multisample,
+            fragment: Some(wgpu::FragmentState {
+                module: &scene_shader,
+                entry_point: Some("fs_aura"),
+                compilation_options: Default::default(),
+                targets: &aura_target,
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
         let water_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("behind the water"),
             entries: &[
@@ -762,6 +817,32 @@ impl Renderer {
             cache: None,
         });
 
+        let rays_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("light shafts"),
+            layout: Some(&post_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &post_shader,
+                entry_point: Some("vs_fullscreen"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &post_shader,
+                entry_point: Some("fs_rays"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: HDR_FORMAT,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
         let portrait_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("portrait"),
             layout: Some(&post_pipeline_layout),
@@ -795,7 +876,27 @@ impl Renderer {
         let ui = UiPass::new(&device, &queue, format, &linear_sampler);
 
         let bloom = Bloom::new(&device, &targets.hdr, config.width, config.height);
-        let post_group = create_post_group(&device, &post_layout, &targets.hdr, &linear_sampler, &bloom, &post_buffer);
+        let post_group = create_post_group(
+            &device,
+            &post_layout,
+            &targets.hdr,
+            &targets.depth,
+            &targets.rays,
+            &linear_sampler,
+            &bloom,
+            &post_buffer,
+        );
+        // The shafts' own pass reads the same things, but not what it writes.
+        let rays_group = create_post_group(
+            &device,
+            &post_layout,
+            &targets.hdr,
+            &targets.depth,
+            bloom.output(),
+            &linear_sampler,
+            &bloom,
+            &post_buffer,
+        );
 
         let instance_capacity = 1024;
         let instance_buffer = create_instance_buffer(&device, instance_capacity);
@@ -826,9 +927,13 @@ impl Renderer {
             post_buffer,
             post_layout,
             post_group,
+            rays_group,
+            rays_pipeline,
+            shafts: false,
             linear_sampler,
             mesh_pipelines,
             blend_pipelines,
+            aura_pipeline,
             water_pipeline,
             water_layout,
             water_group,
@@ -907,6 +1012,18 @@ impl Renderer {
             &self.device,
             &self.post_layout,
             &self.targets.hdr,
+            &self.targets.depth,
+            &self.targets.rays,
+            &self.linear_sampler,
+            &self.bloom,
+            &self.post_buffer,
+        );
+        self.rays_group = create_post_group(
+            &self.device,
+            &self.post_layout,
+            &self.targets.hdr,
+            &self.targets.depth,
+            self.bloom.output(),
             &self.linear_sampler,
             &self.bloom,
             &self.post_buffer,
@@ -1113,10 +1230,13 @@ impl Renderer {
             self.bed_rect,
             self.level_map,
             &hulls,
+            frame.rooms,
         );
         self.queue.write_buffer(&self.globals_buffer, 0, bytemuck::bytes_of(&globals));
         self.update_sky_textures(frame.sky_textures);
-        let post = uniforms::post_params(frame.environment, frame.time, self.bloom.mip_count());
+        let aspect = self.config.width as f32 / self.config.height.max(1) as f32;
+        let post = uniforms::post_params(frame.environment, frame.time, self.bloom.mip_count(), frame.camera, aspect);
+        self.shafts = post.shafts();
         self.queue.write_buffer(&self.post_buffer, 0, bytemuck::bytes_of(&post));
         let cascades = frame.environment.shadows.enabled.then_some(cascades);
         for (i, view_proj) in cascades.iter().flat_map(|c| &c.view_proj[..c.count]).enumerate() {
@@ -1241,6 +1361,24 @@ impl Renderer {
         self.particles.draw_bending(&mut encoder, &self.globals_group, &self.targets.hdr_texture, &self.targets.hdr);
 
         self.bloom.render(&mut encoder);
+        if self.shafts {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("light shafts"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.targets.rays,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+            pass.set_pipeline(&self.rays_pipeline);
+            pass.set_bind_group(0, &self.rays_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
         self.tonemap(&mut encoder, &surface_view);
         self.queue.submit([encoder.finish()]);
 
@@ -1271,6 +1409,8 @@ impl Renderer {
                 &self.device,
                 &self.post_layout,
                 &targets.hdr,
+                &targets.depth,
+                &targets.rays,
                 &self.linear_sampler,
                 &self.bloom,
                 &self.post_buffer,
@@ -1292,6 +1432,7 @@ impl Renderer {
             water_levels: None,
             water_hulls: &[],
             portraits: &[],
+            rooms: &[],
         };
         let (globals, _) = uniforms::globals(
             view.camera,
@@ -1305,9 +1446,12 @@ impl Renderer {
             self.bed_rect,
             self.level_map,
             &[],
+            &[],
         );
         self.queue.write_buffer(&self.globals_buffer, 0, bytemuck::bytes_of(&globals));
-        let post = uniforms::post_params(view.environment, view.time, self.bloom.mip_count());
+        let aspect = size.0 as f32 / size.1.max(1) as f32;
+        let post = uniforms::post_params(view.environment, view.time, self.bloom.mip_count(), view.camera, aspect)
+            .without_shafts();
         self.queue.write_buffer(&self.post_buffer, 0, bytemuck::bytes_of(&post));
         self.prepare_instances(&view, None);
         self.upload_joints(view.joint_matrices);
@@ -1669,6 +1813,7 @@ impl Renderer {
                     MeshPass::Water if !material.water => continue,
                     MeshPass::Water => use_pipeline(pass, &self.water_pipeline),
                     MeshPass::Transparent if !material.blend || material.water => continue,
+                    MeshPass::Transparent if material.aura => use_pipeline(pass, &self.aura_pipeline),
                     MeshPass::Transparent => {
                         use_pipeline(pass, &self.blend_pipelines[usize::from(material.double_sided)]);
                     }
@@ -1842,7 +1987,22 @@ fn create_targets(device: &wgpu::Device, width: u32, height: u32, msaa: u32) -> 
     let hdr_texture = texture("hdr", HDR_FORMAT, 1, sampled | wgpu::TextureUsages::COPY_SRC);
     let depth_texture = texture("depth", DEPTH_FORMAT, msaa, sampled | wgpu::TextureUsages::COPY_SRC);
     let depth_copy = texture("depth before water", DEPTH_FORMAT, msaa, sampled | wgpu::TextureUsages::COPY_DST);
+    let rays = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("light shafts"),
+        size: wgpu::Extent3d {
+            width: width.div_ceil(RAYS_SHRINK).max(1),
+            height: height.div_ceil(RAYS_SHRINK).max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: HDR_FORMAT,
+        usage: sampled,
+        view_formats: &[],
+    });
     Targets {
+        rays: rays.create_view(&Default::default()),
         hdr_msaa: (msaa > 1)
             .then(|| texture("hdr msaa", HDR_FORMAT, msaa, attachment).create_view(&Default::default())),
         hdr: hdr_texture.create_view(&Default::default()),
@@ -1972,6 +2132,8 @@ fn create_post_group(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
     hdr: &wgpu::TextureView,
+    depth: &wgpu::TextureView,
+    rays: &wgpu::TextureView,
     sampler: &wgpu::Sampler,
     bloom: &Bloom,
     params: &wgpu::Buffer,
@@ -1984,6 +2146,8 @@ fn create_post_group(
             wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(sampler) },
             wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(bloom.output()) },
             wgpu::BindGroupEntry { binding: 3, resource: params.as_entire_binding() },
+            wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(depth) },
+            wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(rays) },
         ],
     })
 }

@@ -13,7 +13,6 @@ use grimora::story::{QuestNews, Story};
 
 use crate::Sandbox;
 use crate::dialogue::Talk;
-use crate::journal::JournalTab;
 use crate::rest::Resting;
 use crate::shop::Stall;
 
@@ -32,9 +31,10 @@ const FACE_FOV: f32 = 14.0;
 /// A screen of the story.
 pub enum Panel {
     Talk(Talk),
-    Journal(JournalTab),
     Shop(Stall),
     Rest(Resting),
+    /// The debug menu (F1).
+    Debug,
 }
 
 /// What the game knows about the story, and the pictures to draw it with.
@@ -118,27 +118,13 @@ impl Sandbox {
         if self.dead_for.is_some() {
             self.tale.panel = None;
         }
-        let journal_key = ctx.input.action_just_pressed(OPEN_JOURNAL);
-        if journal_key && matches!(self.tale.panel, Some(Panel::Journal(_))) {
-            self.tale.panel = None;
-            return true;
-        }
-        if self.tale.panel.is_none()
-            && journal_key
-            && self.mode == crate::Mode::Play
-            && self.dead_for.is_none()
-            && !self.bag.open
-        {
-            self.tale.panel = Some(Panel::Journal(JournalTab::default()));
-            ctx.ui.reset_focus();
-        }
         let Some(panel) = self.tale.panel.take() else { return false };
         let text_size = ctx.ui.theme.text_size;
         let next = match panel {
             Panel::Talk(talk) => self.run_talk(ctx, talk),
-            Panel::Journal(tab) => self.run_journal(ctx, tab),
             Panel::Shop(stall) => self.run_shop(ctx, stall),
             Panel::Rest(resting) => self.run_rest(ctx, resting),
+            Panel::Debug => self.run_debug(ctx),
         };
         // A choice in a dialogue may have opened something else.
         self.tale.panel = self.tale.panel.take().or(next);
@@ -181,6 +167,44 @@ impl Sandbox {
         let Some(dialogue) = book.dialogue_of(object) else { return false };
         let Some(node) = self.tale.story.opening(&book, &self.bag.inventory, dialogue) else { return false };
         self.tale.panel = Some(Panel::Talk(Talk::new(dialogue, node)));
+        ctx.ui.reset_focus();
+        true
+    }
+
+    /// A villager talks: their trade's dialogue in the story book (`oficio:<trade>`), with
+    /// `{saudacao}`, `{nome}`, `{papel}` and `{boato}` filled in for them. Too low a
+    /// reputation and they won't.
+    pub(crate) fn talk_to_villager(&mut self, ctx: &mut Context, entity: grimora::Entity) -> bool {
+        let Some(talk) = ctx.world.villager_talk(entity) else { return false };
+        let Some(name) = ctx.world.get::<grimora::Name>(entity).map(|n| n.0.clone()) else { return false };
+        let fill = |text: &str| {
+            text.replace("{saudacao}", &talk.greeting)
+                .replace("{nome}", &talk.name)
+                .replace("{papel}", &talk.role)
+                .replace("{boato}", &talk.rumor)
+        };
+        let mut dialogue = match self.tale.book.dialogue_of(&format!("oficio:{}", talk.trade)) {
+            Some(dialogue) if !talk.refuses => dialogue.clone(),
+            _ => grimora::scene::story::DialogueDesc {
+                nodes: vec![grimora::scene::story::NodeDesc {
+                    id: "oi".into(),
+                    text: if talk.refuses {
+                        "Não tenho nada para dizer a você.".into()
+                    } else {
+                        "{saudacao} Sou {nome}, {papel}.".into()
+                    },
+                    choices: Vec::new(),
+                }],
+                ..Default::default()
+            },
+        };
+        dialogue.object = name;
+        dialogue.speaker = talk.name.clone();
+        for node in &mut dialogue.nodes {
+            node.text = fill(&node.text);
+        }
+        let first = dialogue.nodes.first().map(|n| n.id.clone()).unwrap_or_default();
+        self.tale.panel = Some(Panel::Talk(Talk::new(&dialogue, &first)));
         ctx.ui.reset_focus();
         true
     }
@@ -234,8 +258,10 @@ impl Sandbox {
                 story.killed("sardinha");
                 story.saw("gaivota");
                 story.saw("caranguejo");
-                let tab = JournalTab::named(journal.strip_prefix("journal:").unwrap_or(""));
-                self.tale.panel = Some(Panel::Journal(tab));
+                let (tab, page) = crate::bag_screen::Tab::named(journal.strip_prefix("journal:").unwrap_or(""));
+                self.open_bag(None);
+                self.bag.screen.tab = tab;
+                self.bag.screen.diary_page = page;
             }
         }
     }
@@ -422,16 +448,17 @@ mod tests {
     fn the_journal_opens_with_its_key_and_esc_closes_it_without_pausing() {
         let dir = Folder::new("journal");
         let (mut game, mut ctx) = start(&dir);
+        use crate::bag_screen::Tab;
         press(&mut game, &mut ctx, KeyCode::KeyJ);
-        assert!(matches!(game.tale.panel, Some(Panel::Journal(_))));
+        assert!(game.bag.open && game.bag.screen.tab == Tab::Diary);
         press(&mut game, &mut ctx, KeyCode::KeyE);
-        assert!(matches!(game.tale.panel, Some(Panel::Journal(_))), "E turns the page and uses nothing");
+        assert!(game.bag.open && game.bag.screen.tab == Tab::Map, "E turns the tab and uses nothing");
         press(&mut game, &mut ctx, KeyCode::Escape);
-        assert!(game.tale.panel.is_none());
+        assert!(!game.bag.open);
         assert!(!ctx.is_paused());
         press(&mut game, &mut ctx, KeyCode::KeyJ);
         press(&mut game, &mut ctx, KeyCode::KeyJ);
-        assert!(game.tale.panel.is_none());
+        assert!(!game.bag.open);
     }
 
     #[test]

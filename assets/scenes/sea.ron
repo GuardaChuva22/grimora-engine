@@ -54,7 +54,8 @@ SceneDesc(
     // What water sounds like, near it and under it, and what happens when something falls in.
     water_sounds: (
         sea: "../sounds/sea.wav",
-        river: "../sounds/river.wav",
+        river: "../sounds/river_small.wav",
+        river_big: "../sounds/river_big.wav",
         underwater: "../sounds/underwater.wav",
         splash: ["../sounds/splash_1.wav", "../sounds/splash_2.wav"],
         splash_effect: "../effects/splash.ron",
@@ -158,10 +159,13 @@ SceneDesc(
     weather_sounds: (
         rain: "../sounds/rain.wav",
         snow: "../sounds/wind.ogg",
-        thunder: ["../sounds/thunder_1.wav", "../sounds/thunder_2.wav"],
+        // Strong winds only, louder in the gusts: still air is silent.
+        wind: "../sounds/wind.ogg",
+        thunder: ["../sounds/weather/thunder_1.mp3", "../sounds/weather/thunder_2.mp3", "../sounds/weather/thunder_3.mp3", "../sounds/weather/thunder_4.mp3"],
+        // The bolt that comes down with each strike.
+        lightning: "../effects/lightning.ron",
     ),
 
     sounds: [
-        (path: "../sounds/wind.ogg", volume: 0.35),
     ],
 )

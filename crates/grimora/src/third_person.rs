@@ -1,4 +1,4 @@
-use grimora_core::actions::{DIVE, JUMP, MOVE_BACK, MOVE_FORWARD, MOVE_LEFT, MOVE_RIGHT, RUN};
+use grimora_core::actions::{DIVE, JUMP, MOVE_BACK, MOVE_FORWARD, MOVE_LEFT, MOVE_RIGHT, RUN, SLOW_WALK};
 use grimora_core::{Camera, Input, Origin, Quat, Transform, Vec2, Vec3, WaterPoint, WorldPos};
 use grimora_physics::{CharacterBody, Physics};
 use serde::{Deserialize, Serialize};
@@ -14,6 +14,10 @@ pub struct ThirdPersonController {
     /// Direction the character faces, in radians (0 looks towards -Z).
     pub facing: f32,
     pub walk_speed: f32,
+    /// Speed while `SLOW_WALK` is held; 0 has no slow walk.
+    pub slow_speed: f32,
+    /// Whether it walks slowly now, as the last `update` read the input.
+    pub slow_walking: bool,
     pub run_speed: f32,
     /// How fast it goes sideways and backwards while it keeps facing one way.
     pub strafe_speed: f32,
@@ -51,10 +55,33 @@ pub struct ThirdPersonController {
     pub water: Option<WaterPoint>,
     pub swim_speed: f32,
     pub swim_sprint: f32,
+    /// Flying under the game's own rules, as a launch or a dash: see [`Flight`]. The game
+    /// sets it and takes it away; the walk and the jump wait until it does.
+    pub flight: Option<Flight>,
+    /// Radians added to the camera's field of view: it eases there by itself.
+    pub fov_boost: f32,
+    /// Meters added to the camera's distance, eased the same way.
+    pub camera_pull: f32,
+    /// Seconds the camera takes to catch up when the character moves fast; 0 follows rigidly.
+    pub camera_lag: f32,
+    /// Meters of steady shaking, for as long as it stays above 0.
+    pub rumble: f32,
+    fov_now: f32,
+    /// The field of view without the boost, while there is one.
+    fov_base: Option<f32>,
+    pull_now: f32,
+    rumble_now: f32,
+    /// How far behind the camera's pivot is, from the lag.
+    trail: Vec3,
+    clock: f32,
+    /// Speed lost against something in the way during the last `update`, while flying.
+    impact: f32,
     swimming: bool,
     diving: bool,
     /// How far the body leans forward as it swims, in radians.
     tilt: f32,
+    /// How far the body rolls into a turn while flying, in radians.
+    bank: f32,
     velocity: Vec3,
     /// Where [`ThirdPersonController::turn_to`] is turning it.
     turn_goal: Option<f32>,
@@ -64,6 +91,44 @@ pub struct ThirdPersonController {
     kick: Vec2,
     kick_goal: Vec2,
 }
+
+/// How the character moves through the air while [`ThirdPersonController::flight`] is set:
+/// no ground control, only a turn of the way it goes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Flight {
+    /// Share of the usual gravity.
+    pub gravity: f32,
+    /// Per second: how fast the speed above `cruise` dies away.
+    pub drag: f32,
+    /// The speed drag never takes it under, in meters per second.
+    pub cruise: f32,
+    /// Radians per second the way it goes can turn towards the movement keys.
+    pub steer: f32,
+    /// How far the body can lean into the way it goes, in radians: 1.57 lies flat.
+    pub lean: f32,
+    /// How quickly it gets there, per second.
+    pub lean_rate: f32,
+    /// The clip already lies along the way it goes (a flying pose): the body only pitches,
+    /// nose down as it dives and up as it climbs, by up to `lean` either way.
+    pub flat: bool,
+    /// How far it can roll into a turn, in radians: 0 stays level.
+    pub bank: f32,
+    /// A way to face, in radians, instead of the way it goes: hovering, it looks where the
+    /// camera does.
+    pub face: Option<f32>,
+}
+
+/// Radians of roll for each radian per second it turns, and how fast it gets there.
+const BANK_PER_TURN: f32 = 0.35;
+const BANK_EASE: f32 = 4.0;
+
+/// How far behind the camera's pivot can trail, in meters.
+const TRAIL_MOST: f32 = 3.5;
+/// Per second: how fast the camera catches up once there is no lag.
+const TRAIL_SETTLE: f32 = 5.0;
+/// Per second: how fast the camera's field of view and distance go out, and come back.
+const BOOST_OUT: f32 = 16.0;
+const BOOST_BACK: f32 = 3.5;
 
 /// How quickly `turn_to` closes the gap, per second: 90 degrees take about a tenth of one.
 const QUICK_TURN: f32 = 20.0;
@@ -142,6 +207,8 @@ impl ThirdPersonController {
             body: CharacterBody::new(position, 0.35, 1.8),
             facing,
             walk_speed: 4.5,
+            slow_speed: 0.0,
+            slow_walking: false,
             run_speed: 8.5,
             strafe_speed: 4.5,
             back_speed: 4.5,
@@ -163,9 +230,22 @@ impl ThirdPersonController {
             water: None,
             swim_speed: 2.4,
             swim_sprint: 4.2,
+            flight: None,
+            fov_boost: 0.0,
+            camera_pull: 0.0,
+            camera_lag: 0.0,
+            rumble: 0.0,
+            fov_now: 0.0,
+            fov_base: None,
+            pull_now: 0.0,
+            rumble_now: 0.0,
+            trail: Vec3::ZERO,
+            clock: 0.0,
+            impact: 0.0,
             swimming: false,
             diving: false,
             tilt: 0.0,
+            bank: 0.0,
             velocity: Vec3::ZERO,
             turn_goal: None,
             current_distance: 5.5,
@@ -177,6 +257,17 @@ impl ThirdPersonController {
 
     pub fn velocity(&self) -> Vec3 {
         self.velocity
+    }
+
+    /// Sets its speed outright, as a launch does.
+    pub fn set_velocity(&mut self, velocity: Vec3) {
+        self.velocity = velocity;
+    }
+
+    /// Speed it lost against something in the way during the last `update`, while flying: a
+    /// wall it flew into.
+    pub fn impact(&self) -> f32 {
+        self.impact
     }
 
     /// Adds to its speed, as a blow would; it slows back down by itself.
@@ -201,7 +292,8 @@ impl ThirdPersonController {
 
     /// Transform for the character's mesh (feet at the origin, facing -Z).
     pub fn transform(&self) -> Transform {
-        let rotation = Quat::from_rotation_y(self.facing) * Quat::from_rotation_x(-self.tilt);
+        let rotation =
+            Quat::from_rotation_y(self.facing) * Quat::from_rotation_x(-self.tilt) * Quat::from_rotation_z(self.bank);
         let position = self.body.position + Vec3::Y * LEAN_PIVOT - rotation * Vec3::Y * LEAN_PIVOT;
         Transform { position, rotation, scale: Vec3::ONE }
     }
@@ -282,14 +374,16 @@ impl ThirdPersonController {
         // Movement is relative to where the camera looks.
         let wish = if self.locked { Vec3::ZERO } else { self.move_direction(input) };
         let running = input.action(RUN) && !self.exhausted;
+        self.slow_walking = !running && self.slow_speed > 0.0 && input.action(SLOW_WALK);
+        let slowing = if self.slow_walking { (self.slow_speed / self.walk_speed).min(1.0) } else { 1.0 };
         let speed = if self.locked {
             0.0
         } else if self.strafing(input) {
-            self.strafing_speed(wish)
+            self.strafing_speed(wish) * slowing
         } else if running {
             self.run_speed
         } else {
-            self.walk_speed
+            self.walk_speed * slowing
         };
         let wading = depth.map_or(0.0, |depth| (depth / SWIM_FROM).clamp(0.0, 1.0));
         let target = wish * speed * (1.0 - wading * WADE_DRAG);
@@ -299,6 +393,8 @@ impl ThirdPersonController {
         let blend = 1.0 - (-control * dt).exp();
         if self.swimming {
             self.swim(input, wish, running, depth.unwrap_or(0.0), dt);
+        } else if let Some(flight) = self.flight {
+            self.fly(flight, wish, dt);
         } else {
             let horizontal = Vec3::new(self.velocity.x, 0.0, self.velocity.z).lerp(target, blend);
             let mut vertical = self.velocity.y - self.gravity * dt;
@@ -310,20 +406,39 @@ impl ThirdPersonController {
             }
             self.velocity = horizontal + Vec3::Y * vertical;
         }
-        let lean = if self.swimming { self.swim_lean() } else { 0.0 };
-        self.tilt += (lean - self.tilt) * (1.0 - (-5.0 * dt).exp());
+        let (lean, lean_rate) = match self.flight {
+            _ if self.swimming => (self.swim_lean(), 5.0),
+            Some(flight) => (self.flight_lean(flight), flight.lean_rate),
+            None => (0.0, 5.0),
+        };
+        self.tilt += (lean - self.tilt) * (1.0 - (-lean_rate * dt).exp());
 
         // A current carries it, the more the more of it is in the water.
         let flow = self.water.map_or(Vec3::ZERO, |water| water.flow * wading);
         let before = self.body.position;
         let motion = (self.velocity + flow) * dt + std::mem::take(&mut self.root_motion);
         self.body.move_and_slide(physics, motion, dt);
+        if self.camera_lag > 0.0 {
+            self.trail -= self.body.position - before;
+        }
+        self.impact = 0.0;
+        if self.flight.is_some() && !self.swimming && dt > 0.0 {
+            // A wall takes the speed that went into it; along it, it slides on.
+            let moved = (self.body.position - before) / dt;
+            let wanted = Vec3::new(self.velocity.x, 0.0, self.velocity.z);
+            let kept = Vec3::new(moved.x, 0.0, moved.z);
+            if kept.length() < wanted.length() - 0.5 {
+                self.impact = wanted.length() - kept.length();
+                self.velocity = kept + Vec3::Y * self.velocity.y;
+            }
+        }
         // Hitting a ceiling or landing stops vertical motion.
         let moved_y = (self.body.position.y - before.y) / dt.max(1e-5);
         if (self.body.grounded && self.velocity.y < 0.0) || (self.velocity.y > 0.0 && moved_y < self.velocity.y * 0.5) {
             self.velocity.y = 0.0;
         }
 
+        let facing_before = self.facing;
         if !self.locked {
             self.turn_goal = None;
         }
@@ -332,12 +447,29 @@ impl ThirdPersonController {
         } else if let (Some(target), true, false) = (self.lock_target, self.strafing(input), self.locked) {
             let to = target - self.body.position;
             self.facing = lerp_angle(self.facing, (-to.x).atan2(-to.z), 1.0 - (-14.0 * dt).exp());
+        } else if let (Some(flight), false) = (self.flight, self.swimming) {
+            let along = Vec3::new(self.velocity.x, 0.0, self.velocity.z);
+            if let Some(yaw) = flight.face {
+                self.facing = lerp_angle(self.facing, yaw, 1.0 - (-6.0 * dt).exp());
+            } else if along.length() > 0.5 {
+                self.facing = lerp_angle(self.facing, (-along.x).atan2(-along.z), 1.0 - (-10.0 * dt).exp());
+            }
         } else if self.aiming && !self.locked {
             self.facing = lerp_angle(self.facing, self.camera_yaw, 1.0 - (-14.0 * dt).exp());
         } else if wish != Vec3::ZERO {
             let desired = (-wish.x).atan2(-wish.z);
             self.facing = lerp_angle(self.facing, desired, 1.0 - (-14.0 * dt).exp());
         }
+
+        // Flying, it rolls into the turn, as fast as it turns.
+        let bank = match self.flight {
+            Some(flight) if !self.swimming && dt > 0.0 => {
+                let turn = lerp_angle(0.0, self.facing - facing_before, 1.0) / dt;
+                (turn * BANK_PER_TURN).clamp(-flight.bank, flight.bank)
+            }
+            _ => 0.0,
+        };
+        self.bank += (bank - self.bank) * (1.0 - (-BANK_EASE * dt).exp());
 
         self.place_camera(physics, camera, dt);
     }
@@ -378,6 +510,41 @@ impl ThirdPersonController {
         );
     }
 
+    /// Flies as `flight` says: turns the way it goes towards `wish`, loses the speed above
+    /// cruise and falls by its share of gravity.
+    fn fly(&mut self, flight: Flight, wish: Vec3, dt: f32) {
+        let mut along = Vec3::new(self.velocity.x, 0.0, self.velocity.z);
+        let speed = along.length();
+        if speed > 0.1 && wish != Vec3::ZERO {
+            let from = (-along.x).atan2(-along.z);
+            let to = (-wish.x).atan2(-wish.z);
+            let pi = std::f32::consts::PI;
+            let gap = (to - from + pi).rem_euclid(std::f32::consts::TAU) - pi;
+            let most = flight.steer * wish.length() * dt;
+            let angle = from + gap.clamp(-most, most);
+            along = Vec3::new(-angle.sin(), 0.0, -angle.cos()) * speed;
+        }
+        let mut velocity = along + Vec3::Y * self.velocity.y;
+        let total = velocity.length();
+        if total > flight.cruise && total > 0.0 {
+            let slowed = flight.cruise + (total - flight.cruise) * (-flight.drag * dt).exp();
+            velocity *= slowed / total;
+        }
+        velocity.y -= self.gravity * flight.gravity * dt;
+        self.velocity = velocity;
+    }
+
+    /// How far the body leans while flying: into the way it goes, once it goes fast.
+    fn flight_lean(&self, flight: Flight) -> f32 {
+        let along = Vec3::new(self.velocity.x, 0.0, self.velocity.z).length();
+        // Straight up or barely moving, it stays upright.
+        let fast = ((self.velocity.length() - 3.0) / 6.0).clamp(0.0, 1.0);
+        if flight.flat {
+            return (-self.velocity.y).atan2(along.max(1e-3)).clamp(-flight.lean, flight.lean) * fast;
+        }
+        along.atan2(self.velocity.y).min(flight.lean) * fast
+    }
+
     /// How far the body leans for the way it is going: upright when it treads water.
     fn swim_lean(&self) -> f32 {
         if self.velocity.length() < 0.6 {
@@ -398,7 +565,33 @@ impl ThirdPersonController {
     }
 
     fn place_camera(&mut self, physics: &Physics, camera: &mut Camera, dt: f32) {
-        let pivot = self.body.position + Vec3::Y * self.camera_height;
+        let ease = |now: f32, goal: f32| {
+            let rate = if goal.abs() > now.abs() { BOOST_OUT } else { BOOST_BACK };
+            now + (goal - now) * (1.0 - (-rate * dt).exp())
+        };
+        self.fov_now = ease(self.fov_now, self.fov_boost);
+        self.pull_now = ease(self.pull_now, self.camera_pull);
+        self.rumble_now += (self.rumble - self.rumble_now) * (1.0 - (-8.0 * dt).exp());
+        self.clock += dt;
+        if self.fov_now.abs() > 1e-4 {
+            let base = *self.fov_base.get_or_insert(camera.fov_y);
+            camera.fov_y = (base + self.fov_now).clamp(0.2, 2.6);
+        } else if let Some(base) = self.fov_base.take() {
+            camera.fov_y = base;
+        }
+
+        // Moving fast, the camera falls behind and catches up.
+        // Without lag, what is left of it settles back instead of snapping.
+        let settle = if self.camera_lag > 0.0 { 1.0 / self.camera_lag } else { TRAIL_SETTLE };
+        self.trail = (self.trail * (-settle * dt).exp()).clamp_length_max(TRAIL_MOST);
+        let mut pivot = self.body.position + Vec3::Y * self.camera_height;
+        let behind = self.trail.length();
+        if behind > 0.01 {
+            let away = self.trail / behind;
+            let reach =
+                physics.raycast_scenery(pivot, away, behind + 0.3).map_or(behind, |hit| (hit.distance - 0.3).max(0.0));
+            pivot += away * reach;
+        }
         let (sy, cy) = self.camera_yaw.sin_cos();
         let (sp, cp) = self.camera_pitch.sin_cos();
         let look = Vec3::new(-sy * cp, sp, -cy * cp);
@@ -411,7 +604,7 @@ impl ThirdPersonController {
             .raycast_scenery(pivot, right, SHOULDER_ASIDE + 0.3)
             .map_or(SHOULDER_ASIDE, |hit| (hit.distance - 0.3).max(0.0));
         let pivot = pivot + right * aside * shoulder + Vec3::Y * SHOULDER_UP * shoulder;
-        let distance = self.camera_distance * (1.0 + (SHOULDER_ZOOM - 1.0) * shoulder);
+        let distance = self.camera_distance * (1.0 + (SHOULDER_ZOOM - 1.0) * shoulder) + self.pull_now;
 
         // Pull the camera in front of anything between it and the character;
         // ease back out so it doesn't pop.
@@ -429,6 +622,12 @@ impl ThirdPersonController {
             let t = self.shake * 170.0;
             camera.position += Vec3::new(t.sin(), (t * 1.31).cos(), (t * 0.77).sin()) * self.shake;
             self.shake *= (-14.0 * dt).exp();
+        }
+        if self.rumble_now > 0.001 {
+            let t = self.clock;
+            let x = (t * 53.0).sin() + (t * 31.0).cos() * 0.5;
+            let y = (t * 67.0).cos() + (t * 23.0).sin() * 0.5;
+            camera.position += Vec3::new(x, y, (t * 41.0).sin()) * self.rumble_now * 0.6;
         }
         self.kick += (self.kick_goal - self.kick) * (1.0 - (-RECOIL_SNAP * dt).exp());
         self.kick_goal *= (-RECOIL_BACK * dt).exp();

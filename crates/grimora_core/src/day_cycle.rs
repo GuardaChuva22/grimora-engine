@@ -605,6 +605,8 @@ pub struct DayCycle {
     snow_cover: f32,
     /// The span whose strike has already thundered.
     thundered: Option<u64>,
+    /// The span of the last strike handed out by `take_strike`.
+    struck: Option<u64>,
 }
 
 /// A change of weather under way, from how things looked when it started.
@@ -640,6 +642,7 @@ impl DayCycle {
             wet: 0.0,
             snow_cover: 0.0,
             thundered: None,
+            struck: None,
         };
         day.set_hour(desc.time);
         day.settle();
@@ -720,6 +723,18 @@ impl DayCycle {
     /// How bright the lightning is now: a flash, and a second one right after it.
     fn flash(&self) -> f32 {
         self.last_strike().map_or(0.0, |(_, since)| (-since * 8.0).exp() + 0.7 * (-(since - 0.16).abs() * 14.0).exp())
+    }
+
+    /// A number for the strike that has just begun, the same on every run: it says so once
+    /// for each, for whoever draws the bolt.
+    pub fn take_strike(&mut self) -> Option<u64> {
+        match self.last_strike() {
+            Some((span, _)) if self.struck != Some(span) => {
+                self.struck = Some(span);
+                Some(span)
+            }
+            _ => None,
+        }
     }
 
     /// Whether a strike's thunder has just arrived. It only says so once.
@@ -817,7 +832,7 @@ impl DayCycle {
         env.sky.moon_position = Some(moon);
         env.sky.light_position = Some(light);
         env.post.exposure = key.exposure;
-        env.wind.scale = key.wind;
+        env.wind.weather = key.wind;
         env.precipitation = Precipitation {
             rain: key.rain,
             snow: key.snow,

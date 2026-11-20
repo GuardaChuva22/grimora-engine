@@ -4,6 +4,7 @@
 [
     // the flash
     (
+        light: (color: (1.0, 0.25, 0.3), intensity: 6.0, radius: 12.0, linger: 0.3),
         rate: 0.0,
         burst: 1,
         lifetime: (0.32, 0.32),

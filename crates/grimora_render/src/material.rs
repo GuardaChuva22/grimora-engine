@@ -29,6 +29,8 @@ struct MaterialParams {
     water_look: [f32; 4],
     /// xy how fast the picture moves along its uv, per second; w 1 for a river.
     water_flow: [f32; 4],
+    /// x where it starts to dither away (flat meters from the camera), y where it is gone; 0 = never.
+    fade: [f32; 4],
 }
 
 pub struct GpuMaterial {
@@ -42,6 +44,8 @@ pub struct GpuMaterial {
     /// Really blended: drawn in the transparent part of the main pass.
     pub blend: bool,
     pub water: bool,
+    /// An aura shell (`Shading::Aura`): blended in its own pipeline.
+    pub aura: bool,
 }
 
 impl GpuMaterial {
@@ -78,7 +82,8 @@ impl MaterialCache {
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    // Aura shells read their look in the vertex shader too.
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -154,6 +159,7 @@ impl MaterialCache {
                     Shading::Foliage => 1,
                     Shading::Crystal => 2,
                     Shading::Ground => 3,
+                    Shading::Aura => 4,
                     Shading::Standard | Shading::Water => 0,
                 },
             ],
@@ -166,7 +172,26 @@ impl MaterialCache {
                 material.water_tile.max(0.01),
             ],
             water_flow: [material.water_flow.x, material.water_flow.y, 0.0, material.water_river],
+            fade: [material.fade.x.max(0.0), material.fade.y.max(0.0), 0.0, 0.0],
         };
+        // An aura keeps its look in the water's slots, which it has no use for: see
+        // `fs_aura` in scene.wgsl.
+        let mut params = params;
+        if let (Shading::Aura, Some(a)) = (material.shading, material.aura) {
+            let linear = |c: glam::Vec3| {
+                c.max(glam::Vec3::ZERO)
+                    .to_array()
+                    .map(|v| if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) })
+            };
+            let [hr, hg, hb] = linear(a.heart);
+            let [rr, rg, rb] = linear(a.rim);
+            params.base_color = [hr, hg, hb, a.glow.max(0.0)];
+            params.emissive = [rr, rg, rb, 0.0];
+            params.water_shallow = [a.thickness, 0.0, a.scale.max(0.01), a.speed];
+            params.water_foam = [a.outline.max(0.0), a.edge.max(0.1), a.cover.clamp(0.0, 1.0), a.bands.max(0.0)];
+            let pattern = a.pattern as u8 as f32;
+            params.water_look = [a.pixels.max(0.0), a.warp.max(0.0), pattern, a.body.max(0.0)];
+        }
         let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("material params"),
             contents: bytemuck::bytes_of(&params),
@@ -207,6 +232,7 @@ impl MaterialCache {
             alpha: alpha_mode != 0,
             blend: alpha_mode == 2,
             water: material.shading == Shading::Water,
+            aura: material.shading == Shading::Aura,
         }
     }
 

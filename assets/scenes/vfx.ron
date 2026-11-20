@@ -1,0 +1,12 @@
+// A bare stage to judge effects on: the looping ones stay, the one-shots play once at the start.
+// cargo run --release -p sandbox -- --scene assets/scenes/vfx.ron --camera 0,3,11 --look-at 0,1.5,0 --frames 30 --screenshot screenshots/vfx.png
+(
+    effects: [
+        (path: "../effects/portal.ron", position: (-5.0, 0.0, 0.0)),
+        (path: "../effects/explosion.ron", position: (0.0, 0.0, 0.0)),
+        (path: "../effects/lightning.ron", position: (5.0, 0.0, -2.0)),
+        (path: "../effects/heal.ron", position: (-2.5, 0.0, 3.0)),
+        (path: "../effects/fireflies.ron", position: (3.0, 0.0, 4.0)),
+        (path: "../effects/leaves.ron", position: (-6.0, 0.0, 4.0)),
+    ],
+)

@@ -17,7 +17,7 @@ use std::collections::{BinaryHeap, HashMap};
 use glam::{DVec2, DVec3};
 
 use crate::field::Field;
-use crate::noise::{smoothstep, value};
+use crate::noise::{hash, smoothstep, value};
 use crate::{METERS_PER_UNIT, Relief};
 
 /// Meters between two cells of the drainage grid.
@@ -33,17 +33,50 @@ const STREAM_FROM: f64 = 2.5;
 const SHORTEST: usize = 6;
 /// Half widths of the smallest and the largest stream, in meters, and how the width grows with
 /// the catchment (meters per √km²).
-const NARROWEST: f64 = 1.0;
-const WIDEST: f64 = 7.0;
-const WIDENS: f64 = 0.75;
+const NARROWEST: f64 = 0.8;
+const WIDEST: f64 = 18.0;
+const WIDENS: f64 = 0.8;
+/// Where the water falls this steeply (meters per meter, over [`SLOPE_WINDOW`] meters each
+/// way), a stream runs narrow, shallow and fast; where it falls this little, wide and deeper:
+/// how much wider and deeper on the flat, and how much narrower and shallower on the steep.
+const GENTLE: f64 = 0.003;
+const STEEP: f64 = 0.035;
+const SLOPE_WINDOW: f64 = 40.0;
+const FLAT_WIDER: f64 = 1.25;
+const STEEP_NARROWER: f64 = 0.65;
+const FLAT_DEEPER: f64 = 1.15;
+const STEEP_SHALLOWER: f64 = 0.7;
+/// Pools and riffles: meters from one pool to the next, and how much deeper a pool is (and a
+/// riffle shallower) and how much narrower (and a riffle wider), as shares.
+const POOL_WAVE: f64 = 48.0;
+const POOL_DEEPER: f64 = 0.45;
+const POOL_NARROWER: f64 = 0.12;
+/// Each stream's own character, from its seed: up to this much wider and shallower, or
+/// narrower and deeper.
+const CHARACTER_WIDTH: f64 = 0.3;
+const CHARACTER_DEPTH: f64 = 0.25;
+/// The shallowest a stream's middle ever is.
+const SHALLOWEST: f64 = 0.3;
+/// A fall is where the water drops more than this many meters from one point of its course to
+/// the next ([`STEP`] apart); its sheet is this many times as wide as the stream.
+const FALL_STEP: f64 = 1.2;
+const FALL_SPREADS: f64 = 1.25;
+/// The pool a fall digs at its foot: how far it reaches downstream per meter of fall (and its
+/// least and most, in meters), how much wider it makes the stream, and how much deeper per meter
+/// of fall, up to the most.
+const PLUNGE_PER_METER: f64 = 0.9;
+const PLUNGE_REACH: (f64, f64) = (8.0, 24.0);
+const PLUNGE_WIDER: f64 = 0.7;
+const PLUNGE_DEEPER: f64 = 0.12;
+const PLUNGE_DEEPEST: f64 = 2.5;
 /// Over its first this many meters a stream comes out of the ground: from a trickle
 /// `SPRING_WIDTH` meters wide to its own width.
 const SPRING_RUN: f64 = 120.0;
 const SPRING_WIDTH: f64 = 0.35;
 /// The narrowest a stream's water ever is, half across: past a cell's diagonal of a level 0
-/// tile (2 m), so the tile has a vertex under the water and the ground it draws there is the
+/// tile (1 m), so the tile has a vertex under the water and the ground it draws there is the
 /// true ground, the one plants, feet and the water's caustics go by.
-pub const NARROWEST_SHOWN: f64 = 3.0;
+pub const NARROWEST_SHOWN: f64 = 1.2;
 /// How much a bank wanders in and out, as a share of the half width, at two lengths in meters.
 const BANK_WOBBLE: [(f64, f64); 3] = [(150.0, 0.3), (45.0, 0.24), (14.0, 0.12)];
 /// How far a stream's water lies under the ground beside it.
@@ -54,6 +87,10 @@ const FILL_MOST: f64 = 0.5;
 /// Height of the lip at the water's edge, and how far it takes to rise.
 const LIP: f64 = 0.35;
 const LIP_RUN: f64 = 2.5;
+/// Under the water by its edge the bed slopes like the lip, meters down per meter in, and gives
+/// way to the bowl between these meters from the edge.
+const EDGE_SLOPE: f64 = 0.3;
+const EDGE_SHELF: (f64, f64) = (1.5, 3.5);
 /// How a course finds the valley's floor: points this far apart, looking this far to each side
 /// in these steps, a meter of height worth this many meters of moving, this many times.
 const VALLEY_STEP: f64 = 10.0;
@@ -72,10 +109,11 @@ const MOUTH_DEPTH: f64 = -1.2;
 /// A stream widens into its mouth over its last this many meters, to this many times as wide.
 const ESTUARY_LENGTH: f64 = 180.0;
 const ESTUARY_WIDENS: f64 = 1.7;
-/// Depth in the middle of a stream: a brook is waist deep, a river deep enough to swim.
-const DEEP_FROM: f64 = 0.95;
-const DEEP_PER_METER: f64 = 0.3;
-const DEEPEST: f64 = 3.0;
+/// Depth in the middle of a stream, by its half width: a brook knee deep, a river deep enough
+/// to swim, before the slope, the pools and its character.
+const DEEP_FROM: f64 = 0.45;
+const DEEP_PER_METER: f64 = 0.24;
+const DEEPEST: f64 = 4.5;
 /// Over its last this many meters a stream into the sea comes down to the sea's level.
 const MOUTH_SINKS: f64 = 260.0;
 /// Over its last this many meters a mouth's channel rises to the sea floor.
@@ -195,7 +233,13 @@ fn bank(d: f64, half: f64, level: f64, depth: f64, ground: f64, reach: f64) -> f
     if d < half {
         // A wide floor and sloping banks.
         let t = d / half;
-        return level - depth * (1.0 - t * t * t);
+        let bowl = level - depth * (1.0 - t * t * t);
+        // By the shore, a shelf as steep as the lip outside it: the ground is near a straight
+        // line across the water's edge, so the tiles' triangles cut it where it really is. A
+        // steep bowl against a gentle lip put the edge by the outer vertex of every cell, a
+        // staircase along the grid.
+        let shelf = level - EDGE_SLOPE * (half - d);
+        return shelf + (bowl - shelf) * smoothstep(EDGE_SHELF.0, EDGE_SHELF.1, half - d);
     }
     let out = d - half;
     // Down by the sea the water has no lip to hold it, and the bank never rises out of the sea.
@@ -522,7 +566,9 @@ impl Hydrology {
                     let below = main
                         .iter()
                         .min_by(|a, b| {
-                            a.at.truncate_xz().distance(last.truncate_xz()).total_cmp(&b.at.truncate_xz().distance(last.truncate_xz()))
+                            a.at.truncate_xz()
+                                .distance(last.truncate_xz())
+                                .total_cmp(&b.at.truncate_xz().distance(last.truncate_xz()))
                         })
                         .map_or(last.y, |q| q.at.y);
                     let drop = last.y - below;
@@ -579,12 +625,20 @@ impl Hydrology {
             a + (b - a) * smoothstep(0.0, 1.0, t)
         };
         let length: f64 = line.windows(2).map(|w| w[0].distance(w[1])).sum::<f64>().max(1e-6);
+        // How the ground falls along it, to wind wide on the flat and little down a slope.
+        let line_grounds: Vec<f64> = line.iter().map(|p| ground(*p)).collect();
+        let reach = (SLOPE_WINDOW / VALLEY_STEP).round().max(1.0) as usize;
+        let flat_at = |i: usize| {
+            let (a, b) = (i.saturating_sub(reach), (i + reach).min(line.len() - 1));
+            let run = line[a].distance(line[b]).max(1.0);
+            1.0 - smoothstep(GENTLE, STEEP, ((line_grounds[a] - line_grounds[b]) / run).abs())
+        };
         let mut along = 0.0;
         let mut bent = line.clone();
         for i in 1..line.len().saturating_sub(1) {
             along += line[i].distance(line[i - 1]);
             let dir = (line[i + 1] - line[i - 1]).normalize_or_zero();
-            let half = half_at(along / length);
+            let half = half_at(along / length) * (0.5 + 0.9 * flat_at(i));
             let side: f64 = MEANDERS
                 .iter()
                 .zip(0u64..)
@@ -650,16 +704,63 @@ impl Hydrology {
         let mouth = if matches!(end, StreamEnd::Sea) { at.get(levels.len().saturating_sub(1)).copied() } else { None };
         let spring = cap.is_none();
         let end_at = at.get(levels.len().saturating_sub(1)).copied().unwrap_or(0.0);
+        // Its own character: wider and shallower, or narrower and deeper, all along.
+        let character = (hash(0, 0, seed ^ 0xC4A2_A27E) >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0;
+        // How steeply the water falls at each point, over a few dozen meters each way.
+        let window = (SLOPE_WINDOW / STEP).round().max(1.0) as usize;
+        let steep_at = |i: usize| {
+            let (a, b) = (i.saturating_sub(window), (i + window).min(levels.len().saturating_sub(1)));
+            let run = (at[b] - at[a]).max(1.0);
+            smoothstep(GENTLE, STEEP, (levels[a] - levels[b]).abs() / run)
+        };
+        // Falls: where the water drops more than `FALL_STEP` from one point to the next. Each
+        // sheet is a little wider than the stream, and digs a plunge pool at its foot.
+        let n = levels.len();
+        let mut sheet = vec![false; n];
+        let mut plunge = vec![(0.0f64, 0.0f64); n];
+        let (mut height, mut since) = (0.0f64, f64::MAX);
+        for i in 1..n {
+            let drop = levels[i - 1] - levels[i];
+            if drop > FALL_STEP {
+                sheet[i - 1] = true;
+                sheet[i] = true;
+                height += drop;
+                since = 0.0;
+                continue;
+            }
+            since += at[i] - at[i - 1];
+            if height > 0.0 {
+                let share = 1.0 - since / (height * PLUNGE_PER_METER).clamp(PLUNGE_REACH.0, PLUNGE_REACH.1);
+                if share <= 0.0 {
+                    height = 0.0;
+                } else {
+                    plunge[i] = (smoothstep(0.0, 1.0, share), height);
+                }
+            }
+        }
         let points: Vec<StreamPoint> = fine
             .iter()
             .zip(&at)
             .zip(&levels)
             .zip(&grounds)
-            .map(|(((p, s), &level), &under)| {
+            .enumerate()
+            .map(|(i, (((p, s), &level), &under))| {
                 let mut half = half_at(s / total);
                 for (k, &(wave, share)) in BANK_WOBBLE.iter().enumerate() {
                     half *= 1.0 + value(s / wave, 9.1 + k as f64 * 4.7, seed.wrapping_add(17 + k as u64)) * share;
                 }
+                let steep = steep_at(i);
+                // Pools, deep and narrow, between riffles, shallow and wide.
+                let pool = value(s / POOL_WAVE, 2.7, seed.wrapping_add(31));
+                half *= (FLAT_WIDER + (STEEP_NARROWER - FLAT_WIDER) * steep)
+                    * (1.0 - POOL_NARROWER * pool)
+                    * (1.0 + CHARACTER_WIDTH * character);
+                half = half.min(WIDEST);
+                let (pooled, fell) = plunge[i];
+                if sheet[i] {
+                    half *= FALL_SPREADS;
+                }
+                half *= 1.0 + PLUNGE_WIDER * pooled;
                 if spring {
                     let t = smoothstep(0.0, SPRING_RUN, *s);
                     half = SPRING_WIDTH + (half - SPRING_WIDTH) * t;
@@ -668,7 +769,11 @@ impl Hydrology {
                 if let Some(mouth) = mouth {
                     half *= 1.0 + (ESTUARY_WIDENS - 1.0) * smoothstep(mouth - ESTUARY_LENGTH, mouth, *s).powf(1.6);
                 }
-                let mut depth = (DEEP_FROM + DEEP_PER_METER * half).min(DEEPEST);
+                let mut depth = (DEEP_FROM + DEEP_PER_METER * half)
+                    * (FLAT_DEEPER + (STEEP_SHALLOWER - FLAT_DEEPER) * steep)
+                    * (1.0 + POOL_DEEPER * pool)
+                    * (1.0 - CHARACTER_DEPTH * character);
+                depth = depth.clamp(SHALLOWEST, DEEPEST) + pooled * (fell * PLUNGE_DEEPER).min(PLUNGE_DEEPEST);
                 if mouth.is_some() {
                     // Past the beach the channel shoals onto the sea floor instead of ending in
                     // a step, which shows through the sea as a dark slab.

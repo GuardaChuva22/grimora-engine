@@ -29,6 +29,8 @@ pub struct JointKey {
     pub turn: Option<Vec3>,
     /// Degrees around its own bone, after `aim`.
     pub twist: f32,
+    /// Metres moved from where it rests, in its parent's space: a body that sinks to lie down.
+    pub shift: Option<Vec3>,
 }
 
 impl JointKey {
@@ -38,6 +40,7 @@ impl JointKey {
             aim: self.aim.map(|a| Vec3::new(-a.x, a.y, a.z)),
             turn: self.turn.map(|t| Vec3::new(t.x, -t.y, -t.z)),
             twist: -self.twist,
+            shift: self.shift.map(|s| Vec3::new(-s.x, s.y, s.z)),
         }
     }
 }
@@ -133,15 +136,25 @@ impl RestRig {
         let joints = skeleton.joints.len();
         // Each key says where each joint it moves is, in the model's space.
         let mut used = vec![false; joints];
+        let mut shifted = vec![false; joints];
         let mut keys: Vec<(f32, Vec<Quat>)> = Vec::new();
+        let mut shifts: Vec<(f32, Vec<Vec3>)> = Vec::new();
         for (time, poses) in &clip.keys {
             let mut rotations = self.rotations.clone();
+            let mut moved = vec![Vec3::ZERO; joints];
             for pose in poses {
                 let Some(pose) = file.poses.get(pose) else {
                     log::warn!("clip {name}: no pose called {pose:?}");
                     continue;
                 };
                 for (joint, key) in pose {
+                    if let (Some(shift), Some(index)) = (key.shift, skeleton.joint(joint)) {
+                        moved[index] = shift;
+                        shifted[index] = true;
+                    }
+                    if key.aim.is_none() && key.turn.is_none() && key.shift.is_some() {
+                        continue;
+                    }
                     self.place(skeleton, joint, *key, &mut rotations, &mut used, name);
                     if let Some(side) = joint.strip_suffix(".L") {
                         let other = format!("{side}.R");
@@ -152,6 +165,7 @@ impl RestRig {
                 }
             }
             keys.push((*time, rotations));
+            shifts.push((*time, moved));
         }
 
         let duration = clip.duration.max(1.0 / KEY_FPS);
@@ -177,6 +191,25 @@ impl RestRig {
                 interpolation: Interpolation::Linear,
                 times: times.clone(),
                 keys: Keyframes::Rotation(rotations),
+            });
+        }
+        for joint in (0..joints).filter(|&joint| shifted[joint]) {
+            let rest = skeleton.joints[joint].rest.translation;
+            let at = |time: f32| -> Vec3 {
+                let next = shifts.iter().position(|(at, _)| *at > time);
+                let (from, to) = match next {
+                    Some(0) => return shifts[0].1[joint],
+                    Some(next) => (next - 1, next),
+                    None => return shifts[shifts.len() - 1].1[joint],
+                };
+                let t = (time - shifts[from].0) / (shifts[to].0 - shifts[from].0).max(1e-4);
+                shifts[from].1[joint].lerp(shifts[to].1[joint], t.clamp(0.0, 1.0))
+            };
+            channels.push(Channel {
+                joint,
+                interpolation: Interpolation::Linear,
+                times: times.clone(),
+                keys: Keyframes::Translation(times.iter().map(|&time| rest + at(time)).collect()),
             });
         }
         let events = clip.events.iter().map(|(time, name)| ClipEvent { time: *time, name: name.clone() }).collect();

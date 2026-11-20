@@ -79,9 +79,29 @@ pub struct PlantDesc {
     /// Lies only at the foot of the highland's cliffs, as fallen boulders do. Nothing grows on
     /// the faces and ledges themselves.
     pub cliff_foot: bool,
+    /// Grows on the sea floor instead of on land, this many meters under the sea,
+    /// `(shallowest, deepest)`: corals, seaweed, sunken rocks. Biomes, `above` and `water`
+    /// then don't count.
+    pub depth: Option<(f64, f64)>,
+    /// How far it sways: meters at one meter up the model, growing with the square of the
+    /// height. On land the wind does it; under the sea (`depth`) the swell does, always.
+    pub sway: f32,
     /// Bumps into the player when near: a model's `*_COL` node does it anyway, and this gives
     /// any other mesh its convex hull.
     pub solid: bool,
+    /// A thinner copy that goes on farther, so the ground away from the camera isn't bare: see
+    /// [`FarDesc`].
+    pub far: Option<FarDesc>,
+}
+
+/// The far, thin part of a plant: `share` of its copies are drawn out to `reach` meters, and
+/// the rest only out to the plant's own reach. Each part dithers away before its own reach, so
+/// the plant thins with distance and nothing pops. On loading, it becomes a plant of its own,
+/// named `<name>~far`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct FarDesc {
+    pub reach: f64,
+    pub share: f64,
 }
 
 impl Default for PlantDesc {
@@ -109,7 +129,10 @@ impl Default for PlantDesc {
             patch_size: 40.0,
             coast: None,
             cliff_foot: false,
+            depth: None,
+            sway: 0.0,
             solid: false,
+            far: None,
         }
     }
 }
@@ -218,7 +241,25 @@ impl LifeBook {
         for pond in &mut book.pond_fauna {
             pond.species = dir.join(&pond.species);
         }
+        book.split_far();
         Ok(book)
+    }
+
+    /// Makes each plant's [`FarDesc`] a plant of its own, with its share of the copies.
+    fn split_far(&mut self) {
+        let mut far_ones = Vec::new();
+        for plant in &mut self.plants {
+            let Some(far) = plant.far.take() else { continue };
+            let share = far.share.clamp(0.0, 1.0);
+            far_ones.push(PlantDesc {
+                name: format!("{}~far", plant.name),
+                density: plant.density * share,
+                reach: far.reach.max(plant.reach),
+                ..plant.clone()
+            });
+            plant.density *= 1.0 - share;
+        }
+        self.plants.extend(far_ones);
     }
 }
 
@@ -319,6 +360,11 @@ fn unit(rng: &mut Rng) -> f64 {
 }
 
 /// The copies of a plant in one of its cells: the same for the same seed, in any order.
+/// A plant of the sea floor may be this far inland by the coarse field of the coast (its depth
+/// is what keeps it under the sea), and keeps this far from fresh water.
+const SEA_PLANT_INLAND: f64 = 30.0;
+const SEA_PLANT_FRESH: f64 = 8.0;
+
 pub fn place_plants(relief: &Relief, book: &LifeBook, key: FloraKey) -> Vec<PlantSpot> {
     let Some(plant) = book.plants.get(key.plant as usize) else { return Vec::new() };
     let seed = path_seed(&[relief.seed(), name_hash("flora"), name_hash(&plant.name), key.x as u64, key.z as u64]);
@@ -348,15 +394,30 @@ pub fn place_plants(relief: &Relief, book: &LifeBook, key: FloraKey) -> Vec<Plan
             let n = value(p.x / plant.patch_size, p.y / plant.patch_size, patch_seed) * 0.5 + 0.5;
             keep *= 1.0 - plant.patches + plant.patches * smoothstep(0.45, 0.65, n);
         }
-        let Some(by_water) = plant.water.at(water.fresh_distance(p.x, p.y)) else { continue };
+        let fresh = water.fresh_distance(p.x, p.y);
+        let by_water = match plant.depth {
+            Some(_) => most,
+            None => match plant.water.at(fresh) {
+                Some(share) => share,
+                None => continue,
+            },
+        };
         keep *= by_water / most;
         let inland = water.coast_distance(p.x, p.y);
-        if chance >= keep || inland <= 0.0 || plant.coast.is_some_and(|(near, far)| inland < near || inland > far) {
+        if chance >= keep {
+            continue;
+        }
+        if plant.depth.is_some() {
+            // In the sea, and out of the channels the streams cut down to it.
+            if inland > SEA_PLANT_INLAND || fresh < SEA_PLANT_FRESH {
+                continue;
+            }
+        } else if inland <= 0.0 || plant.coast.is_some_and(|(near, far)| inland < near || inland > far) {
             continue;
         }
         let biome = relief.map().sample_map(p / METERS_PER_UNIT).biome;
         let biome_id = biome.map_or("", |b| b.id.as_str());
-        if !plant.biomes.is_empty() && !plant.biomes.iter().any(|b| b == biome_id) {
+        if plant.depth.is_none() && !plant.biomes.is_empty() && !plant.biomes.iter().any(|b| b == biome_id) {
             continue;
         }
         let cliff = relief.cliff_at(p.x, p.y);
@@ -364,7 +425,11 @@ pub fn place_plants(relief: &Relief, book: &LifeBook, key: FloraKey) -> Vec<Plan
             continue;
         }
         let ground = relief.height_at(p.x, p.y);
-        if ground < plant.above || ground > plant.below {
+        let grows = match plant.depth {
+            Some((shallowest, deepest)) => ground <= -shallowest && ground >= -deepest,
+            None => ground >= plant.above && ground <= plant.below,
+        };
+        if !grows {
             continue;
         }
         if plant.flat > 0.0 {

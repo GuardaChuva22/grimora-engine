@@ -49,7 +49,8 @@ SceneDesc(
     ),
 
     water_sounds: (
-        river: "../sounds/river.wav",
+        river: "../sounds/river_small.wav",
+        river_big: "../sounds/river_big.wav",
         underwater: "../sounds/underwater.wav",
         splash: ["../sounds/splash_1.wav", "../sounds/splash_2.wav"],
         splash_effect: "../effects/splash.ron",

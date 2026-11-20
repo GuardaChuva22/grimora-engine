@@ -57,6 +57,9 @@ Não usam `PoseClip`. Escolha a técnica pela quantidade:
 | Peixes, arraia, água-viva | Onda calculada (`SwimDesc::wave`, `SwimPoses`), tabela por espécie | `assets/fauna/*.ron` |
 | Aves | `Animator` próprio, com chaves `Gaivota_keys.ron` | `<modelo>_keys.ron` |
 | Caranguejo | Patas por IK (`step_feet`, `pose_legs`), braços em `Caranguejo_keys.ron` | `grimora/src/fauna/crab.rs` |
+| Gado | Clipes com as pernas resolvidas fora do jogo, quadro a quadro | `tools/gen_bovino_keys.py` → `Bovino_keys.ron` |
+
+Gado (2026-11-19): o IK em tempo real entortou as pernas ("patas de lado, tortas, macabro"). O rig tem pernas retas e sem escápula: a perna só alcança o chão logo abaixo do quadril, então a passada precisa do corpo descendo (`shift` no `Root`) e o joelho dobra só no plano do corpo. Meça no script (centímetros que faltam à perna, altura da boca) antes de capturar.
 
 Em `_keys.ron`, `aim` é a direção do osso no espaço do modelo, `.L` espelha `.R`, e cada pose vira o clipe `pose:<nome>`. Aprove as poses com `animation: "pose:wings_top"` numa cena temporária. Para bichos, a mesma ideia de peso se aplica: a asa puxa para baixo com força e sobe solta, e a onda corre do corpo para a cauda com a amplitude crescendo.
 

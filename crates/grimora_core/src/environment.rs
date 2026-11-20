@@ -23,6 +23,16 @@ pub struct Environment {
     /// Set each frame from the world's water.
     #[serde(skip)]
     pub water: crate::water::WaterFrame,
+    /// The body a blazing aura burns around, set each frame: capsules along its bones
+    /// (two ends and a radius), most important first.
+    #[serde(skip)]
+    pub fire_body: Vec<(glam::Vec3, glam::Vec3, f32)>,
+    /// The burning body's feet, which its fire's turbulence rides with, and where its
+    /// flames trail to as it moves (m), set each frame.
+    #[serde(skip)]
+    pub fire_anchor: glam::Vec3,
+    #[serde(skip)]
+    pub fire_trail: glam::Vec3,
     /// Set each frame from the world's origin: what local position zero is in the world, for
     /// the patterns drawn fixed in it.
     #[serde(skip)]
@@ -102,6 +112,12 @@ pub struct Fog {
     /// How much the fog glows when looking towards the sun.
     pub sun_scatter: f32,
     pub mist: Mist,
+    /// The air itself, past the fog: how far a person sees along the ground, in meters, before
+    /// everything has melted into the sky's haze. Near things stay clear and the haze grows
+    /// faster with distance, as in a painting. 0 (the default) leaves it out.
+    pub air: f32,
+    /// How high the air thins to a third, in meters: a mountain's top is clearer than its foot.
+    pub air_height: f32,
 }
 
 /// Banks of mist lying low in the world, thick in patches, that drift with the wind.
@@ -196,11 +212,35 @@ pub struct Wind {
     pub direction: glam::Vec2,
     /// 1 is a light breeze; 0 is still air.
     pub strength: f32,
-    /// How hard it blows at the moment, as a multiple of `strength`. A day cycle sets this.
+    /// How hard it blows at the moment, as a multiple of `strength`. The wind (`WindSim`) sets this.
     #[serde(skip)]
     pub scale: f32,
-    /// How fast the gusts come.
+    /// How fast the plants flutter.
     pub speed: f32,
+    /// Degrees the wind wanders either side of `direction` over the day (twice that in a storm).
+    pub wander: f32,
+    /// How gusty it is, as a multiple of the weather's own.
+    pub gusty: f32,
+    /// The weather's wind as a multiple of the scene's; the day cycle sets it.
+    #[serde(skip)]
+    pub weather: f32,
+    /// Which way it blows now (unit, x and z), and how hard in m/s, before gusts.
+    #[serde(skip)]
+    pub blowing: glam::Vec2,
+    #[serde(skip)]
+    pub speed_ms: f32,
+    /// How much gusts swing it: see `wind::gust_at`.
+    #[serde(skip)]
+    pub gustiness: f32,
+    /// Where the gust pattern is, in local space (`wind::gust_pattern`).
+    #[serde(skip)]
+    pub gust_shift: glam::Vec2,
+    /// How far the clouds and the mist have drifted, in seconds of the scene's wind.
+    #[serde(skip)]
+    pub aloft: glam::Vec2,
+    /// The plants' flutter clock.
+    #[serde(skip)]
+    pub flutter: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -231,6 +271,40 @@ pub struct Post {
     pub sharpen: f32,
     /// Color added to the darkest parts of the image, so blacks lean to a hue.
     pub shadow_tint: Vec3,
+    /// Shafts of light streaming from the sun (and, fainter, the moon) past what stands in front
+    /// of it. 0 leaves them out.
+    pub rays: f32,
+    /// How much what is far away is laid on in brush strokes, from 0 to 1, between `paint_from`
+    /// and `paint_to` meters from the camera.
+    pub paint: f32,
+    pub paint_from: f32,
+    pub paint_to: f32,
+}
+
+/// A room of a house in the world: what is inside it is indoors, lit only by its own lights
+/// and dimly by the sky. The renderer uses the nearest ones.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RoomBox {
+    /// The middle of its floor (local).
+    pub center: Vec3,
+    /// The house's +X in world x, z.
+    pub axis: glam::Vec2,
+    /// Half its size along the house's +X and +Z.
+    pub half: glam::Vec2,
+    /// The world y of the walls' top.
+    pub walls: f32,
+}
+
+impl RoomBox {
+    /// Whether `p` is inside it, under the walls' top.
+    pub fn contains(&self, p: Vec3) -> bool {
+        let d = p - self.center;
+        let flat = glam::Vec2::new(d.x, d.z);
+        d.y > -0.8
+            && p.y < self.walls
+            && flat.dot(self.axis).abs() < self.half.x + 0.12
+            && flat.dot(glam::Vec2::new(-self.axis.y, self.axis.x)).abs() < self.half.y + 0.12
+    }
 }
 
 /// A local light such as a torch or a glowing crystal.
@@ -268,6 +342,8 @@ impl Default for Fog {
             base_height: 0.0,
             sun_scatter: 0.6,
             mist: Mist::default(),
+            air: 0.0,
+            air_height: 1500.0,
         }
     }
 }
@@ -325,7 +401,21 @@ impl Default for SurfaceLook {
 
 impl Default for Wind {
     fn default() -> Self {
-        Self { direction: glam::Vec2::new(1.0, 0.3), strength: 1.0, scale: 1.0, speed: 1.6 }
+        Self {
+            direction: glam::Vec2::new(1.0, 0.3),
+            strength: 1.0,
+            scale: 1.0,
+            speed: 1.6,
+            wander: 50.0,
+            gusty: 1.0,
+            weather: 1.0,
+            blowing: glam::Vec2::new(1.0, 0.3).normalize(),
+            speed_ms: 2.5,
+            gustiness: 0.3,
+            gust_shift: glam::Vec2::ZERO,
+            aloft: glam::Vec2::ZERO,
+            flutter: 0.0,
+        }
     }
 }
 
@@ -347,6 +437,10 @@ impl Default for Post {
             vivid: 0.0,
             sharpen: 0.0,
             shadow_tint: Vec3::ZERO,
+            rays: 0.0,
+            paint: 0.0,
+            paint_from: 120.0,
+            paint_to: 1500.0,
         }
     }
 }

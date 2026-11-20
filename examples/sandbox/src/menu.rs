@@ -53,18 +53,20 @@ const CONTROL_ROW: Vec2 = Vec2::new(390.0, 28.0);
 const CONTROL_TEXT: f32 = 16.0;
 const CONTROL_GAP: f32 = 12.0;
 /// What the player can rebind, with the names shown.
-const CONTROLS: [(&str, &str); 19] = [
+const CONTROLS: [(&str, &str); 21] = [
     (actions::MOVE_FORWARD, "Andar para frente"),
     (actions::MOVE_BACK, "Andar para trás"),
     (actions::MOVE_LEFT, "Andar à esquerda"),
     (actions::MOVE_RIGHT, "Andar à direita"),
     (actions::RUN, "Correr"),
+    (actions::SLOW_WALK, "Andar devagar"),
     (actions::JUMP, "Pular"),
     (actions::INTERACT, "Usar"),
     (actions::ATTACK, "Golpear"),
     (actions::ROLL, "Rolar"),
     (actions::LOCK_ON, "Travar alvo"),
     (actions::GUARD, "Defender"),
+    crate::leap::CONTROL_NAME,
     crate::spells::CONTROL_NAMES[0],
     crate::spells::CONTROL_NAMES[1],
     crate::guns::CONTROL_NAMES[0],
@@ -89,8 +91,9 @@ const SAVE_HINT: Keys = ("ENTER  SALVAR    DEL  APAGAR    ESC  VOLTAR", "A  SALV
 const LOAD_HINT: Keys = ("ENTER  CARREGAR    DEL  APAGAR    ESC  VOLTAR", "A  CARREGAR    X  APAGAR    B  VOLTAR");
 const SURE_HINT: Keys = ("ENTER  CONFIRMAR    ESC  CANCELAR", "A  CONFIRMAR    B  CANCELAR");
 /// What's shown in the pause, on the right. The way to walk is its own row, first.
-const PLAY_KEYS: [(&str, &str); 13] = [
+const PLAY_KEYS: [(&str, &str); 14] = [
     (actions::RUN, "Correr"),
+    (actions::SLOW_WALK, "Andar devagar"),
     (actions::JUMP, "Pular"),
     (actions::ROLL, "Rolar"),
     (actions::INTERACT, "Usar"),
@@ -235,6 +238,7 @@ impl Sandbox {
         crate::bag::add_controls(controls);
         crate::spells::add_controls(controls);
         crate::guns::add_controls(controls);
+        crate::leap::add_controls(controls);
         self.menu.default_controls = controls.clone();
         let config = ctx.config();
         let automated = config.screenshot.is_some() || config.frames.is_some();
@@ -277,6 +281,9 @@ impl Sandbox {
             }
             Some(gun) if gun.starts_with("gun:") => {
                 self.guns.scheduled = Some((gun["gun:".len()..].to_owned(), warmup));
+            }
+            Some(aura) if aura.starts_with("aura:") => {
+                self.debug.scheduled_aura = Some((aura["aura:".len()..].to_owned(), 30));
             }
             Some(spell) if spell.starts_with("spell:") => {
                 self.spells.scheduled = Some((spell["spell:".len()..].to_owned(), warmup));
@@ -1251,7 +1258,7 @@ mod tests {
         frames(&mut game, &mut ctx, 3);
         let avatar = game.avatar;
         assert!(ctx.world.get::<Fighter>(avatar).unwrap().busy());
-        assert_eq!(ctx.world.get::<Animator>(avatar).unwrap().current(), Some("sword_1"));
+        assert_eq!(ctx.world.get::<Animator>(avatar).unwrap().current(), Some("medium_1"));
 
         press(&mut game, &mut ctx, KeyCode::Escape);
         assert!(ctx.is_paused());
@@ -1345,7 +1352,7 @@ mod tests {
         }
         assert!(game.dead_for.is_some(), "still alive after {waited} frames");
         frames(&mut game, &mut ctx, 1);
-        assert_eq!(ctx.world.get::<Animator>(avatar).unwrap().current(), Some("die"));
+        assert!(ctx.world.is_ragdoll(avatar), "the body falls as a ragdoll");
         assert!(game.player.as_ref().unwrap().locked);
 
         // Dead, it can't swing or save, and the enemy loses interest.
@@ -1364,7 +1371,7 @@ mod tests {
         let health = ctx.world.get::<Health>(avatar).unwrap();
         assert_eq!(health.current, health.max);
         drop(health);
-        assert_ne!(ctx.world.get::<Animator>(avatar).unwrap().current(), Some("die"));
+        assert!(!ctx.world.is_ragdoll(avatar));
         assert!(!game.player.as_ref().unwrap().locked);
         let spawn = ctx.world.player_spawn.unwrap().position;
         assert!(game.player.as_ref().unwrap().body.position.distance(spawn) < 0.5);

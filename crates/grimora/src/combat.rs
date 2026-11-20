@@ -20,6 +20,10 @@ use crate::world::{Renderable, despawn};
 
 /// Seconds a flinch keeps a character from acting.
 const STAGGER: f32 = 0.35;
+/// A blow that takes more than this share of the health may knock its target down, more likely
+/// the harder it is, up to `KNOCK_MOST`.
+const KNOCK_FROM: f32 = 0.2;
+const KNOCK_MOST: f32 = 0.7;
 /// Speed in meters per second a blow gives the character it hits.
 const KNOCKBACK: f32 = 2.5;
 /// Blows don't reach things further above or below than this, in meters.
@@ -110,6 +114,16 @@ impl Health {
     /// Still flinching from a blow, and unable to act.
     pub fn staggered(&self) -> bool {
         self.stagger > 0.0
+    }
+
+    /// Keeps it staggered for at least `seconds` more: knocked down.
+    pub(crate) fn hold_staggered(&mut self, seconds: f32) {
+        self.stagger = self.stagger.max(seconds);
+    }
+
+    /// Staggered for exactly `seconds` more: getting up.
+    pub(crate) fn set_staggered(&mut self, seconds: f32) {
+        self.stagger = seconds;
     }
 
     /// Loses this much without flinching: a burn, not a blow. It won't be what kills: `false`
@@ -506,6 +520,15 @@ const SMALL_THINGS_REACH: f32 = 4.0;
 /// The share of a blow that gets through any armor.
 const LEAST_OF_A_BLOW: f32 = 0.2;
 
+/// How hard a killing blow throws the body, in N·s: a little up, mostly along it.
+fn blow_push(direction: Vec3, damage: f32) -> Vec3 {
+    (direction + Vec3::Y * 0.3).normalize_or_zero() * (BLOW_PUSH + damage * BLOW_PUSH_PER_DAMAGE).min(BLOW_PUSH_MOST)
+}
+
+const BLOW_PUSH: f32 = 140.0;
+const BLOW_PUSH_PER_DAMAGE: f32 = 3.0;
+const BLOW_PUSH_MOST: f32 = 320.0;
+
 /// Clips run slowly for this many more seconds, while a hit lands.
 struct HitStop(f32);
 
@@ -516,6 +539,7 @@ pub(crate) fn components(desc: &CombatDesc) -> (Health, Option<Fighter>) {
 
 /// Full health and ready to act, with its capsule back. Its animation is up to the caller.
 pub(crate) fn revive(ecs: &mut hecs::World, entity: Entity, physics: &mut Physics) {
+    crate::ragdoll::remove_ragdoll(ecs, entity, physics);
     let query = ecs.query_one_mut::<(&mut Health, Option<&mut Fighter>, Option<&Agent>)>(entity);
     let Ok((health, fighter, agent)) = query else { return };
     health.current = health.max;
@@ -633,7 +657,9 @@ impl World {
                 self.ring(strike.attacker, target, contact, direction, events);
                 continue;
             }
-            let Some(killed) = self.damage(target, strike.damage, physics) else { continue };
+            let at = position + Vec3::Y * CHEST - direction * radius;
+            let push = crate::Push { at, impulse: blow_push(direction, strike.damage) };
+            let Some(killed) = self.damage_from(target, strike.damage, physics, Some(push)) else { continue };
             if !killed && let Some(agent) = self.get_mut::<Agent>(target) {
                 agent.push(direction * KNOCKBACK);
             }
@@ -655,6 +681,10 @@ impl World {
         self.strike_fauna_by(&mut |at, radius| {
             at.distance(origin) < SMALL_THINGS_REACH && sweep.touches_small(at, radius)
         });
+        // A big animal is felt like anyone else: the blade stops in it for a moment.
+        if self.fauna.struck_big && sweep.hit_stop > 0.0 && self.ecs.contains(sweep.attacker) {
+            let _ = self.ecs.insert_one(sweep.attacker, HitStop(sweep.hit_stop));
+        }
         let targets: Vec<(Entity, Vec3, Vec3)> = self
             .ecs
             .query::<(Entity, &Transform, &Health)>()
@@ -686,7 +716,13 @@ impl World {
                 self.ring(sweep.attacker, target, contact, direction, events);
                 continue;
             }
-            let Some(killed) = self.damage(target, sweep.damage, physics) else { continue };
+            // The blade carries the body the way it was cutting.
+            let cut = (sweep.to.1 - sweep.from.1).normalize_or_zero();
+            let push = crate::Push {
+                at: contact,
+                impulse: blow_push((direction + cut).normalize_or(direction), sweep.damage),
+            };
+            let Some(killed) = self.damage_from(target, sweep.damage, physics, Some(push)) else { continue };
             if !killed && let Some(agent) = self.get_mut::<Agent>(target) {
                 agent.push(direction * KNOCKBACK);
             }
@@ -841,7 +877,21 @@ impl World {
     /// spells can call this directly. Returns whether it died, or `None` if it
     /// can't be hurt, was already dead or is in the middle of a roll.
     pub fn damage(&mut self, target: Entity, amount: f32, physics: &mut Physics) -> Option<bool> {
+        self.damage_from(target, amount, physics, None)
+    }
+
+    /// Like [`World::damage`], with the push of what hit it: a body with the bones for it
+    /// dies as a ragdoll, thrown by `push`, and plays no `die` clip.
+    pub fn damage_from(
+        &mut self,
+        target: Entity,
+        amount: f32,
+        physics: &mut Physics,
+        push: Option<crate::Push>,
+    ) -> Option<bool> {
         let frozen = self.is_frozen(target);
+        let falls = self.can_ragdoll(target);
+        let lying = self.is_ragdoll(target);
         let (health, animator, agent, fighter, brain) = self
             .ecs
             .query_one_mut::<(
@@ -861,8 +911,14 @@ impl World {
             brain.alert(!health.is_dead());
         }
         let clip = if health.is_dead() { "die" } else { "hurt" };
-        // What's held in ice can't flinch.
-        let flinches = !(frozen && !health.is_dead());
+        // A hard blow may knock someone who walks off their feet.
+        let knocked = !health.is_dead() && !lying && !frozen && falls && agent.is_some() && push.is_some() && {
+            let chance = ((amount / health.max.max(1e-3) - KNOCK_FROM) * 2.0).clamp(0.0, KNOCK_MOST);
+            let seed = target.to_bits().get() ^ u64::from(health.current.to_bits()).rotate_left(21);
+            grimora_core::Rng::new(seed).range(0.0, 1.0) < chance
+        };
+        // What's held in ice can't flinch, and a ragdoll needs no clip to die.
+        let flinches = !(frozen && !health.is_dead()) && !(falls && health.is_dead()) && !knocked && !lying;
         let played = flinches
             && animator.is_some_and(|animator| {
                 let played = animator.replay_once(clip, FADE_IN);
@@ -875,6 +931,17 @@ impl World {
             if played {
                 health.stagger = STAGGER;
             }
+            if knocked {
+                self.knock_down(target, physics, push);
+            } else if lying {
+                if let Some(push) = push {
+                    self.start_ragdoll(target, physics, Some(push), false);
+                }
+            } else if let Some(push) = push
+                && !frozen
+            {
+                self.recoil(target, push);
+            }
             return Some(false);
         }
         if let Some(fighter) = fighter {
@@ -884,7 +951,9 @@ impl World {
             agent.stop();
             physics.set_enabled(agent.collider(), false);
         }
-        if !played {
+        if falls {
+            self.start_ragdoll(target, physics, push, frozen);
+        } else if !played {
             despawn(&mut self.ecs, target, physics);
         }
         Some(true)

@@ -108,6 +108,8 @@ const FALL_LOWEST: f32 = 1.5;
 /// A place where a river falls.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RiverFall {
+    /// Where it starts falling, on the water.
+    pub top: Vec3,
     /// Where it lands, on the water.
     pub foot: Vec3,
     pub height: f32,
@@ -139,7 +141,12 @@ pub fn river_falls(course: &[RiverPoint]) -> Vec<RiverFall> {
                 let height: f32 = course[start].position.y - course[i].position.y;
                 if height >= FALL_LOWEST {
                     let at = course[i];
-                    falls.push(RiverFall { foot: at.position, height, half_width: at.half_width });
+                    falls.push(RiverFall {
+                        top: course[start].position,
+                        foot: at.position,
+                        height,
+                        half_width: at.half_width,
+                    });
                 }
                 top = None;
             }

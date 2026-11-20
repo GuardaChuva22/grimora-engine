@@ -15,7 +15,9 @@
              rock: "../textures/rocha_laterita.png", tile: 1.8,
              // Under the streams and ponds: pebbles, and mud where they near the sea.
              bed: Some("../textures/leito_seixos.png"), mud: Some("../textures/lama_estuario.png")),
-    view: 16000.0,
+    // A person sees 5 or 6 km over the land; the air's haze (`fog.air` in world.ron) hides
+    // the rest, so nothing past this is drawn.
+    view: 7000.0,
     // The streams and ponds are found in the ground (grimora_world's hydro.rs); this is only
     // how they look. Pictures relative to this file; `look`s as in a scene's `rivers`. The
     // streams' colors are close to the sea's, so a mouth runs into it without a seam.

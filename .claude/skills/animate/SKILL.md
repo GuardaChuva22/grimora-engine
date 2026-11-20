@@ -6,7 +6,7 @@ description: >-
 
 # Animar bem no Grimora
 
-Meta (atualizada em 2026-11-04: o usuário quer amplitude e soltura de animação conceitual, sem precisar ser lento como soulslike; veja `references/learned.md`): golpes com o peso de Dark Souls e a velocidade de anime, feitos aqui, à mão e por procedimento. Mocap, Mixamo, pacotes de animação e geradores por texto estão fora: o usuário já recusou, não ofereça.
+Meta (atualizada em 2026-11-04: o usuário quer amplitude e soltura de animação conceitual, sem precisar ser lento como soulslike; veja `references/learned.md`): golpes com o peso de Dark Souls e a velocidade de anime, feitos aqui, à mão e por procedimento. Geradores por texto estão fora. Pacotes só quando o próprio usuário os trouxer: em 2026-11-11 ele trouxe os combos e o pulo do Quaternius, aplicados por `tools/import_quaternius_clips.py` (`light_*`, `medium_*`, `great_*`, `jump*`); não ofereça outros por conta própria.
 
 ## Teste verde não significa animação boa
 

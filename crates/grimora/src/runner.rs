@@ -308,6 +308,9 @@ impl Context {
         if let Some(weather) = self.config.weather {
             self.world.set_weather(weather);
         }
+        if let Some(hour) = self.config.start_time {
+            self.world.set_time_of_day(hour);
+        }
         self.audio.set_scene_sounds(&self.world.active_sounds());
         log::info!("Loaded save slot {slot:?}");
         Ok(file.game)
@@ -386,6 +389,9 @@ impl Context {
         if let Some(weather) = self.config.weather {
             self.world.set_weather(weather);
         }
+        if let Some(hour) = self.config.start_time {
+            self.world.set_time_of_day(hour);
+        }
         self.weather_audio.stop(&mut self.audio);
         self.audio.set_scene_sounds(&self.world.active_sounds());
         Ok(())
@@ -436,6 +442,7 @@ impl Context {
         self.menu_nav.update(&mut self.input, self.time.delta());
         if !self.is_paused() {
             self.world.update_floating(&mut self.physics, self.time.world_elapsed());
+            self.world.drive_ragdolls(&mut self.physics, self.time.world_delta());
             self.physics.step(self.time.world_delta());
             self.world.sync_bodies(&self.physics);
         }
@@ -455,8 +462,11 @@ impl Context {
             self.ui.clear();
         }
         if !self.is_paused() {
+            self.world.pose_ragdolls(&self.physics);
+            self.world.update_recoils(self.time.world_delta());
             self.world.update_animations(self.time.world_delta());
             self.world.update_attachments();
+            self.world.update_doors(&mut self.physics, self.time.world_delta());
             self.world.update_particles(self.time.world_delta(), self.camera.position);
             self.world.update_day(self.time.world_delta());
             self.world.update_fauna(&self.physics, self.camera.position, self.time.world_delta());
@@ -693,6 +703,7 @@ impl<G: Game> App<G> {
             time: self.ctx.time.world_elapsed(),
             ui: &self.ctx.ui,
             portraits: &portraits,
+            rooms: &world.room_boxes(),
         };
         let capture = self.ctx.screenshot.take();
         if let Some(image) = renderer.render(&frame, capture.is_some())? {

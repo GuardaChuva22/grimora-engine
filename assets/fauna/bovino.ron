@@ -1,0 +1,31 @@
+// Cattle: the herder's bull, cows and calves. They come with the village's pen (`add_herd` in
+// grimora/src/fauna/cattle.rs): always in the pen, used to people. Each one is shaped from
+// the model's shape keys and coats; walking, grazing and lying are worked out in code, hoof by hoof.
+SpeciesDesc(
+    name: "bovino",
+    description: "Gado do pastor, manso e acostumado com gente. Vive no curral. O touro só investe se alguém ferir o rebanho.",
+    life: Grazing,
+    model: "../models/animals/Bovino.glb",
+    forward: (0.0, 0.0, 1.0),
+    size: (1.0, 1.0),
+    shadow: true,
+    puff: "../effects/hoof_dust.ron",
+    // In game days: a calf now and then, while there's room.
+    cycle: (births: 0.04, lives: 4000.0, room: 1.4, newborn: 1.0, grows_in: 4000.0),
+    // The bull's horns, when it charges.
+    harm: (
+        damage: 24.0,
+        reach: 0.8,
+        every: 2.0,
+        staggers: true,
+        message: "O touro te chifrou",
+    ),
+    sounds: (
+        calls: ["../sounds/animals/moo_1.wav", "../sounds/animals/moo_2.wav", "../sounds/animals/moo_3.wav"],
+        harm: "../sounds/animals/horn_hit.wav",
+        death: "../sounds/animals/cow_death.wav",
+        dig: "../sounds/animals/hoof_scrape.wav",
+        facing: "../sounds/animals/snort.wav",
+        volume: 0.35,
+    ),
+)

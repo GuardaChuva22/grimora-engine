@@ -451,10 +451,10 @@ PLACES = [
     # A long gun slung with the muzzle up, flat on the back, resting on the shoulder blades and the
     # seat, and held by the barrel, near its end.
     Place("sling_r", "Slung", "chest", SLING_AT, f=musket_frame(SLING_LONG, SLING_TOP), elbow=(0.95, 0.1, -0.3), torso=(4, -8, -3), head=(-4, 14, 0), span=LONG_GUN, style="sling", lay=(SLING_AT, SLING_LONG, SLING_TOP)),
-    # Pistols with the muzzle down and the butt back, flat on the hip, at the right hand's reach.
-    Place("holster_r0", "Pistol", "hips", (0.225, 0.96, -0.03), f=gun_frame((0.06, -0.93, -0.35), (0.0, 0.35, -0.93)), elbow=(0.2, 0.0, 1.0), torso=(4, -8, -3), head=(10, -14, 0), span=GUN_SPAN, out=(0.05, 0.05, 0.02)),
-    Place("holster_r1", "Pistol", "hips", (0.215, 0.96, 0.085), f=gun_frame((0.06, -0.93, -0.35), (0.0, 0.35, -0.93)), elbow=(0.2, 0.0, 1.0), torso=(3, -14, -4), head=(8, -20, 0), span=GUN_SPAN, out=(0.05, 0.05, 0.02)),
-    Place("holster_l0", "Pistol", "hips", (-0.195, 1.02, -0.07), f=gun_frame((-0.04, -0.96, 0.28), (0.0, 0.28, 0.96)), elbow=(0.8, -0.2, -0.5), torso=(14, 28, 3), head=(14, 16, 0), span=GUN_SPAN, out=(0.0, 0.05, -0.06)),
+    # Pistols in the pouches of accessories/Coldre_Couro.glb (fitted to them): muzzle down and the
+    # butt back on the right hip, and butt forward on the left, for the right hand across the body.
+    Place("holster_r0", "Pistol", "hips", (0.176, 1.195, 0.103), f=gun_frame((0.1855, -0.9812, 0.0535), (0.0099, -0.0526, -0.9986)), elbow=(-0.3, 0.4, 0.9), torso=(10, 20, 5), head=(10, -14, 0), span=GUN_SPAN, out=(0.05, 0.05, 0.02)),
+    Place("holster_l0", "Pistol", "hips", (-0.177, 1.185, -0.089), f=gun_frame((-0.1855, -0.9812, 0.0535), (0.0099, 0.0526, 0.9986)), elbow=(0.5, 1.0, 0.0), torso=(8, 12, -3), head=(14, 16, 0), span=GUN_SPAN, out=(0.0, 0.05, -0.06)),
     # Flasks hang upright from the belt, in front and behind, out of the way of the blades.
     Place("pouch_f0", "Small", "hips", (0.09, 0.99, -0.15), (0.15, -0.3, 0.94), (0.15, 0.9, 0.35), elbow=(0.8, -0.25, 0.6), torso=(10, 8, 0), head=(18, -6, 0), span=SMALL, out=(0.04, 0.04, -0.05), style="pouch", lay=((0.09, 0.99, -0.1), (0.0, 1.0, 0.0), (1.0, 0.0, 0.0))),
     Place("pouch_f1", "Small", "hips", (-0.05, 0.99, -0.155), (0.1, -0.3, 0.95), (0.3, 0.9, 0.25), elbow=(0.8, -0.25, 0.5), torso=(12, 16, 2), head=(18, 8, 0), span=SMALL, out=(0.04, 0.04, -0.05), style="pouch", lay=((-0.05, 0.99, -0.1), (0.0, 1.0, 0.0), (1.0, 0.0, 0.0))),
@@ -475,9 +475,8 @@ BOOK_PLACES = [
 
 # The pistols again, as the barrel and the top of `gun_frame`.
 GUN_LAYS = {
-    "holster_r0": ((0.06, -0.93, -0.35), (0.0, 0.35, -0.93)),
-    "holster_r1": ((0.06, -0.93, -0.35), (0.0, 0.35, -0.93)),
-    "holster_l0": ((-0.04, -0.96, 0.28), (0.0, 0.28, 0.96)),
+    "holster_r0": ((0.1855, -0.9812, 0.0535), (0.0099, -0.0526, -0.9986)),
+    "holster_l0": ((-0.1855, -0.9812, 0.0535), (0.0099, 0.0526, 0.9986)),
 }
 
 
@@ -524,7 +523,8 @@ def draw_keys(place, end):
             Key(0.33, site, f, elbow, torso, head),
         ]
         if place.style == "hip":
-            along = f[:, 0] if place.family != "Pistol" else unit(0.5 * f[:, 0] - 0.87 * f[:, 1])
+            # A pistol comes straight up out of its holster, the way the barrel went in.
+            along = f[:, 0] if place.family != "Pistol" else unit(GUN_LAYS[place.id][0])
             # Straight out along itself for a moment, then round the outside of the hip.
             pulled = site - along * 0.2 + place.out * 0.4
             sweep = site - along * 0.28 + place.out * 2.0 + np.array([0.08, 0.1, -0.14])
@@ -563,6 +563,135 @@ def draw_keys(place, end):
     return keys
 
 
+# ---- pistols out of the holster
+
+# The pistol sits high and long in its holster, so it comes out in three parts: the hand reaches the
+# butt with the turn it will hold it with, slides the barrel straight up out of the leather (only
+# at the very end does it tip out), and swings it round to the front, turning relative to the
+# forearm so the wrist never twists on the way. Found by a search (`holster_plan` and every frame
+# measured: both strains, how short the arm is, and elbow and hand kept out of the trunk).
+# `times` are the grab, out of the holster, swung round, and done.
+HOLSTER_PLANS = {
+    "holster_r0": {"lift": 0.24, "lift_off": (0.12, 0.0, 0.05), "ahead": (0.111, 0.0, 0.05), "swing": (0.263, 1.044, -0.115), "bulge": (-0.077, 0.003, 0.044),
+                   "times": (0.3, 0.48, 0.66, 0.86), "tip": 45.0, "tip_toward": (0.0, 0.0, -1.0), "turn_by_swing": 1.0,
+                   "torso_grab": (15.0, 25.0, -10.0), "torso_lift": (10.943, 3.308, -10.892), "torso_swing": (-0.304, 1.37, -2.406),
+                   "head_grab": (10.0, -14.0, 0.0), "head_lift": (6.0, -8.0, 0.0)},
+    "holster_l0": {"lift": 0.24, "lift_off": (0.04, 0.0, -0.068), "ahead": (0.101, 0.021, -0.1), "swing": (0.348, 1.072, -0.198), "bulge": (-0.014, 0.069, -0.08),
+                   "times": (0.3, 0.48, 0.66, 0.86), "tip": 26.947, "tip_toward": (0.0, 0.0, -1.0), "turn_by_swing": 0.843,
+                   "torso_grab": (-7.235, -18.43, -15.0), "torso_lift": (-11.284, -17.848, -18.0), "torso_swing": (-2.33, 1.295, 0.994),
+                   "head_grab": (10.0, 14.0, 0.0), "head_lift": (6.0, 8.0, 0.0)},
+}
+
+
+def holster_tip(place, plan, u):
+    barrel = unit(GUN_LAYS[place.id][0])
+    return axis_turn(np.cross(barrel, np.array(plan["tip_toward"], dtype=float)), plan["tip"] * u ** 3)
+
+
+def forearm_rel(p, f, torso, pole):
+    fore, *_ = solve_arm(p, f, torso, pole)
+    return fore.T @ (f @ HAND_REST.T)
+
+
+def hand_from_rel(p, rel, torso, pole, guess):
+    f = guess
+    for _ in range(4):
+        fore, *_ = solve_arm(p, f, torso, pole)
+        f = fore @ rel @ HAND_REST
+    return f
+
+
+def out_of_trunk(elbow, p):
+    cost = 0.0
+    for q, room in ((elbow, 0.0), (p, 0.03)):
+        if 0.9 < q[1] < 1.55:
+            e = math.hypot(q[0] / 0.17, (q[2] - 0.04) / 0.13)
+            cost += max(0.0, 1.0 + room / 0.15 - e) * 300
+    return cost
+
+
+def keyed(keys, t):
+    for (a, va), (b, vb) in zip(keys, keys[1:]):
+        if t <= b + 1e-9:
+            return va + (vb - va) * smooth(min(1.0, max(0.0, (t - a) / (b - a))))
+    return keys[-1][1]
+
+
+def holster_frames(place, plan, end):
+    """Every frame of the draw: time, hand, its turn, the elbow's pole, torso, head, and the strains."""
+    barrel = unit(GUN_LAYS[place.id][0])
+    grab_f, site, start = place.f, place.point, LOOSE_HAND
+    tg, tl, ts, te = plan["times"]
+    lift_top = site - barrel * plan["lift"] + np.array(plan["lift_off"])
+    ahead = site + np.array(plan["ahead"])
+    swing = np.array(plan["swing"])
+    end_t, end_h = np.array(end["torso"]), np.array(end["head"])
+    torso_keys = [(0, np.array(TORSO_REST)), (tg, np.array(plan["torso_grab"])), (tl, np.array(plan["torso_lift"])), (ts, np.array(plan["torso_swing"])), (te, end_t)]
+    head_keys = [(0, np.array(HEAD_REST)), (tg, np.array(plan["head_grab"])), (tl, np.array(plan["head_lift"])), (ts, end_h * 0.6), (te, end_h)]
+    rel_loose = forearm_rel(start["p"], start["f"], TORSO_REST, start["elbow"])
+    rel_end = forearm_rel(end["p"], end["f"], end_t, end["elbow"])
+    prev, f_prev, rel_top = np.array(start["elbow"], dtype=float), start["f"], None
+    rows = []
+    for i in range(int(round(te * 30)) + 1):
+        t = i / 30
+        torso, head = keyed(torso_keys, t), keyed(head_keys, t)
+        if t <= tg + 1e-9:
+            u = smooth(t / tg)
+            p, mode = bezier(start["p"], ahead, site, u), ("reach", u)
+        elif t <= tl + 1e-9:
+            u = smooth((t - tg) / (tl - tg))
+            p, mode = site + (lift_top - site) * u, ("lift", holster_tip(place, plan, u) @ grab_f)
+        elif t <= ts + 1e-9:
+            u = smooth((t - tl) / (ts - tl))
+            p = bezier(lift_top, (lift_top + swing) * 0.5 + np.array(plan["bulge"]), swing, u)
+            mode = ("swing", u * plan["turn_by_swing"])
+        else:
+            u = smooth((t - ts) / (te - ts))
+            p = swing + (end["p"] - swing) * u
+            mode = ("swing", plan["turn_by_swing"] + (1 - plan["turn_by_swing"]) * u)
+        best = None
+        for d, pole in poles_around(prev, p, torso, range(-90, 91, 6)):
+            if mode[0] == "lift":
+                f = mode[1]
+            elif mode[0] == "reach":
+                rel = slerp(rel_loose, forearm_rel(site, grab_f, plan["torso_grab"], pole), mode[1])
+                f = hand_from_rel(p, rel, torso, pole, f_prev)
+            else:
+                f = hand_from_rel(p, slerp(rel_top, rel_end, mode[1]), torso, pole, f_prev)
+            fore, axis, short, elbow = solve_arm(p, f, torso, pole)
+            bend, twist = strain(f, fore, axis)
+            cost = max(0, bend - 35) * 1.5 + max(0.0, twist - 35) + 900 * short + 0.3 * abs(d) + out_of_trunk(elbow, p)
+            if best is None or cost < best[0]:
+                best = (cost, pole, f, bend, twist, short, elbow)
+        cost, pole, f, bend, twist, short, elbow = best
+        if mode[0] == "lift":
+            rel_top = forearm_rel(p, f, torso, pole)
+        prev, f_prev = pole, f
+        rows.append((t, p, f, pole, torso, head, cost, bend, twist, short))
+    return rows
+
+
+def holster_tracks(place, end):
+    """The draw as tracks, one key a frame. The elbow's pole is written square to the arm, so the
+    game's solver can't flip it."""
+    plan = HOLSTER_PLANS[place.id]
+    rows = holster_frames(place, plan, end)
+    tracks = {c: [] for c in ("hand_r", "blade", "edge", "elbow_r", "torso", "head")}
+    worst = [0.0, 0.0, 0.0]
+    for t, p, f, pole, torso, head, _, bend, twist, short in rows:
+        _, _, _, elbow = solve_arm(p, f, torso, pole)
+        r = rotation_of(torso)
+        shoulder = CHEST + r @ (UPPER - CHEST)
+        d = unit(p - shoulder)
+        side = unit((elbow - shoulder) - d * d.dot(elbow - shoulder))
+        for control, value in (("hand_r", p), ("blade", f[:, 0]), ("edge", f[:, 1]), ("elbow_r", side), ("torso", torso), ("head", head)):
+            tracks[control].append((t, value))
+        worst = [max(worst[0], bend), max(worst[1], twist), max(worst[2], short * 1000)]
+    save(f"draw_{place.id}", rows[-1][0], False, tracks)
+    print(f"  draw_{place.id:14s} wrist {worst[0]:3.0f} twist {worst[1]:3.0f} short {worst[2]:3.0f}")
+    return tracks, rows[-1][0], plan["times"][0]
+
+
 # The clip's order, and when the hand has it, in seconds.
 def grab_time(place):
     return 0.36 if place.bone == "chest" else 0.33
@@ -597,10 +726,13 @@ def write_place(place):
         end = end_from_clip("heavy_carry")
     else:
         end = {"p": LOOSE_HAND["p"], "f": LOOSE_HAND["f"], "elbow": LOOSE_HAND["elbow"]}
-    keys = draw_keys(place, end)
-    grab = grab_time(place)
-    tracks = write_clip(f"draw_{place.id}", keys)
-    back, duration, release = stow_tracks(tracks, keys[-1].t, grab)
+    if place.id in HOLSTER_PLANS:
+        tracks, length, grab = holster_tracks(place, end)
+    else:
+        keys = draw_keys(place, end)
+        grab, length = grab_time(place), keys[-1].t
+        tracks = write_clip(f"draw_{place.id}", keys)
+    back, duration, release = stow_tracks(tracks, length, grab)
     save(f"stow_{place.id}", duration, False, back)
     return {"grab": grab, "release": release}
 

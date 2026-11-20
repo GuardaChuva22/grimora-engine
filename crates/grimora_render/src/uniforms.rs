@@ -5,12 +5,16 @@ use grimora_core::environment::Shadows;
 use grimora_core::environment::srgb_to_linear_vec;
 use grimora_core::glam::camera::rh::{proj::directx, view};
 use grimora_core::water::{HullMap, MAX_HULLS, MAX_WAVES, WaterHull, Wave};
-use grimora_core::{Camera, Environment, Mat4, PointLight, Transform, Vec3, Vec4};
+use grimora_core::{Camera, Environment, Mat4, PointLight, RoomBox, Transform, Vec2, Vec3, Vec4};
 
 /// Must match `MAX_POINT_LIGHTS` in scene.wgsl.
 pub const MAX_POINT_LIGHTS: usize = 32;
 /// Must match `MAX_CASCADES` in scene.wgsl.
 pub const MAX_CASCADES: usize = 4;
+/// Must match `MAX_ROOMS` in scene.wgsl.
+pub const MAX_ROOMS: usize = 32;
+/// Capsules of a blazing aura's body; `fire` in scene.wgsl holds twice as many rows.
+pub const MAX_FIRE_CAPSULES: usize = 16;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
@@ -79,7 +83,22 @@ pub struct Globals {
     origin: [f32; 4],
     origin_mottle: [f32; 4],
     origin_mist: [f32; 4],
+    /// The air's haze: x how far one sees (0 = none), y 1 / its height, z 1 with filtered textures.
+    air: [f32; 4],
+    /// xy how far the clouds and mist drifted, zw where the gust pattern is (`wind::gust_shift`).
+    aloft: [f32; 4],
+    /// x how gusty, y the plants' flutter clock, zw which way the swell and lake waves run.
+    gust: [f32; 4],
     hulls: [HullPlace; MAX_HULLS],
+    /// Each room: middle of the floor and walls' top; the house's +X and half sizes.
+    rooms: [[[f32; 4]; 2]; MAX_ROOMS],
+    room_count: [u32; 4],
+    /// A blazing aura's body: per capsule, one end and its radius, then the other end.
+    fire: [[f32; 4]; MAX_FIRE_CAPSULES * 2],
+    /// x how many capsules.
+    fire_count: [u32; 4],
+    /// The capsules' bounds (low, high), the body's feet and where its flames trail.
+    fire_frame: [[f32; 4]; 4],
     /// Lights, shadows on, cascades, hollow hulls.
     counts: [u32; 4],
     point_lights: [GpuPointLight; MAX_POINT_LIGHTS],
@@ -93,25 +112,39 @@ pub struct PostParams {
     b: [f32; 4],
     c: [f32; 4],
     d: [f32; 4],
+    e: [f32; 4],
+    f: [f32; 4],
+}
+
+impl PostParams {
+    /// Whether there are shafts of light to work out.
+    pub fn shafts(&self) -> bool {
+        self.e[2] > 0.0
+    }
+
+    /// The same, with no shafts of light: a portrait has none of the scene's.
+    pub fn without_shafts(mut self) -> Self {
+        self.e[2] = 0.0;
+        self
+    }
 }
 
 /// Where in its gusts each plant is: drawn from its world position in `f64`, so a plant keeps
 /// its sway wherever the origin is. `sway` in `scene.wgsl` reads it.
 pub(crate) struct Sway {
     origin: grimora_core::DVec2,
-    wind: grimora_core::DVec2,
 }
 
 impl Sway {
     pub(crate) fn of(env: &Environment) -> Self {
-        let wind = env.wind.direction.normalize_or(grimora_core::Vec2::X).as_dvec2();
         let origin = env.origin.world();
-        Self { origin: grimora_core::DVec2::new(origin.x, origin.z), wind }
+        Self { origin: grimora_core::DVec2::new(origin.x, origin.z) }
     }
 
+    /// Only by where it stands, never by the wind: turning the wind must not jolt the plants.
     pub(crate) fn phase(&self, position: Vec3) -> f32 {
         let at = self.origin + grimora_core::DVec2::new(f64::from(position.x), f64::from(position.z));
-        (at.dot(self.wind) * 0.4 + at.x * 0.17).rem_euclid(std::f64::consts::TAU) as f32
+        (at.x * 0.53 + at.y * 0.37).rem_euclid(std::f64::consts::TAU) as f32
     }
 }
 
@@ -271,7 +304,7 @@ pub struct SkySprites {
 /// How many times the ambient light a full flash of lightning adds.
 const LIGHTNING_AMBIENT: f32 = 2.5;
 const SUN_SPRITE_BRIGHTNESS: f32 = 1.8;
-const MOON_SPRITE_BRIGHTNESS: f32 = 0.7;
+const MOON_SPRITE_BRIGHTNESS: f32 = 1.1;
 
 /// The projection the scene is drawn with: the camera's, with the depth reversed
 /// (see `SCENE_DEPTH_COMPARE`). Culling keeps using `Camera::view_projection`.
@@ -305,26 +338,43 @@ pub fn globals(
     bed_rect: Vec4,
     level_map: Vec4,
     hulls: &[HullPlace],
+    rooms: &[RoomBox],
 ) -> (Globals, Cascades) {
     let view_proj = scene_view_projection(camera, aspect);
     let sun_dir = env.sun.direction.normalize_or(Vec3::Y);
     let shadows = Shadows { cascades: env.shadows.cascades.min(max_cascades), ..env.shadows };
     let cascades = shadow_cascades(camera, aspect, sun_dir, &shadows, shadow_map_size);
 
+    // The rooms nearest the camera, and which of them each light is in.
+    let mut near: Vec<&RoomBox> = rooms.iter().collect();
+    near.sort_by(|a, b| {
+        a.center.distance_squared(camera.position).total_cmp(&b.center.distance_squared(camera.position))
+    });
+    near.truncate(MAX_ROOMS);
+    let mut room_rows = [[[0.0f32; 4]; 2]; MAX_ROOMS];
+    for (row, r) in room_rows.iter_mut().zip(&near) {
+        *row = [[r.center.x, r.center.y, r.center.z, r.walls], [r.axis.x, r.axis.y, r.half.x, r.half.y]];
+    }
+    let room_of = |p: Vec3| near.iter().position(|r| r.contains(p)).map_or(0.0, |i| i as f32 + 1.0);
     let mut point_lights = [GpuPointLight::zeroed(); MAX_POINT_LIGHTS];
     let count = lights.len().min(MAX_POINT_LIGHTS);
     for (gpu, (light, shown)) in point_lights.iter_mut().zip(nearest_lights(lights, camera.position)) {
         *gpu = GpuPointLight {
             position_radius: light.position.extend(light.radius.max(0.01)).into(),
             color_intensity: srgb_to_linear_vec(light.color).extend(light.intensity * shown).into(),
-            params: [light.flicker, 0.0, 0.0, 0.0],
+            params: [light.flicker, room_of(light.position), 0.0, 0.0],
         };
     }
 
     let sun_color = srgb_to_linear_vec(env.sun.color) * env.sun.intensity;
     let sun_at = env.sky.sun_position.unwrap_or(sun_dir).normalize_or(Vec3::Y);
     let moon_at = env.sky.moon_position.unwrap_or(-sun_dir).normalize_or(Vec3::NEG_Y);
-    let wind_dir = env.wind.direction.normalize_or(grimora_core::Vec2::X);
+    let wind_dir = env.wind.blowing.normalize_or(grimora_core::Vec2::X);
+    // The swell comes from afar: it keeps the scene's direction whatever the wind does.
+    let waves_dir = env.wind.direction.normalize_or(grimora_core::Vec2::X);
+    // Plants bend less and less for each m/s more: a storm doesn't fold them flat.
+    let blowing = (env.wind.speed_ms / grimora_core::WIND_SPEED).max(0.0);
+    let bend = blowing / (1.0 + 0.2 * blowing);
     let falling = &env.precipitation;
     // Lightning lights everything from everywhere.
     let flash = falling.flash.max(0.0);
@@ -395,12 +445,12 @@ pub fn globals(
             env.fog.mist.size.max(0.1),
             env.fog.mist.speed,
         ],
-        wind: [wind_dir.x, wind_dir.y, (env.wind.strength * env.wind.scale).max(0.0), env.wind.speed],
+        wind: [wind_dir.x, wind_dir.y, bend, env.wind.speed],
         weather: [
             falling.wet.clamp(0.0, 1.0),
             falling.snow_cover.clamp(0.0, 1.0),
             falling.rain.clamp(0.0, 1.0),
-            env.wind.scale.max(0.0),
+            grimora_core::water::wave_scale(env.wind.scale),
         ],
         sea: [water.level, water.lean, tallest, 0.0],
         water_area: area,
@@ -419,11 +469,41 @@ pub fn globals(
         // its frequencies; the mist's every `4 * size`, and 10 of those with its two.
         origin_mottle: env.origin.wrapped_by(f64::from(surface.mottle_size.max(0.01)) * 4000.0).extend(0.0).into(),
         origin_mist: env.origin.wrapped_by(f64::from(env.fog.mist.size.max(0.1)) * 40.0).extend(0.0).into(),
+        air: [env.fog.air.max(0.0), 1.0 / env.fog.air_height.max(1.0), if sprites.smooth { 1.0 } else { 0.0 }, 0.0],
+        aloft: [env.wind.aloft.x, env.wind.aloft.y, env.wind.gust_shift.x, env.wind.gust_shift.y],
+        gust: [env.wind.gustiness, env.wind.flutter, waves_dir.x, waves_dir.y],
         hulls: {
             let mut places = [HullPlace::zeroed(); MAX_HULLS];
             let count = hulls.len().min(MAX_HULLS);
             places[..count].copy_from_slice(&hulls[..count]);
             places
+        },
+        rooms: room_rows,
+        room_count: [near.len() as u32, 0, 0, 0],
+        fire: {
+            let mut rows = [[0.0; 4]; MAX_FIRE_CAPSULES * 2];
+            for (i, (a, b, r)) in env.fire_body.iter().take(MAX_FIRE_CAPSULES).enumerate() {
+                rows[i * 2] = [a.x, a.y, a.z, *r];
+                rows[i * 2 + 1] = [b.x, b.y, b.z, 0.0];
+            }
+            rows
+        },
+        fire_count: [env.fire_body.len().min(MAX_FIRE_CAPSULES) as u32, 0, 0, 0],
+        fire_frame: {
+            let (mut lo, mut hi) = (glam::Vec3::splat(f32::MAX), glam::Vec3::splat(f32::MIN));
+            for (a, b, r) in env.fire_body.iter().take(MAX_FIRE_CAPSULES) {
+                lo = lo.min(a.min(*b) - glam::Vec3::splat(*r));
+                hi = hi.max(a.max(*b) + glam::Vec3::splat(*r));
+            }
+            if env.fire_body.is_empty() {
+                (lo, hi) = (glam::Vec3::ZERO, glam::Vec3::ZERO);
+            }
+            [
+                lo.extend(0.0).into(),
+                hi.extend(0.0).into(),
+                env.fire_anchor.extend(0.0).into(),
+                env.fire_trail.extend(0.0).into(),
+            ]
         },
         counts: [
             count as u32,
@@ -436,19 +516,44 @@ pub fn globals(
     (globals, cascades)
 }
 
-pub fn post_params(env: &Environment, time: f32, bloom_mips: u32) -> PostParams {
+pub fn post_params(env: &Environment, time: f32, bloom_mips: u32, camera: &Camera, aspect: f32) -> PostParams {
     let p = &env.post;
+    // Where the light is on the screen, and how much its shafts show: none once it is behind
+    // the camera, under the horizon or far off the edges.
+    let light = env.sky.light_position.unwrap_or(env.sun.direction).normalize_or(Vec3::Y);
+    let ahead = camera.forward().dot(light);
+    let clip = scene_view_projection(camera, aspect) * (camera.position + light * 1000.0).extend(1.0);
+    let (light_uv, shown) = if clip.w > 1e-3 && ahead > 0.0 {
+        let ndc = clip.truncate().truncate() / clip.w;
+        let uv = Vec2::new(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+        let off = (uv - Vec2::splat(0.5)).abs().max_element();
+        let near = 1.0 - ((off - 0.5) / 0.6).clamp(0.0, 1.0);
+        let up = ((light.y + 0.02) / 0.08).clamp(0.0, 1.0);
+        (uv, near * near * up * ahead.min(1.0))
+    } else {
+        (Vec2::splat(0.5), 0.0)
+    };
     PostParams {
         a: [p.exposure, p.contrast, p.saturation, p.vignette],
         b: [p.grain, p.bloom.clamp(0.0, 1.0), time, bloom_mips.max(1) as f32],
         c: [p.shadow_tint.x, p.shadow_tint.y, p.shadow_tint.z, p.vivid.clamp(0.0, 1.0)],
-        d: [p.sharpen.max(0.0), env.water.submerged.clamp(0.0, 1.0), 0.0, 0.0],
+        d: [p.sharpen.max(0.0), env.water.submerged.clamp(0.0, 1.0), camera.near, camera.far],
+        e: [
+            light_uv.x,
+            light_uv.y,
+            p.rays.max(0.0)
+                * shown
+                * (1.0 - env.water.submerged.clamp(0.0, 1.0))
+                * (1.0 - 0.75 * env.sky.stars.clamp(0.0, 1.0)),
+            p.paint.clamp(0.0, 1.0),
+        ],
+        f: [p.paint_from.max(0.0), p.paint_to.max(p.paint_from + 1.0), 0.0, 0.0],
     }
 }
 
 // Uniform buffers need 16-byte multiples; instance stride must match the shader.
 const _: () = assert!(size_of::<Globals>().is_multiple_of(16));
-const _: () = assert!(size_of::<PostParams>() == 64);
+const _: () = assert!(size_of::<PostParams>() == 96);
 const _: () = assert!(size_of::<InstanceRaw>() == 128);
 
 #[cfg(test)]

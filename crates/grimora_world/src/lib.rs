@@ -7,7 +7,9 @@
 //! a softer border, it draws one with noise over these answers.
 
 mod desc;
+mod fall;
 mod field;
+pub mod folk;
 mod hydro;
 mod life;
 mod map;
@@ -18,18 +20,23 @@ mod tile;
 mod village;
 
 pub use desc::{CoastDesc, FreshWaterLook, GroundLook, MapWindow, WorldDesc};
+pub use fall::{Curtain, curtains};
+pub use folk::{Bond, Day, Doing, Kin, Post, Resident, body_shape, bond, clothes, hair, hat, residents};
 pub use hydro::{FreshPoint, Hydrology, Pond, Stream, StreamEnd, StreamPoint};
-pub use surface::{FRESH_CHUNK, FreshChunk, fresh_chunks};
 pub use life::{
-    AmbienceDesc, FaunaPlace, FloraKey, GenId, LifeBook, PlantDesc, PlantSpot, PondFaunaDesc, SeaFaunaDesc, WaterLiking, When,
-    coast_places, fauna_places, flora_around, path_seed, place_plants,
+    AmbienceDesc, FaunaPlace, FloraKey, GenId, LifeBook, PlantDesc, PlantSpot, PondFaunaDesc, SeaFaunaDesc,
+    WaterLiking, When, coast_places, fauna_places, flora_around, path_seed, place_plants,
 };
 pub use map::{Band, Biome, Layer, LayerKind, Legend, MacroMap, MapPoint, MapSample, Nation, PointGroup, WaterBody};
-pub use village::{VILLAGE_CLEAR, VILLAGE_EASE, VILLAGE_FLAT, Village, choose_village};
 pub use relief::{Cliff, Highland, Relief, biome_tint, biome_wetness};
+pub use surface::{FRESH_TOP_LEVEL, FreshCourses, fresh_courses, fresh_tile};
 pub use tile::{
-    BASE_TILE, NEAR_CELLS, SPLIT, TILE_CELLS, TOP_LEVEL, TileKey, TileLook, build_tile, mesh_hash, tile_collider,
-    tile_heights, tiles_around,
+    BASE_TILE, NEAR_CELLS, SPLIT, TILE_CELLS, TOP_LEVEL, TileKey, TileLook, build_tile, ground_at as tile_ground,
+    mesh_hash, tile_collider, tile_heights, tiles_around,
+};
+pub use village::{
+    Extra, ExtraKind, Field, Largo, Layout, Lot, VILLAGE_CLEAR, VILLAGE_EASE, VILLAGE_FLAT, Village, choose_village,
+    turn,
 };
 
 use glam::DVec2;

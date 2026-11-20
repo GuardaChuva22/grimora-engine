@@ -1,0 +1,16 @@
+// Poison: sickly green fumes seeping out of the skin. The body is smeared with moving
+// vapor, which rolls off it in slow wisps; bubbles of light rise and signs turn underfoot.
+(
+    name: "Veneno",
+    follow: 0.8,
+    ramp: [(0.04, 0.15, 0.02, 1.0), (0.3, 0.75, 0.05, 2.5), (0.7, 1.0, 0.2, 5.0), (0.95, 1.0, 0.7, 8.0)],
+    bands: 0.0,
+    skin: [
+        (pattern: Smoke, scale: 4.0, speed: 0.7, warp: 0.8, outline: 0.7, edge: 2.0, cover: 0.3, body: 0.3, glow: 1.6),
+        (pattern: Blaze, scale: 1.2, speed: 0.8, warp: 1.2, outline: 0.12, edge: 0.8, cover: 0.3, glow: 0.8),
+    ],
+    sparks: (rate: 10.0, size: 0.035, speed: (0.1, 0.4), rise: 0.9, curl: 1.0, life: (0.8, 1.6), shape: Ring, twinkle: 0.2, tints: [(0.6, 1.0, 0.3, 1.0), (0.3, 0.8, 0.1, 1.0)], glow: 4.0),
+    ground: (runes: 2.0, runes_spin: 10.0, color: Some((0.4, 0.9, 0.1, 1.0))),
+    light: (color: (0.45, 1.0, 0.2), intensity: 1.8, radius: 5.0, flicker: 0.2, linger: 0.3),
+    burst: (wave: 5.0, streaks: 20, flash: 7.0),
+)

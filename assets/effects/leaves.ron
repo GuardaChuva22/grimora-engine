@@ -1,0 +1,15 @@
+// Leaves coming down from a crown 5 m up: they tumble, go with the wind, land and lie there
+// a while before fading.
+[
+    (
+        rate: 3.0, lifetime: (7.0, 10.0), max_particles: 40, max_distance: 50.0,
+        position: (0.0, 5.0, 0.0), area: (3.5, 0.6, 3.5), speed: (0.0, 0.3),
+        acceleration: (0.0, -1.6, 0.0), drag: 1.4, turbulence: 2.2, curl: 0.8, curl_scale: 2.5,
+        windy: 1.0, bounce: 0.05, spin: 220.0,
+        sizes: [0.15], size_jitter: 0.35, shape: Leaf, bands: 2.0,
+        ramp: [(0.45, 0.4, 0.2, 1.0), (0.8, 0.75, 0.4, 1.0), (1.0, 0.95, 0.6, 1.0)],
+        colors: [(1.0, 1.0, 1.0, 0.0), (1.0, 1.0, 1.0, 1.0), (1.0, 1.0, 1.0, 1.0), (1.0, 1.0, 1.0, 1.0), (1.0, 1.0, 1.0, 0.0)],
+        tints: [(0.85, 0.6, 0.2, 1.0), (0.55, 0.65, 0.22, 1.0), (0.85, 0.35, 0.15, 1.0)],
+        lit: 1.0,
+    ),
+]

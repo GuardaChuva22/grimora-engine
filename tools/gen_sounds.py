@@ -450,6 +450,7 @@ def main():
     write_ice()
     write_animals()
     write_ambience()
+    write_bodies()
 
 
 def gull_cry(rng, start, length, top, bottom, loud, out):
@@ -833,6 +834,49 @@ def write_ambience():
     write_wav("savanna_night.wav", savanna_night())
 
 
+# ---------------------------------------------------------------- bodies
+
+def body_thud(seed, weight, seconds):
+    """A body hitting the ground: a dull low thump that gives (flesh, not wood), the slap of
+    cloth and a gritty settle. `weight` 1 is a trunk, lower is a limb or a head."""
+    rng = random.Random(seed)
+    n = int(seconds * RATE)
+    out = [0.0] * n
+    phase = 0.0
+    top, bottom = 140 * (1.6 - 0.6 * weight), 48 + 30 * (1 - weight)
+    for i in range(n):
+        t = i / RATE
+        phase += TAU * (bottom + (top - bottom) * math.exp(-t / 0.025)) / RATE
+        out[i] += math.sin(phase) * math.exp(-t / (0.05 + 0.06 * weight)) * min(1.0, t / 0.004) * weight
+    # The give: low noise, a short swell after the hit.
+    low = 0.0
+    for i in range(int(0.18 * RATE)):
+        t = i / RATE
+        low += one_pole(260) * (rng.uniform(-1, 1) - low)
+        out[i] += low * math.exp(-t / 0.05) * min(1.0, t / 0.01) * 2.4 * weight
+    # Cloth slaps and grit, as grains of band-passed noise.
+    for _ in range(rng.randint(5, 9)):
+        start = int(rng.uniform(0.0, 0.12 * seconds / 0.5) * RATE)
+        decay = rng.uniform(0.006, 0.03)
+        svf = Svf()
+        center, amp = rng.uniform(700, 2600), rng.uniform(0.15, 0.45)
+        for j in range(min(int(decay * 6 * RATE), n - start)):
+            _, band, _ = svf.step(rng.uniform(-1, 1), center, 1.2)
+            out[start + j] += band * math.exp(-j / RATE / decay) * amp
+    fade = int(0.04 * RATE)
+    for i in range(fade):
+        out[n - 1 - i] *= i / fade
+    return normalize(out, 0.9)
+
+
+def write_bodies():
+    write_wav("body_fall_1.wav", body_thud(901, 1.0, 0.55))
+    write_wav("body_fall_2.wav", body_thud(907, 0.95, 0.5))
+    write_wav("body_fall_3.wav", body_thud(911, 1.0, 0.6))
+    write_wav("limb_knock_1.wav", body_thud(919, 0.45, 0.3))
+    write_wav("limb_knock_2.wav", body_thud(929, 0.4, 0.28))
+
+
 if __name__ == "__main__":
     # `animals`, `guns` or `ambience` writes only those, and leaves the rest as they are.
     if sys.argv[1:] == ["animals"]:
@@ -841,5 +885,7 @@ if __name__ == "__main__":
         write_guns()
     elif sys.argv[1:] == ["ambience"]:
         write_ambience()
+    elif sys.argv[1:] == ["bodies"]:
+        write_bodies()
     else:
         main()

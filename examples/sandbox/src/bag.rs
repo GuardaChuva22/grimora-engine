@@ -9,7 +9,7 @@ use grimora::prelude::*;
 use grimora::render::{ImageId, Slot};
 use grimora::scene::ArmorSlot;
 
-use crate::bag_screen::{COLUMNS, Cursor, ROWS, Screen, Side};
+use crate::bag_screen::{COLUMNS, Cursor, ROWS, Screen, Side, Tab};
 use crate::{Mode, STEP_SOUND, Sandbox};
 
 /// The hotbar on the HUD, with its numbers under it.
@@ -51,6 +51,8 @@ pub fn slot_of(catalog: &ItemCatalog, item: &str) -> Option<ArmorSlot> {
 }
 
 pub const OPEN_BAG: &str = "inventory";
+const OPEN_SOUND: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/sounds/ui/open_inv.mp3");
+const CLOSE_SOUND: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/sounds/ui/close_inv.mp3");
 pub(crate) const USE_SLOT: &str = "use_slot";
 pub(crate) const DROP_SLOT: &str = "drop_slot";
 const WEAPON_NEXT: &str = "weapon_next";
@@ -93,6 +95,8 @@ pub struct Bag {
     /// The starting things are in the inventory.
     stocked: bool,
     pub open: bool,
+    /// Whether the screen was open the last time its sound played.
+    sounded_open: bool,
     /// The container being looked into.
     pub chest: Option<String>,
     /// The screen's cursor and what it's moving.
@@ -186,20 +190,6 @@ impl Bag {
         }
         self.body.take(piece.id, piece.stack.count);
         true
-    }
-
-    /// The next thing carried for this place, by name, and nothing after the last. Returns false
-    /// if there's no room for what comes off.
-    pub fn next_worn(&mut self, catalog: &ItemCatalog, slot: ArmorSlot) -> bool {
-        let on = self.worn_in(slot).map(|piece| piece.stack.item.clone());
-        let mut fits: Vec<&Placed> =
-            self.inventory.pieces().iter().filter(|piece| slot_of(catalog, &piece.stack.item) == Some(slot)).collect();
-        fits.sort_by(|a, b| a.stack.item.cmp(&b.stack.item));
-        let next = fits.iter().find(|piece| on.as_ref().is_none_or(|on| piece.stack.item > *on)).map(|piece| piece.id);
-        match next {
-            Some(id) => self.wear(catalog, id),
-            None => self.take_off(catalog, slot),
-        }
     }
 
     /// All that's taken off a blow.
@@ -312,14 +302,24 @@ impl Sandbox {
     pub(crate) fn run_bag(&mut self, ctx: &mut Context) -> bool {
         self.capture_bag(ctx);
         let toggled = ctx.input.action_just_pressed(OPEN_BAG);
+        let diary = ctx.input.action_just_pressed(crate::tale::OPEN_JOURNAL);
         if self.bag.open {
             let back = ctx.input.pad_just_pressed(PadButton::East);
+            let on_diary = self.bag.chest.is_none() && self.bag.screen.tab == Tab::Diary;
             // The back button lets go of what's lifted before it closes anything.
-            if toggled || (back && !self.drop_lifted()) {
+            if toggled || (diary && on_diary) || (back && !self.drop_lifted()) {
                 self.bag.close();
+            } else if diary && self.bag.chest.is_none() {
+                self.bag.screen.tab = Tab::Diary;
+                self.bag.screen.lifted = None;
+                ctx.ui.reset_focus();
             }
-        } else if toggled && self.mode == Mode::Play && self.dead_for.is_none() {
+        } else if (toggled || diary) && self.mode == Mode::Play && self.dead_for.is_none() {
             self.open_bag(None);
+            if diary {
+                self.bag.screen.tab = Tab::Diary;
+            }
+            ctx.ui.reset_focus();
         }
         if self.bag.open {
             ctx.set_cursor_grab(false);
@@ -330,6 +330,11 @@ impl Sandbox {
             if self.mode == Mode::Play && self.dead_for.is_none() {
                 self.hotbar_keys(ctx);
             }
+        }
+        // However it opened or closed (a key, a chest, the pause menu), it sounds once.
+        if self.bag.open != self.bag.sounded_open {
+            self.bag.sounded_open = self.bag.open;
+            ctx.audio.play(if self.bag.open { OPEN_SOUND } else { CLOSE_SOUND }, 0.7);
         }
         self.sync_body(ctx);
         self.glint_pickups(ctx);
@@ -354,10 +359,11 @@ impl Sandbox {
         self.open_bag(chest);
     }
 
-    fn open_bag(&mut self, chest: Option<String>) {
+    pub(crate) fn open_bag(&mut self, chest: Option<String>) {
         self.bag.open = true;
         self.bag.chest = chest;
         self.bag.screen.lifted = None;
+        self.bag.screen.tab = Tab::Inventory;
         let side = if self.bag.chest.is_some() { Side::Chest } else { Side::Own };
         self.bag.screen.cursor = Cursor { side, x: 0, y: 0 };
     }
@@ -500,16 +506,21 @@ impl Sandbox {
     }
 
     pub(crate) fn draw_hotbar(&mut self, ctx: &mut Context) {
-        let catalog = ctx.world.items.clone();
         let size = ctx.ui.size();
+        let slots: Vec<Rect> = (0..HOTBAR).map(|at| hotbar_slot(size, at)).collect();
+        self.draw_hotbar_in(ctx, &slots);
+    }
+
+    /// The hotbar in these slots, which the bag screen puts under its grid.
+    pub(crate) fn draw_hotbar_in(&mut self, ctx: &mut Context, slots: &[Rect]) {
+        let catalog = ctx.world.items.clone();
         let hand = self.bag.inventory.hand();
         let ink = ctx.ui.theme.fill;
         let (line, accent, text) = (ctx.ui.theme.border, ctx.ui.theme.accent, ctx.ui.theme.text);
         let stroke = ctx.ui.line();
         let stacks: Vec<_> =
             (0..HOTBAR).map(|key| self.bag.inventory.shortcut(key).map(|piece| piece.stack.clone())).collect();
-        for (at, stack) in stacks.iter().enumerate() {
-            let rect = hotbar_slot(size, at);
+        for (at, (stack, &rect)) in stacks.iter().zip(slots).enumerate() {
             let in_hand = hand.is_some() && hand.and_then(|id| self.bag.inventory.shortcut_of(id)) == Some(at);
             ctx.ui.dither(rect, ink, ink.w, false);
             if in_hand {
@@ -715,13 +726,19 @@ mod tests {
         press(&mut game, &mut ctx, KeyCode::Digit2);
         frames(&mut game, &mut ctx, 150);
         let avatar = game.avatar;
-        assert_eq!(ctx.world.get::<Animator>(avatar).unwrap().current(), Some("heavy_idle"));
-        for blow in ["heavy_1", "heavy_2", "heavy_3"] {
-            press(&mut game, &mut ctx, KeyCode::KeyF);
+        assert_eq!(ctx.world.get::<Animator>(avatar).unwrap().current(), Some("sword_idle"));
+        // Asked for again and again, as a player would: a great blow chains late.
+        for blow in ["great_1", "great_2", "great_3", "great_4"] {
             let mut seen = false;
-            for _ in 0..50 {
+            for frame in 0..150 {
+                if frame % 12 == 0 {
+                    press(&mut game, &mut ctx, KeyCode::KeyF);
+                }
                 frames(&mut game, &mut ctx, 1);
-                seen |= ctx.world.get::<Animator>(avatar).unwrap().current() == Some(blow);
+                if ctx.world.get::<Animator>(avatar).unwrap().current() == Some(blow) {
+                    seen = true;
+                    break;
+                }
             }
             assert!(seen, "{blow} never played");
         }
@@ -789,7 +806,7 @@ mod tests {
         press(&mut game, &mut ctx, KeyCode::KeyI);
         assert!(game.bag.inventory.set_shortcut(0, None), "back on the grid");
         let sword = game.bag.inventory.first_of(crate::FIRST_WEAPON).unwrap().clone();
-        let (field, _) = crate::bag_screen::own_field(&ctx, &game.bag.inventory);
+        let field = crate::bag_screen::own_field(&ctx, &game.bag.inventory);
         let scale = ctx.ui.scale();
         let cell = |x: u32, y: u32| field.center_of(x, y) * scale;
         let free = (COLUMNS - 1, 0);
@@ -837,7 +854,7 @@ mod tests {
         }
         press(&mut game, &mut ctx, KeyCode::KeyI);
         let scale = ctx.ui.scale();
-        let (field, _) = crate::bag_screen::own_field(&ctx, &game.bag.inventory);
+        let field = crate::bag_screen::own_field(&ctx, &game.bag.inventory);
         let panel = crate::bag_screen::own_body(&ctx, &game.bag.inventory);
         let spot = |rect: Rect| rect.point(Anchor::Center) * scale;
         let drag = |game: &mut Sandbox, ctx: &mut Context, from: Vec2, to: Vec2| {
@@ -898,8 +915,10 @@ mod tests {
 
         // The hotbar takes what can be held, off the grid, and gives it back.
         let sword = game.bag.inventory.hand().unwrap();
-        let size = ctx.ui.size();
-        let slot = |at: usize| crate::bag::hotbar_slot(size, at).point(Anchor::Center) * scale;
+        let slots: Vec<Vec2> = (0..HOTBAR)
+            .map(|at| crate::bag_screen::bar_slot(&ctx, &game.bag.inventory, at).point(Anchor::Center) * scale)
+            .collect();
+        let slot = |at: usize| slots[at];
         let free = (COLUMNS - 1, 0);
         assert!(game.bag.inventory.at(free.0, free.1).is_none());
         drag(&mut game, &mut ctx, slot(0), field.center_of(free.0, free.1) * scale);

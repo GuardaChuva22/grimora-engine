@@ -60,6 +60,14 @@ impl Physics {
     pub fn find_path(&self, from: Vec3, to: Vec3, shape: &NavShape) -> NavPath {
         Search::new(self, from, shape).run(to)
     }
+
+    /// The floor under `at` if `shape` can stand there, at most a step above `at`, with
+    /// nothing in the way of its capsule; `None` inside a wall, on a table or in a bed.
+    pub fn stands_at(&self, at: Vec3, shape: &NavShape) -> Option<Vec3> {
+        let search = Search::new(self, at, shape);
+        let ground = search.standing_room(at.x, at.z, at.y + 1.6, 4.0).filter(|g| g.y <= at.y + shape.step)?;
+        Some(Vec3::new(at.x, ground.y, at.z))
+    }
 }
 
 /// Standable ground.

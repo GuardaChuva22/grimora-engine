@@ -9,8 +9,24 @@ const MAX_HULLS: u32 = 8u;
 struct PointLight {
     position_radius: vec4<f32>,   // xyz position, w radius
     color_intensity: vec4<f32>,   // rgb linear color, w intensity
-    params: vec4<f32>,            // x flicker
+    params: vec4<f32>,            // x flicker, y the room it is in + 1 (0 outdoors)
 }
+
+// A room of a house: what is in it is indoors. See `RoomBox` in environment.rs.
+struct Room {
+    a: vec4<f32>,                 // xyz the middle of its floor, w the walls' top (world y)
+    b: vec4<f32>,                 // xy the house's +X in world x, z; zw half its size along +X and +Z
+}
+
+const MAX_ROOMS: u32 = 32u;
+// How far past a room's inner wall faces still counts as in it: less than half a wall.
+const ROOM_MARGIN: f32 = 0.12;
+// How high over the walls a roof's underside still is.
+const ROOM_ROOF: f32 = 3.4;
+// How much of the sky's light and of the sun gets indoors: through the door, windows and
+// cracks in the thatch.
+const INDOOR_SKY: f32 = 0.14;
+const INDOOR_SUN: f32 = 0.45;
 
 // Where a hollow hull is. Mirrors `HullPlace`.
 struct Hull {
@@ -53,7 +69,7 @@ struct Globals {
     mottle_dark: vec4<f32>,
     mottle_light: vec4<f32>,      // w = mip bias of the textures
     mist: vec4<f32>,              // x amount per meter, y top, z bank size, w speed
-    wind: vec4<f32>,              // xy direction, z strength, w speed
+    wind: vec4<f32>,              // xy which way it blows now, z how far plants bend, w flutter speed
     weather: vec4<f32>,           // x how wet surfaces are, y settled snow, z rain, w wind as a multiple of the scene's
     sea: vec4<f32>,               // x level of the nearest water, y how far waves lean, z how high they are at most
     water_area: vec4<f32>,        // where that water is: min x, min z, max x, max z
@@ -69,7 +85,15 @@ struct Globals {
     origin: vec4<f32>,            // xyz the origin wrapped by 10 km, for every pattern with no period of its own
     origin_mottle: vec4<f32>,     // xyz wrapped by 1000 times the stains' noise repeat
     origin_mist: vec4<f32>,       // xz wrapped by 10 times the mist's noise repeat
+    air: vec4<f32>,               // x how far one sees through the air (0 = no haze), y 1 / its height, z 1 filtered
+    aloft: vec4<f32>,             // xy how far clouds and mist drifted, zw where the gust pattern is
+    gust: vec4<f32>,              // x how gusty, y the plants' flutter clock, zw which way swell and lake waves run
     hulls: array<Hull, MAX_HULLS>,
+    rooms: array<Room, MAX_ROOMS>,
+    room_count: vec4<u32>,        // x how many rooms
+    fire: array<vec4<f32>, 32>,   // a blazing aura's capsules: end + radius, other end
+    fire_count: vec4<u32>,        // x how many
+    fire_frame: array<vec4<f32>, 4>, // the capsules' low and high corners, the body's feet, where its flames trail
     counts: vec4<u32>,            // x point light count, y shadows enabled, z shadow cascades
     point_lights: array<PointLight, MAX_POINT_LIGHTS>,
 }
@@ -83,6 +107,7 @@ struct MaterialParams {
     water_foam: vec4<f32>,        // rgb foam color, w how much foam
     water_look: vec4<f32>,        // x murk, y refraction, z 1 with a picture of foam, w meters one repeat covers
     water_flow: vec4<f32>,        // xy how fast the picture moves along its uv, w 1 for a river
+    fade: vec4<f32>,              // x flat distance where it starts to dither away, y where it is gone (0 = never)
 }
 
 @group(0) @binding(0) var<uniform> g: Globals;
@@ -180,17 +205,46 @@ fn instance_model(i: InstanceIn) -> mat4x4<f32> {
 
 // Moves a vertex downwind, the farther the higher above its model's origin.
 // Each plant has its own phase along the wind, so gusts roll across a field.
+// A mesh's wind from this on is a plant of the sea floor: see `PlantDesc::sway`.
+const CURRENT_SWAY: f32 = 50.0;
+
 fn sway(world: vec4<f32>, height: f32, i: InstanceIn) -> vec4<f32> {
     let amount = i.normal_1.w;
     if amount <= 0.0 {
         return world;
     }
-    let t = g.camera_pos.w * g.wind.w;
     // Each plant's place in the gusts, from its world position (`Sway` in uniforms.rs).
     let phase = i.normal_2.w;
-    let gust = 0.5 + 0.5 * sin(t + phase) + 0.25 * sin(t * 2.7 + phase * 1.9 + height * 3.0);
-    let push = height * height * amount * g.wind.z * gust;
-    return world + vec4<f32>(g.wind.x * push, 0.0, g.wind.y * push, 0.0);
+    if amount >= CURRENT_SWAY {
+        // Under the sea: the swell drags it to and fro whatever the wind, the top lagging
+        // behind the foot, and a slower drift leans it across.
+        let surge = g.camera_pos.w * 1.1 + phase;
+        let reach = height * height * (amount - CURRENT_SWAY);
+        let along = sin(surge - height * 0.7) + 0.35 * sin(surge * 2.3 + height * 1.9);
+        let across = 0.5 * sin(surge * 0.43 + phase * 1.7 - height * 0.4);
+        let push = vec2<f32>(g.gust.z * along - g.gust.w * across, g.gust.w * along + g.gust.z * across) * reach;
+        return world + vec4<f32>(push.x, 0.0, push.y, 0.0);
+    }
+    // Leaning downwind as the gusts pass over it, and fluttering on top of that.
+    let t = g.gust.y;
+    let gust = gust_at(world.xz);
+    let flutter = 0.35 * sin(t + phase) + 0.15 * sin(t * 2.7 + phase * 1.9 + height * 3.0);
+    let along = height * height * amount * g.wind.z * (0.5 * gust + flutter * (0.6 + 0.4 * gust));
+    let across = height * height * amount * g.wind.z * 0.12 * sin(t * 1.3 + phase * 2.3) * gust;
+    let push = vec2<f32>(g.wind.x * along - g.wind.y * across, g.wind.y * along + g.wind.x * across);
+    return world + vec4<f32>(push.x, 0.0, push.y, 0.0);
+}
+
+// The gust pattern carried by the wind: mirrors `gust_pattern` and `gust_at` in
+// grimora_core/src/wind.rs (`GUST_PERIOD`, `GUST_WAVES`). How many times the mean wind blows here.
+const GUST_PERIOD: f32 = 256.0;
+fn gust_at(local: vec2<f32>) -> f32 {
+    let q = (local + g.aloft.zw) * (6.2831853 / GUST_PERIOD);
+    let sum = 0.5 * sin(q.x * 5.0 + q.y * 2.0)
+        + 0.3 * sin(q.x * -3.0 + q.y * 7.0 + 1.3)
+        + 0.2 * sin(q.x * 11.0 + q.y * -4.0 + 2.1);
+    let pattern = 0.5 + 0.5 * sum;
+    return 1.0 + g.gust.x * (2.0 * pattern - 1.0) * 1.6;
 }
 
 @vertex
@@ -222,14 +276,34 @@ fn vs_shadow(v: VertexIn, i: InstanceIn) -> @builtin(position) vec4<f32> {
 struct ShadowMaskedOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) uv: vec2<f32>,
+    @location(1) world_xz: vec2<f32>,
 }
 
 @vertex
 fn vs_shadow_masked(v: VertexIn, i: InstanceIn) -> ShadowMaskedOut {
     var out: ShadowMaskedOut;
-    out.clip = cascade_view_proj * sway(instance_model(i) * skin_matrix(v, i) * vec4<f32>(v.position, 1.0), v.position.y, i);
+    let world = sway(instance_model(i) * skin_matrix(v, i) * vec4<f32>(v.position, 1.0), v.position.y, i);
+    out.clip = cascade_view_proj * world;
     out.uv = v.uv;
+    out.world_xz = world.xz;
     return out;
+}
+
+// A 4x4 ordered threshold for the pixel, 1/32 .. 31/32.
+fn bayer4(pixel: vec2<f32>) -> f32 {
+    let p = vec2<u32>(pixel) % vec2<u32>(4u);
+    let m = array<u32, 16>(0u, 8u, 2u, 10u, 12u, 4u, 14u, 6u, 3u, 11u, 1u, 9u, 15u, 7u, 13u, 5u);
+    return (f32(m[p.y * 4u + p.x]) + 0.5) / 16.0;
+}
+
+// True where the material's distance fade (`material.fade`) leaves this pixel out.
+fn faded_out(world_xz: vec2<f32>, pixel: vec2<f32>) -> bool {
+    if material.fade.y <= 0.0 {
+        return false;
+    }
+    let far = distance(world_xz, g.camera_pos.xz);
+    let kept = 1.0 - smoothstep(material.fade.x, material.fade.y, far);
+    return kept < bayer4(pixel);
 }
 
 // Alpha-tested shadow casters. Blended surfaces cast shadow where mostly opaque.
@@ -237,7 +311,7 @@ fn vs_shadow_masked(v: VertexIn, i: InstanceIn) -> ShadowMaskedOut {
 fn fs_shadow_masked(in: ShadowMaskedOut) {
     let alpha = textureSample(base_color_tex, material_sampler, in.uv).a * material.base_color.a;
     let cutoff = select(0.5, material.emissive.w, material.flags.y == 1u);
-    if alpha < cutoff {
+    if alpha < cutoff || faded_out(in.world_xz, in.clip.xy) {
         discard;
     }
 }
@@ -371,11 +445,36 @@ fn shade(s: Surface, l: vec3<f32>, radiance: vec3<f32>, wrap: f32) -> vec3<f32> 
     return (diffuse + specular) * radiance;
 }
 
-fn point_lights(world_pos: vec3<f32>, s: Surface) -> vec3<f32> {
+// The room `p` (facing `n`) is in, or -1 outdoors. Under the walls' top, inside a room's
+// walls; over it, only what faces down (the roof's underside).
+fn room_at(p: vec3<f32>, n: vec3<f32>) -> i32 {
+    for (var i = 0u; i < g.room_count.x; i++) {
+        let r = g.rooms[i];
+        let d = p - r.a.xyz;
+        if d.y < -0.8 || p.y > r.a.w + ROOM_ROOF {
+            continue;
+        }
+        let along = abs(dot(d.xz, r.b.xy));
+        let across = abs(dot(d.xz, vec2<f32>(-r.b.y, r.b.x)));
+        if along > r.b.z + ROOM_MARGIN || across > r.b.w + ROOM_MARGIN {
+            continue;
+        }
+        if p.y < r.a.w || n.y < 0.3 {
+            return i32(i);
+        }
+    }
+    return -1;
+}
+
+fn point_lights(world_pos: vec3<f32>, s: Surface, room: i32) -> vec3<f32> {
     var total = vec3<f32>(0.0);
     let t = g.camera_pos.w;
     for (var i = 0u; i < g.counts.x; i++) {
         let pl = g.point_lights[i];
+        // Walls stop a light: it lights only the room it is in, and one outdoors only outdoors.
+        if i32(pl.params.y) - 1 != room {
+            continue;
+        }
         let to_light = pl.position_radius.xyz - world_pos;
         let d = length(to_light);
         let radius = pl.position_radius.w;
@@ -436,7 +535,59 @@ fn fog_at(world_pos: vec3<f32>) -> vec4<f32> {
     let amount = clamp(1.0 - exp(-density * dist * integral), 0.0, 1.0);
 
     let scatter = pow(max(dot(dir, g.sun_dir.xyz), 0.0), 8.0) * g.fog_params.z;
-    return vec4<f32>(g.fog_color.rgb + g.sun_color.rgb * scatter * 0.15, amount);
+    let fog = g.fog_color.rgb + g.sun_color.rgb * scatter * 0.15;
+    let air = air_at(world_pos, v, dist);
+    if air <= 0.0 {
+        return vec4<f32>(fog, amount);
+    }
+    // The air lies behind the fog: what the fog leaves, the air hazes over.
+    let total = 1.0 - (1.0 - amount) * (1.0 - air);
+    return vec4<f32>((fog * amount * (1.0 - air) + air_color(dir) * air) / max(total, 1e-4), total);
+}
+
+// How the air's haze grows with distance: slowly near, as a painting keeps its foreground clear,
+// then fast, until at `g.air.x` everything is gone into the sky.
+const AIR_GROWTH: f32 = 1.7;
+const AIR_GONE: f32 = 3.0;
+// How much of the fog's own color is in the haze, the rest being the sky's at the horizon, and
+// how much the light brightens it towards where it is.
+const AIR_FOG_SHARE: f32 = 0.25;
+const AIR_BLUE: f32 = 0.35;
+const AIR_GLOW: f32 = 0.55;
+// How uneven the haze is over the land, which keeps it from being one flat wash: banks of
+// it, about this many meters wide. The origin is wrapped by 10 km, which this divides.
+const AIR_PATCHES: f32 = 0.45;
+const AIR_PATCH_SIZE: f32 = 2500.0;
+
+// How much of the air's haze lies between the camera and `world_pos`, `v` away and `dist` long.
+fn air_at(world_pos: vec3<f32>, v: vec3<f32>, dist: f32) -> f32 {
+    let reach = g.air.x;
+    if reach <= 0.0 {
+        return 0.0;
+    }
+    // The air thins with height, as an exponential: its average along the ray.
+    let inv_height = g.air.y;
+    var thin = exp(-max(g.camera_pos.y, 0.0) * inv_height);
+    let k = inv_height * v.y;
+    if abs(k) > 1e-4 {
+        thin = thin * (1.0 - exp(-k)) / k;
+    }
+    let bank = textureSampleLevel(noise_tex, noise_sampler, (world_pos.xz + g.origin.xz) / AIR_PATCH_SIZE, 0.0).r;
+    let uneven = 1.0 + (bank - 0.5) * 2.0 * AIR_PATCHES * smoothstep(0.1, 0.5, dist / reach);
+    let optical = AIR_GONE * pow(dist / reach, AIR_GROWTH) * min(thin, 1.0) * uneven;
+    return 1.0 - exp(-optical);
+}
+
+// The color of the air's haze along `dir`: the sky's at the horizon, warmed towards the light.
+fn air_color(dir: vec3<f32>) -> vec3<f32> {
+    // Far air is blue, as the sky overhead is: only towards the light does it warm.
+    let cool = mix(g.sky_horizon.rgb, g.sky_zenith.rgb, AIR_BLUE);
+    let horizon = mix(cool, g.fog_color.rgb, AIR_FOG_SHARE);
+    let toward = max(dot(dir, g.sky_glow.xyz), 0.0);
+    let glow = pow(toward, 18.0) * 0.3 + pow(toward, 5.0) * 0.04;
+    // The moon lights the haze far less than the sun.
+    let night = min(g.sky_params.x * 4.0, 1.0);
+    return horizon + g.sun_color.rgb * glow * AIR_GLOW * (1.0 - 0.75 * night);
 }
 
 // How many times the clarity hides everything, seen from inside the water.
@@ -475,6 +626,8 @@ const MIST_DEPTH: f32 = 2.5;
 const GRAIN_PIXELS: f32 = 400.0;
 // How far off the net of light on the bottom starts to fade, and is gone: thinner than a
 // pixel, its lines would flicker.
+// Depths, in multiples of the water's clarity, between which the net fades out.
+const CAUSTIC_DEEP: vec2<f32> = vec2<f32>(0.45, 1.5);
 const CAUSTIC_NEAR: f32 = 25.0;
 const CAUSTIC_FAR: f32 = 70.0;
 
@@ -504,7 +657,7 @@ fn mist_at(world_pos: vec3<f32>) -> f32 {
         b = mix(a, b, cross);
     }
     let along = b - a;
-    let drift = g.wind.xy * g.camera_pos.w * g.mist.w;
+    let drift = g.aloft.xy * g.mist.w;
     // A different start per pixel turns the steps into fine grain instead of bands.
     let start = view_grain(world_pos);
     var sum = 0.0;
@@ -546,10 +699,10 @@ fn cell_wall(p: vec2<f32>, t: f32) -> f32 {
 
 // The net of bright lines that waves throw on what is under them: the walls of two fields of cells
 // that drift apart and bend with the noise, brightest where they cross. It covers everything,
-// with no gaps wider than a cell. In square pixels, like every other picture here.
+// with no gaps wider than a cell. Smooth with filtered textures, in square pixels without.
 fn caustics(p: vec2<f32>) -> f32 {
     let t = g.camera_pos.w;
-    let q = floor(p * CAUSTIC_PIXELS) / CAUSTIC_PIXELS;
+    let q = mix(floor(p * CAUSTIC_PIXELS) / CAUSTIC_PIXELS, p, g.air.z);
     let bend = textureSampleLevel(noise_tex, noise_sampler, q * 0.04 + t * vec2<f32>(0.004, 0.003), 0.0).rg - 0.5;
     // Noise of two sizes, so the walls curve. They also swell and thin along their length.
     let wobble = textureSampleLevel(noise_tex, noise_sampler, q * 0.19 + t * vec2<f32>(-0.006, 0.005), 0.0).ba - 0.5;
@@ -671,6 +824,33 @@ fn apply_fog(color: vec3<f32>, world_pos: vec3<f32>) -> vec3<f32> {
     return mix(misted, fog.rgb, fog.a);
 }
 
+// How far off the stains start to fade, and are gone, in meters.
+const MOTTLE_NEAR: f32 = 120.0;
+const MOTTLE_FAR: f32 = 380.0;
+
+// How many times its clarity of sea a look has to go through before nothing of what is under
+// it comes back: `fs_water` keeps of the bottom its color times the light let through twice,
+// about exp(-2 × thickness / clarity), so at 6 it is a millionth, under any screen's last step.
+const SEA_HIDES: f32 = 6.0;
+// Past the map of the waters the clarity is the nearest water's, which may be a stream's: it
+// is taken to be at least this, in meters (clearer than any sea), so nothing that shows is lost.
+const SEA_CLEAREST: f32 = 24.0;
+
+// Whether the sea lies so thick between the camera and this point that nothing of it shows: the
+// sea is drawn over it, so it needn't be lit. Only seen from above, and never inside a boat or
+// under a stream or pond, whose water may not be drawn that far off.
+fn hidden_by_the_sea(p: vec3<f32>, water: vec3<f32>, in_water_area: bool) -> bool {
+    let below = water.x - p.y;
+    let sea = abs(water.x - g.level_map.w) < 0.05;
+    if !in_water_area || !sea || below <= 0.0 || g.water_state.x > 0.0 || g.camera_pos.y <= water.x {
+        return false;
+    }
+    // From the point up to the surface, along the look back to the camera; in a trough the
+    // surface is lower, by at most the tallest wave.
+    let up = (g.camera_pos.y - p.y) / max(distance(g.camera_pos.xyz, p), 1e-4);
+    return max(below - g.sea.z, 0.0) / max(up, 1e-4) > SEA_HIDES * max(water.y, SEA_CLEAREST);
+}
+
 // What the large stains multiply a surface's color by here: two sizes of blotches
 // on the ground, drawn out into long streaks down whatever stands up.
 fn mottle_at(world_pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
@@ -684,7 +864,9 @@ fn mottle_at(world_pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
     let large = textureSample(noise_tex, noise_sampler, p / size).r;
     let small = textureSample(noise_tex, noise_sampler, p / size * 3.7 + vec2<f32>(0.37, 0.11)).g;
     let t = smoothstep(0.33, 0.68, large * 0.62 + small * 0.38);
-    return mix(vec3<f32>(1.0), mix(g.mottle_dark.rgb, g.mottle_light.rgb, t), g.surface.z);
+    // They repeat every few tens of meters, which far off reads as a grid.
+    let near = 1.0 - smoothstep(MOTTLE_NEAR, MOTTLE_FAR, distance(world_pos, g.camera_pos.xyz));
+    return mix(vec3<f32>(1.0), mix(g.mottle_dark.rgb, g.mottle_light.rgb, t), g.surface.z * near);
 }
 
 // What wet surfaces multiply their color by, and how rough they get.
@@ -727,12 +909,22 @@ const GROUND_EDGE: f32 = 0.33;
 const ROCK_SIDE_SCALE: f32 = 0.3;
 const ROCK_SIDE_BLUR: f32 = 2.0;
 
+// Below this share of a pixel, a ground's picture is left out: it would change the color by
+// less than half a step of an 8-bit screen.
+const GROUND_LEAST: f32 = 0.002;
+
 // One ground picture at two scales, mixed by `mixing`, as `textureSampleGrad` allows outside
-// uniform control flow.
+// uniform control flow. The wash is mostly all one or the other, and then only that is read.
 fn ground_pair(tex: texture_2d<f32>, uv: vec2<f32>, dx: vec2<f32>, dy: vec2<f32>, mixing: f32) -> vec4<f32> {
-    let uv2 = GROUND_TURN * uv * GROUND_SECOND_SCALE + vec2<f32>(0.37, 0.71);
-    let a = textureSampleGrad(tex, material_sampler, uv, dx, dy);
-    let b = textureSampleGrad(tex, material_sampler, uv2, GROUND_TURN * dx * GROUND_SECOND_SCALE, GROUND_TURN * dy * GROUND_SECOND_SCALE);
+    var a = vec4<f32>(0.0);
+    var b = vec4<f32>(0.0);
+    if mixing < 1.0 {
+        a = textureSampleGrad(tex, material_sampler, uv, dx, dy);
+    }
+    if mixing > 0.0 {
+        let uv2 = GROUND_TURN * uv * GROUND_SECOND_SCALE + vec2<f32>(0.37, 0.71);
+        b = textureSampleGrad(tex, material_sampler, uv2, GROUND_TURN * dx * GROUND_SECOND_SCALE, GROUND_TURN * dy * GROUND_SECOND_SCALE);
+    }
     return mix(a, b, mixing);
 }
 
@@ -745,7 +937,13 @@ fn ground_average(tex: texture_2d<f32>) -> vec3<f32> {
 // of fresh water (pebbles in the metal slot, mud low down in the normal slot, both linear)
 // blended by the weights in the tangent. Noise bites into each border, and the weights are sharpened,
 // so the ground changes in crisp ragged patches, never in a smooth gradient: PSX, not clean.
-fn ground_texel(in: VsOut, at: vec2<f32>, uv_dx: vec2<f32>, uv_dy: vec2<f32>) -> GroundTexel {
+// From how far to how far the ground's pictures give way to their average colors, in meters.
+const GROUND_FLAT_FROM: f32 = 220.0;
+const GROUND_FLAT_TO: f32 = 700.0;
+
+// Each picture is read only where it shows: most of the land is one ground, seen from above,
+// and far off only the averages are left.
+fn ground_texel(in: VsOut, at: vec2<f32>, uv_dx: vec2<f32>, uv_dy: vec2<f32>, wp_dx: vec3<f32>, wp_dy: vec3<f32>) -> GroundTexel {
     let bias = exp2(g.mottle_light.w);
     let dx = uv_dx * bias;
     let dy = uv_dy * bias;
@@ -755,35 +953,8 @@ fn ground_texel(in: VsOut, at: vec2<f32>, uv_dx: vec2<f32>, uv_dy: vec2<f32>) ->
     var w = max(in.tangent + vec4<f32>(bite * GROUND_EDGE_BITE * vec3<f32>(0.6, 1.0, 0.8), bite.x * GROUND_EDGE_BITE), vec4<f32>(0.0));
     w = w * w * w * w;
     w = w / max(w.x + w.y + w.z + w.w, 1e-4);
-    let grass = ground_pair(base_color_tex, in.uv, dx, dy, mixing).rgb * in.albedo;
-    let sand = ground_pair(emissive_tex, in.uv, dx, dy, mixing).rgb;
-    // Rock is also seen from the side, so a cliff isn't the picture smeared down it: the uv
-    // keeps its scale (meters per repeat, from the derivatives) and takes the height as v.
-    let wp_dx = dpdx(in.world_pos);
-    let wp_dy = dpdy(in.world_pos);
-    // The picture's repeats per meter come from the material (its tile, in `water_look.w`), never
-    // from the derivatives: the height multiplies them, and a pixel's error in those, by some
-    // hundred meters, would scatter the picture into grain. Up close a face fills the view, so
-    // on the sides it repeats `ROCK_SIDE_SCALE` times as far apart, a mip coarser.
-    let per_meter = ROCK_SIDE_SCALE / max(material.water_look.w, 0.01);
-    let side_bias = bias * ROCK_SIDE_BLUR;
-    let v = -in.world_pos.y * per_meter;
-    let face = pow(abs(normalize(in.normal)), vec3<f32>(8.0));
-    let faces = face / max(face.x + face.y + face.z, 1e-4);
-    let rock_top = ground_pair(occlusion_tex, in.uv, dx, dy, mixing).rgb;
-    let side_uv = in.uv * ROCK_SIDE_SCALE;
-    let side_dx = uv_dx * ROCK_SIDE_SCALE * side_bias;
-    let side_dy = uv_dy * ROCK_SIDE_SCALE * side_bias;
-    let rock_x = ground_pair(occlusion_tex, vec2<f32>(side_uv.y, v), vec2<f32>(side_dx.y, -wp_dx.y * per_meter * side_bias),
-        vec2<f32>(side_dy.y, -wp_dy.y * per_meter * side_bias), mixing).rgb;
-    let rock_z = ground_pair(occlusion_tex, vec2<f32>(side_uv.x, v), vec2<f32>(side_dx.x, -wp_dx.y * per_meter * side_bias),
-        vec2<f32>(side_dy.x, -wp_dy.y * per_meter * side_bias), mixing).rgb;
-    let rock = srgb_to_linear(rock_top * faces.y + rock_x * faces.x + rock_z * faces.z);
     // Mud where a stream nears the sea, pebbles up the land.
     let muddy = smoothstep(6.0, 2.0, in.world_pos.y - g.level_map.w);
-    let pebbles = srgb_to_linear(ground_pair(metallic_roughness_tex, in.uv, dx, dy, mixing).rgb);
-    let mud = srgb_to_linear(ground_pair(normal_tex, in.uv, dx, dy, mixing).rgb);
-    let bed = mix(pebbles, mud, muddy);
     let bed_average = mix(srgb_to_linear(ground_average(metallic_roughness_tex)), srgb_to_linear(ground_average(normal_tex)), muddy);
     // Two scales of patches, lighter or darker and greener or drier, so a wide view never
     // reads as one flat color.
@@ -791,9 +962,63 @@ fn ground_texel(in: VsOut, at: vec2<f32>, uv_dx: vec2<f32>, uv_dy: vec2<f32>) ->
     let light = (1.0 + (wash.g - 0.5) * GROUND_WASH_LIGHT) * (1.0 + (broad.r - 0.5) * GROUND_WASH_LIGHT);
     let hue = mix(vec3<f32>(1.0), GROUND_GREEN, smoothstep(0.4, 0.7, broad.g * 0.6 + wash.b * 0.4));
     var out: GroundTexel;
-    out.texel = (grass * hue * w.x + sand * w.y + rock * w.z + bed * w.w) * light;
     out.average = (ground_average(base_color_tex) * in.albedo * hue * w.x + ground_average(emissive_tex) * w.y
         + srgb_to_linear(ground_average(occlusion_tex)) * w.z + bed_average * w.w) * light;
+    // Far off, the pictures' repeats would show as a grid: there the land is broad dabs of its
+    // average colors, which is also how a painter lays in a distance.
+    let far = smoothstep(GROUND_FLAT_FROM, GROUND_FLAT_TO, distance(in.world_pos, g.camera_pos.xyz));
+    out.texel = out.average;
+    if far >= 1.0 {
+        return out;
+    }
+    var texel = vec3<f32>(0.0);
+    if w.x > GROUND_LEAST {
+        texel += ground_pair(base_color_tex, in.uv, dx, dy, mixing).rgb * in.albedo * hue * w.x;
+    }
+    if w.y > GROUND_LEAST {
+        texel += ground_pair(emissive_tex, in.uv, dx, dy, mixing).rgb * w.y;
+    }
+    if w.z > GROUND_LEAST {
+        // Rock is also seen from the side, so a cliff isn't the picture smeared down it: the uv
+        // keeps its scale (meters per repeat, from the derivatives) and takes the height as v.
+        // The picture's repeats per meter come from the material (its tile, in `water_look.w`),
+        // never from the derivatives: the height multiplies them, and a pixel's error in those,
+        // by some hundred meters, would scatter the picture into grain. Up close a face fills
+        // the view, so on the sides it repeats `ROCK_SIDE_SCALE` times as far apart, a mip coarser.
+        let per_meter = ROCK_SIDE_SCALE / max(material.water_look.w, 0.01);
+        let side_bias = bias * ROCK_SIDE_BLUR;
+        let v = -in.world_pos.y * per_meter;
+        let face = pow(abs(normalize(in.normal)), vec3<f32>(8.0));
+        let faces = face / max(face.x + face.y + face.z, 1e-4);
+        let side_uv = in.uv * ROCK_SIDE_SCALE;
+        let side_dx = uv_dx * ROCK_SIDE_SCALE * side_bias;
+        let side_dy = uv_dy * ROCK_SIDE_SCALE * side_bias;
+        var rock = vec3<f32>(0.0);
+        if faces.y * w.z > GROUND_LEAST {
+            rock += ground_pair(occlusion_tex, in.uv, dx, dy, mixing).rgb * faces.y;
+        }
+        if faces.x * w.z > GROUND_LEAST {
+            rock += ground_pair(occlusion_tex, vec2<f32>(side_uv.y, v), vec2<f32>(side_dx.y, -wp_dx.y * per_meter * side_bias),
+                vec2<f32>(side_dy.y, -wp_dy.y * per_meter * side_bias), mixing).rgb * faces.x;
+        }
+        if faces.z * w.z > GROUND_LEAST {
+            rock += ground_pair(occlusion_tex, vec2<f32>(side_uv.x, v), vec2<f32>(side_dx.x, -wp_dx.y * per_meter * side_bias),
+                vec2<f32>(side_dy.x, -wp_dy.y * per_meter * side_bias), mixing).rgb * faces.z;
+        }
+        texel += srgb_to_linear(rock) * w.z;
+    }
+    if w.w > GROUND_LEAST {
+        var pebbles = vec3<f32>(0.0);
+        var mud = vec3<f32>(0.0);
+        if muddy < 1.0 {
+            pebbles = srgb_to_linear(ground_pair(metallic_roughness_tex, in.uv, dx, dy, mixing).rgb);
+        }
+        if muddy > 0.0 {
+            mud = srgb_to_linear(ground_pair(normal_tex, in.uv, dx, dy, mixing).rgb);
+        }
+        texel += mix(pebbles, mud, muddy) * w.w;
+    }
+    out.texel = mix(texel * light, out.average, far);
     return out;
 }
 
@@ -837,23 +1062,47 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
     let drift_noise = textureSample(noise_tex, noise_sampler, fixed_at * 0.11).a;
     let rain_noise = textureSample(noise_tex, noise_sampler, fixed_at * 0.9 + g.camera_pos.w * vec2<f32>(0.13, -0.17)).rg;
     let base_sample = textureSampleBias(base_color_tex, material_sampler, in.uv, g.mottle_light.w);
-    // The last mip level is the texture's average color.
-    let average = textureSampleLevel(base_color_tex, material_sampler, in.uv, f32(textureNumLevels(base_color_tex) - 1u));
-    let normal_sample = textureSample(normal_tex, material_sampler, in.uv).xyz;
-    let mr_sample = textureSample(metallic_roughness_tex, material_sampler, in.uv);
-    let occlusion_sample = textureSample(occlusion_tex, material_sampler, in.uv).r;
-    let emissive_sample = textureSample(emissive_tex, material_sampler, in.uv).rgb;
+    // The ground keeps other pictures in the other slots, and `ground_texel` reads them; its
+    // material has no normal map, metal, occlusion or glow, so these would count for nothing.
+    // The material is the same for the whole draw, so this is still uniform control flow.
+    var average = vec4<f32>(1.0);
+    var normal_sample = vec3<f32>(0.5, 0.5, 1.0);
+    var mr_sample = vec4<f32>(1.0);
+    var occlusion_sample = 1.0;
+    var emissive_sample = vec3<f32>(0.0);
+    if material.flags.w != 3u {
+        // The last mip level is the texture's average color.
+        average = textureSampleLevel(base_color_tex, material_sampler, in.uv, f32(textureNumLevels(base_color_tex) - 1u));
+        normal_sample = textureSample(normal_tex, material_sampler, in.uv).xyz;
+        mr_sample = textureSample(metallic_roughness_tex, material_sampler, in.uv);
+        occlusion_sample = textureSample(occlusion_tex, material_sampler, in.uv).r;
+        emissive_sample = textureSample(emissive_tex, material_sampler, in.uv).rgb;
+    }
     // Derivatives also need uniform control flow, so take them before any discard.
     let raw_alpha = base_sample.a * material.base_color.a;
     let alpha = coverage(raw_alpha, fwidth(raw_alpha));
     let uv_dx = dpdx(in.uv);
     let uv_dy = dpdy(in.uv);
+    let wp_dx = dpdx(in.world_pos);
+    let wp_dy = dpdy(in.world_pos);
+    if faded_out(in.world_pos.xz, in.clip.xy) {
+        discard;
+    }
+    // The band of sand that the waves keep wet, by whichever body of water is here.
+    let water_here = water_level_at(in.world_pos.xz);
+    let height_over_water = in.world_pos.y - water_here.x;
+    // Inside a boat, it is dry, whatever the level of the water outside.
+    let in_water_area = water_here.x > NO_WATER
+        && !(g.counts.w > 0u && height_over_water < g.water_state.w + 0.5 && in_hull(in.world_pos, HULL_MARGIN));
+    if hidden_by_the_sea(in.world_pos, water_here, in_water_area) {
+        return vec4<f32>(0.0, 0.0, 0.0, alpha);
+    }
 
     var base_rgb = base_sample.rgb;
     var average_rgb = average.rgb;
     var tint = in.albedo;
     if material.flags.w == 3u {
-        let ground = ground_texel(in, fixed_at, uv_dx, uv_dy);
+        let ground = ground_texel(in, fixed_at, uv_dx, uv_dy, wp_dx, wp_dy);
         base_rgb = ground.texel;
         average_rgb = ground.average;
         tint = vec3<f32>(1.0);
@@ -889,16 +1138,12 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
     // Weather on what is out in the open, which leaves characters out, like the stains.
     let foliage = select(0.0, 1.0, material.flags.w == 1u);
     let faces_up = smoothstep(0.35, 0.85, in.normal.y) * in.mottled;
-    // The band of sand that the waves keep wet, by whichever body of water is here.
-    let water_here = water_level_at(in.world_pos.xz);
-    let height_over_water = in.world_pos.y - water_here.x;
-    // Inside a boat, it is dry, whatever the level of the water outside.
-    let in_water_area = water_here.x > NO_WATER
-        && !(g.counts.w > 0u && height_over_water < g.water_state.w + 0.5 && in_hull(in.world_pos, HULL_MARGIN));
     let shore = select(0.0, 1.0 - smoothstep(g.water_state.w * 0.7, g.water_state.w * 1.3 + 0.12, height_over_water - (drift_noise - 0.5) * 0.3), in_water_area);
     let wet = max(g.weather.x, shore) * in.mottled;
-    let puddle = smoothstep(0.56, 0.64, puddle_noise) * smoothstep(0.85, 0.97, in.normal.y) * wet * (1.0 - foliage);
-    s.albedo *= mix(1.0, WET_DARKEN, wet) * (1.0 - 0.35 * puddle);
+    // No puddles on what is under water: there they showed as shiny patches on the sea floor.
+    let above_water = select(1.0, smoothstep(-0.25, 0.0, height_over_water), in_water_area);
+    let puddle = smoothstep(0.5, 0.57, puddle_noise) * smoothstep(0.85, 0.97, in.normal.y) * wet * (1.0 - foliage) * above_water;
+    s.albedo *= mix(1.0, WET_DARKEN, wet) * (1.0 - 0.45 * puddle);
     s.roughness = mix(mix(s.roughness, WET_ROUGHNESS, wet * (0.4 + 0.6 * faces_up) * (1.0 - foliage)), 0.1, puddle);
     s.n = normalize(s.n + vec3<f32>(rain_noise.x - 0.5, 0.0, rain_noise.y - 0.5) * 0.22 * puddle * g.weather.z);
     // Snow settles in patches first. It keeps the relief of what is under it and the stains
@@ -918,8 +1163,11 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
     // cloud, there is no one spot of light for it to mirror.
     var dry = s;
     dry.roughness = max(s.roughness, dry_roughness);
-    let sunlight = shade(dry, g.sun_dir.xyz, g.sun_color.rgb * shadow, 0.0);
-    var color = sunlight + point_lights(in.world_pos, s);
+    let room = room_at(in.world_pos, in.normal);
+    let indoors = room >= 0;
+    let sky_in = select(1.0, INDOOR_SKY, indoors);
+    let sunlight = shade(dry, g.sun_dir.xyz, g.sun_color.rgb * shadow * select(1.0, INDOOR_SUN, indoors), 0.0);
+    var color = sunlight + point_lights(in.world_pos, s, room);
 
     // Ambient: hemisphere light for diffuse, a blurred sky for reflections.
     let n_dot_v = max(dot(s.n, s.v), 1e-4);
@@ -927,7 +1175,7 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
     let environment = mix(sky_gradient(r), hemisphere(r), s.roughness);
     let f_ambient = s.f0 + (max(vec3<f32>(1.0 - s.roughness), s.f0) - s.f0) * pow(1.0 - n_dot_v, 5.0);
     let ambient = hemisphere(s.n) * s.albedo * (1.0 - s.metallic) + environment * f_ambient * (1.0 - s.roughness * 0.5);
-    color += ambient * occlusion;
+    color += ambient * occlusion * sky_in;
 
     // Under the water, less light gets down, and what does draws its net on what faces up.
     if in_water_area && height_over_water < 0.0 {
@@ -937,8 +1185,15 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
         let seen_from = distance(in.world_pos, g.camera_pos.xyz);
         // Whatever faces the light gets it, and something standing up still catches some.
         let facing = saturate(dot(s.n, to_sun) * 0.8 + 0.2);
-        let close = 1.0 - smoothstep(CAUSTIC_NEAR, CAUSTIC_FAR, seen_from);
-        let net = caustics(sun_lands.xz + g.origin.xz) * close;
+        // The net is the sun gathered by the waves: sharp near the surface, and going out with
+        // the light itself on the way down, by how clear the water is.
+        let reaches = 1.0 - smoothstep(CAUSTIC_DEEP.x, CAUSTIC_DEEP.y, below / max(water_here.y, 0.01));
+        let close = (1.0 - smoothstep(CAUSTIC_NEAR, CAUSTIC_FAR, seen_from)) * reaches;
+        // Past `CAUSTIC_FAR` the net counts for nothing, so it isn't worked out.
+        var net = 0.0;
+        if close > 0.0 {
+            net = caustics(sun_lands.xz + g.origin.xz) * close;
+        }
         // Where a shaft comes down, the net is brighter, and the water around it is lit.
         let shaft = shaft_at(sun_lands.xz + g.origin.xz);
         let in_shaft = shaft.x * (1.0 - smoothstep(shaft.y, shaft.y * 1.6, below));
@@ -976,7 +1231,8 @@ fn fs_main(in: VsOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f
 // square pixels like the rest. The middle stays dark so the rim and the veins have something
 // to stand out from.
 fn crystal_glow(world_pos: vec3<f32>, n: vec3<f32>, v: vec3<f32>, tint: vec3<f32>) -> vec3<f32> {
-    let p = (floor((world_pos + g.origin.xyz) * CRYSTAL_PIXELS) + 0.5) / CRYSTAL_PIXELS;
+    let at = world_pos + g.origin.xyz;
+    let p = mix((floor(at * CRYSTAL_PIXELS) + 0.5) / CRYSTAL_PIXELS, at, g.air.z);
     let t = g.camera_pos.w;
     let bent = refract(-v, n, 0.72);
     let near = p + bent * 0.3;
@@ -1071,6 +1327,19 @@ const CLOUD_SHADES: f32 = 6.0;
 const CLOUD_COVER_STEPS: f32 = 4.0;
 const CLOUD_GRIT: f32 = 0.3;
 const CLOUD_PIXELS: f32 = 350.0;
+// How bright the thin edges of a cloud get towards the light, and how tight that is around it.
+const CLOUD_LINING: f32 = 0.5;
+const CLOUD_LINING_TIGHT: f32 = 10.0;
+// How much of the moon's glow its clouds take.
+const CLOUD_MOONLIT: f32 = 0.55;
+// The moon's glow: its color and brightness, and how many of its own sizes the tight and the
+// wide halo reach.
+const MOON_GLOW: vec3<f32> = vec3<f32>(0.16, 0.2, 0.38);
+const MOON_HALO_TIGHT: f32 = 2.2;
+const MOON_HALO_WIDE: f32 = 7.0;
+// How much of the air's haze lies over the sky at the horizon, and how high it goes.
+const AIR_HORIZON: f32 = 0.8;
+const AIR_HORIZON_TOP: f32 = 0.28;
 
 // How thick the clouds are at `q` on the noise.
 fn cloud_density(q: vec2<f32>) -> f32 {
@@ -1097,7 +1366,7 @@ fn fs_sky(in: SkyOut) -> @location(0) vec4<f32> {
 
     // The clouds lie on a flat ceiling, so they draw out and crowd together towards the horizon.
     let ceiling = dir.xz / (max(dir.y, 0.0) + 0.4);
-    let drift = g.wind.xy * g.camera_pos.w * g.cloud_nebula.w * 0.004;
+    let drift = g.aloft.xy * g.cloud_nebula.w * 0.004;
     // Square texels on the ceiling, which travel with the clouds, so they don't crawl across them.
     let on_ceiling = ceiling * g.cloud_light.w * 0.34 + drift;
     let p = mix((floor(on_ceiling * CLOUD_PIXELS) + 0.5) / CLOUD_PIXELS, on_ceiling, g.sky_glow.w);
@@ -1125,6 +1394,7 @@ fn fs_sky(in: SkyOut) -> @location(0) vec4<f32> {
     // The pictures of the sun and moon, or else the plain disc where the light is.
     let above = smoothstep(-0.015, 0.01, dir.y);
     var picture = 0.0;
+    var moon_glow = vec3<f32>(0.0);
     if g.sky_sun.w > 0.0 || g.sky_moon.w > 0.0 {
         let moon_uv = picture_uv(dir, g.sky_moon);
         let moon = textureSampleLevel(moon_picture, sky_sampler, moon_uv, 0.0);
@@ -1135,6 +1405,16 @@ fn fs_sky(in: SkyOut) -> @location(0) vec4<f32> {
         let sun_cover = sun.a * picture_mask(sun_uv) * above;
         color = mix(color, sun.rgb * g.sky_params.y, sun_cover);
         picture = max(moon_cover, sun_cover);
+        // The moon lights the sky around it: a tight glow and a wide one, as wide as it is big.
+        if g.sky_moon.w > 0.0 {
+            let cos_moon = max(dot(dir, g.sky_moon.xyz), 0.0);
+            let size = atan(g.sky_moon.w);
+            let tight = pow(cos_moon, 1.0 / (1.0 - cos(size * MOON_HALO_TIGHT)));
+            let wide = pow(cos_moon, 1.0 / (1.0 - cos(size * MOON_HALO_WIDE)));
+            let night = min(g.sky_params.x * 4.0, 1.0) * above;
+            moon_glow = MOON_GLOW * (tight * 0.55 + wide * 0.18) * night;
+            color += moon_glow * (1.0 - moon_cover);
+        }
     } else {
         let disc = smoothstep(g.sun_disc.x, g.sun_disc.x + 0.0004, cos_sun);
         color += g.sun_color.rgb * disc * 8.0;
@@ -1153,7 +1433,13 @@ fn fs_sky(in: SkyOut) -> @location(0) vec4<f32> {
     let cover = cloud_bands(smoothstep(edge - 0.16 * soft, edge + 0.2 * soft, density), CLOUD_COVER_STEPS) * present;
     let through = 1.0 - cloud_bands(smoothstep(edge - 0.16 * soft, edge + 0.32, density), CLOUD_COVER_STEPS) * present;
     let shade = smoothstep(edge, edge + 0.4, density) * 0.55 + lit_side * 0.45;
-    let cloud = mix(g.cloud_dark.rgb, g.cloud_light.rgb, cloud_bands(shade * shade, CLOUD_SHADES)) * (1.0 + halo * 1.2 * through);
+    var cloud = mix(g.cloud_dark.rgb, g.cloud_light.rgb, cloud_bands(shade * shade, CLOUD_SHADES)) * (1.0 + halo * 1.2 * through);
+    // Their thin edges glow towards the light, the way the sun comes through a cloud's rim.
+    let thin_edge = 1.0 - smoothstep(edge, edge + 0.3, density);
+    let lining = pow(max(cos_sun, 0.0), CLOUD_LINING_TIGHT) * CLOUD_LINING + pow(max(cos_sun, 0.0), 3.0) * CLOUD_LINING * 0.15;
+    // By night the light is the moon's, whose glow lights them instead.
+    let by_day = 1.0 - 0.85 * min(g.sky_params.x * 4.0, 1.0);
+    cloud += g.sun_color.rgb * thin_edge * lining * by_day + moon_glow * CLOUD_MOONLIT * (0.4 + thin_edge);
     // The stars are behind the pictures, whatever is in front of those.
     let starry_sky = bare_sky + stars(dir, nebula) * g.sky_params.x * (1.0 - picture);
     color = max(mix(starry_sky, cloud, cover) + (color - bare_sky) * through, vec3<f32>(0.0));
@@ -1161,6 +1447,10 @@ fn fs_sky(in: SkyOut) -> @location(0) vec4<f32> {
     // Lightning shows up mostly inside the clouds.
     color += vec3<f32>(0.62, 0.68, 1.0) * g.sun_disc.w * (0.2 + cover * 1.4);
 
+    // Low down, the sky is seen through as much air as the far land, and melts into its haze.
+    if g.air.x > 0.0 {
+        color = mix(color, air_color(dir), AIR_HORIZON * (1.0 - smoothstep(-0.03, AIR_HORIZON_TOP, dir.y)));
+    }
     // Fog the sky as if it were very far away, so the horizon melts into the fog.
     color = apply_fog(color, g.camera_pos.xyz + dir * 600.0);
     return vec4<f32>(color, 1.0);
@@ -1180,6 +1470,7 @@ struct WaterOut {
     @location(4) rest: vec2<f32>,
     // How far the water has been lifted, on a sea.
     @location(5) lift: f32,
+    // 1 on a sea, 2 on a fall's curtain.
     @location(6) @interpolate(flat) is_sea: f32,
     // On a river. x how much of it is falling, y how churned up it is below a fall,
     // z how far across, from -1 to 1 at the banks, w how far down the fall.
@@ -1191,6 +1482,8 @@ struct WaterOut {
     @location(10) join_deep: vec3<f32>,
     // On a flow map (fresh water drawn as one surface), which way the water goes, m/s.
     @location(11) flow: vec2<f32>,
+    // On a fall's curtain: meters across it, and the seconds a drop takes from the lip to here.
+    @location(12) fall_at: vec2<f32>,
 }
 
 // How far a point has to be from the sides of a hull, in texels of its map, to count as inside
@@ -1427,28 +1720,38 @@ fn vs_water(v: VertexIn, i: InstanceIn) -> WaterOut {
     }
     out.fall = v.tangent;
     out.shown = v.normal.y;
+    // `normal.z` 0.45 marks a fall's curtain (`grimora_world::Curtain`): its vertex color is
+    // where on the sheet it is, not a color.
+    let curtain = v.normal.z > 0.42 && v.normal.z < 0.48;
+    if curtain {
+        out.is_sea = 2.0;
+        out.fall_at = v.color.xy;
+        out.tint = srgb_to_linear(i.tint.rgb);
+    }
     // `normal.z` 0.25 marks a river that blends into another water: its vertex color is the
     // other's deep color, and the weights its shallow color and how much to take of them.
-    if v.normal.z > 0.2 {
+    if v.normal.z > 0.2 && !curtain {
         out.join = vec4<f32>(srgb_to_linear(v.weights.yzw), v.weights.x);
         out.join_deep = srgb_to_linear(v.color);
         out.tint = srgb_to_linear(i.tint.rgb);
     }
     // `normal.z` 0.35 marks fresh water drawn as one surface in chunks: its uv is the flow,
     // and its ripples go by the world, or two chunks would part where they meet.
+    // A curtain carries the flow it had over the lip.
     let flowing = v.normal.z > 0.3 && v.normal.z < 0.5;
     if flowing {
         out.flow = v.uv;
     }
-    // What boils under a fall, and the bumps running down a sheet of it.
+    // What boils under a fall, and the bumps running down a sheet of it. On a flow map the
+    // tangent's x is how far into a curtain's stretch it is, not how much it falls.
     // Ripples and boils go with the sheet, measured from its middle, so the origin doesn't move them.
     let own = select(world.xz - i.model_3.xz, world.xz + g.origin.xz, flowing);
-    let boil = max(v.tangent.y, v.tangent.x * 0.6) * FALL_BOIL;
+    let boil = select(max(v.tangent.y, v.tangent.x * 0.6), v.tangent.y, flowing) * FALL_BOIL;
     world.y += boil * sin(own.x * 2.3 + g.camera_pos.w * 7.0) * cos(own.y * 1.9 - g.camera_pos.w * 5.3);
     let t = g.camera_pos.w * max(g.wind.w, 0.2);
     // A coarser grid carries longer waves. `normal.x` says how much longer.
-    let along = dot(own, g.wind.xy) * v.normal.x;
-    let across = dot(own, vec2<f32>(-g.wind.y, g.wind.x)) * v.normal.x;
+    let along = dot(own, g.gust.zw) * v.normal.x;
+    let across = dot(own, vec2<f32>(-g.gust.w, g.gust.z)) * v.normal.x;
     // The harder the wind, the higher the waves.
     let height = i.normal_1.w * g.weather.w;
     world.y += height * (sin(along * 1.3 - t * 1.1) + 0.6 * sin(across * 2.1 + t * 0.8 + along * 0.7));
@@ -1456,9 +1759,9 @@ fn vs_water(v: VertexIn, i: InstanceIn) -> WaterOut {
     let rise_along = (1.3 * cos(along * 1.3 - t * 1.1) + 0.7 * second) * height * v.normal.x;
     let rise_across = 2.1 * second * height * v.normal.x;
     out.slope = vec4<f32>(
-        rise_along * g.wind.x - rise_across * g.wind.y,
+        rise_along * g.gust.z - rise_across * g.gust.w,
         0.0,
-        rise_along * g.wind.y + rise_across * g.wind.x,
+        rise_along * g.gust.w + rise_across * g.gust.z,
         step(v.normal.x, 0.99),
     );
     out.rest = world.xz;
@@ -1476,8 +1779,6 @@ const WATER_FAR_DEEPEN: f32 = 0.6;
 const WATER_TINTED_MIRROR: f32 = 0.7;
 // Pixels of bend at the top of the screen's height, for a refraction of 1.
 const WATER_BEND: f32 = 0.05;
-// How many square pixels of foam fit in a meter.
-const FOAM_PIXELS: f32 = 8.0;
 // Seconds a flow map's picture slides before that phase gives way to the other.
 const FLOW_PERIOD: f32 = 3.0;
 // The light that comes through the top of a wave with the sun behind it.
@@ -1485,13 +1786,48 @@ const WAVE_GLOW: f32 = 0.55;
 // How bright the water is at the bottom of a wave.
 const WAVE_TROUGH: f32 = 0.7;
 const WATER_SCATTER: f32 = 0.25;
-// How many square pixels of a fall fit in a meter, how fast it comes down in meters per
-// second, and how high what it stirs up is.
-const FALL_PIXELS: f32 = 5.0;
-const FALL_SPEED: f32 = 7.0;
+// How high what a fall stirs up is.
 const FALL_BOIL: f32 = 0.14;
 // Under full sun, white water would be all bloom, without a line left in it.
-const FALL_BRIGHTNESS: f32 = 0.7;
+const FALL_BRIGHTNESS: f32 = 0.8;
+// How much of its color the light on white water loses: foam is white in any light.
+const FALL_GREY: f32 = 0.55;
+// How far across (1 at the sides) a curtain starts to fray into what is behind it, over how
+// much, and how much more ragged its sides get by its foot.
+const FALL_FRAY: f32 = 0.78;
+const FALL_FRAY_SPAN: f32 = 0.3;
+const FALL_RAGGED: f32 = 0.9;
+// How thick a curtain's water is to the light going through it, in meters, how much its ropes
+// tilt it, and how much of the sky it mirrors next to a still water.
+const FALL_THICK: f32 = 0.5;
+const FALL_BUMPS: f32 = 1.4;
+// How far before a fall's lip, in meters, a stream stops looking deeper than it is, and how
+// deep it looks there.
+const LIP_REACH: f32 = 2.5;
+const LIP_DEPTH: f32 = 0.5;
+// What it shows there instead: a bed of dark stones, lit by the sky.
+const LIP_BED: vec3<f32> = vec3<f32>(0.1, 0.085, 0.065);
+const FALL_MIRROR: f32 = 0.45;
+
+// One layer of streaks down a fall: noise stretched `across` (repeats per meter) and `along`
+// (repeats per second of the water's flight), sliding down with the water. Only the fraction
+// of how far it has slid counts, since the noise repeats every 1, so a long game keeps every
+// bit of precision.
+fn fall_layer(p: vec2<f32>, across: f32, along: f32, t: f32, shift: vec2<f32>) -> vec4<f32> {
+    return textureSample(noise_tex, noise_sampler, vec2<f32>(p.x * across, p.y * along - fract(t * along)) + shift);
+}
+
+// The water of a fall at `p`, meters across it and seconds of flight down it: x broad sheets,
+// y ropes, z threads, w finer threads. Each moves at the water's own speed, which grows as it
+// falls, so they stretch into streaks lower down.
+fn fall_pattern(p: vec2<f32>, t: f32) -> vec4<f32> {
+    return vec4<f32>(
+        fall_layer(p, 0.2, 0.22, t, vec2<f32>(0.0, 0.0)).b,
+        fall_layer(p, 0.5, 0.4, t * 1.04, vec2<f32>(0.37, 0.11)).a,
+        fall_layer(p, 1.2, 0.75, t * 1.08, vec2<f32>(0.71, 0.53)).r,
+        fall_layer(p, 2.9, 1.4, t * 1.12, vec2<f32>(0.13, 0.29)).g,
+    );
+}
 // How bright the underside of the surface is against what is overhead, between its ripples
 // and on them, and its foam and the sun.
 const UNDER_SURFACE_DARK: f32 = 0.7;
@@ -1515,7 +1851,8 @@ fn fs_water(in: WaterOut) -> @location(0) vec4<f32> {
     // phases that take turns, each fading out before it has slid too far.
     let flowing = material.water_flow.w > 1.5;
     let tile = material.water_look.w;
-    let is_sea = in.is_sea > 0.5;
+    let is_sea = in.is_sea > 0.5 && in.is_sea < 1.5;
+    let curtain = in.is_sea > 1.5;
     let deep_color = mix(in.tint * material.base_color.rgb, in.join_deep, in.join.w);
     let shallow_color = mix(material.water_shallow.rgb, in.join.rgb, in.join.w);
     let view = g.camera_pos.xyz - in.world_pos;
@@ -1523,7 +1860,7 @@ fn fs_water(in: WaterOut) -> @location(0) vec4<f32> {
     let time = g.camera_pos.w;
 
     // Two layers of the picture drifting at different speeds with the wind, or along a river.
-    var drift = g.wind.xy * time * g.wind.w * 0.012;
+    var drift = g.aloft.xy * g.wind.w * 0.012;
     if river {
         drift = -material.water_flow.xy * time;
     }
@@ -1572,18 +1909,10 @@ fn fs_water(in: WaterOut) -> @location(0) vec4<f32> {
         turn,
     );
     // On a river it follows the water around the bends, like the picture does.
-    // The strands of a fall: long lines down the water, each pair of layers at its own speed.
-    // On a flow map, along and across the flow.
-    var fall_uv = uv * tile;
-    if flowing {
-        let down = in.flow / max(length(in.flow), 1e-4);
-        fall_uv = vec2<f32>(dot(fixed_at, vec2<f32>(-down.y, down.x)), dot(fixed_at, down));
-    }
-    let fall_at = floor(fall_uv * FALL_PIXELS) / FALL_PIXELS;
-    let fall_t = time * FALL_SPEED;
-    let strand_a = textureSampleLevel(noise_tex, noise_sampler, vec2<f32>(fall_at.x * 0.13, (fall_at.y - fall_t) * 0.009), 0.0).b;
-    let strand_b = textureSampleLevel(noise_tex, noise_sampler, vec2<f32>(fall_at.x * 0.41 + 0.37, (fall_at.y - fall_t * 1.5) * 0.023), 0.0).a;
-    let strand = strand_a * 0.6 + strand_b * 0.4;
+    // A fall's own place: on a curtain, meters across and seconds of flight; on a river of a
+    // scene, its uv in meters.
+    let fall_uv = select(uv * tile, in.fall_at, curtain);
+    let falling = fall_pattern(fall_uv, time);
     let foam_uv = select(fixed_rest / max(tile * 0.8, 0.01), uv / 0.8, river);
     let foam_picture = mix(
         textureSample(emissive_tex, material_sampler, foam_uv + drift),
@@ -1591,14 +1920,15 @@ fn fs_water(in: WaterOut) -> @location(0) vec4<f32> {
         turn,
     );
     var facet = normalize(cross(dpdy(in.world_pos), dpdx(in.world_pos)));
-    if facet.y < 0.0 {
+    // A curtain hangs, and faces whoever looks at it; any other water faces up.
+    if select(facet.y, dot(facet, view), curtain) < 0.0 {
         facet = -facet;
     }
-
-    // A fall frays at its sides, and the rock shows through.
-    if in.fall.x > 0.4 && abs(in.fall.z) > 1.02 - (strand - 0.42) * 1.5 {
+    // A stream's surface stops at the lip of a fall and starts again where its curtain lands.
+    if flowing && !curtain && in.fall.x > 0.0 {
         discard;
     }
+
     // The water doesn't get inside a boat.
     if g.counts.w > 0u && in_hull(in.world_pos, 0) {
         discard;
@@ -1616,13 +1946,17 @@ fn fs_water(in: WaterOut) -> @location(0) vec4<f32> {
     } else if in.slope.w > 0.5 {
         n = normalize(vec3<f32>(-in.slope.x, 1.0, -in.slope.z));
     }
-    n = mix(n, vec3<f32>(0.0, 1.0, 0.0), far * select(1.0, 0.4, is_sea));
+    n = mix(n, vec3<f32>(0.0, 1.0, 0.0), far * select(select(1.0, 0.4, is_sea), 0.0, curtain));
     let ripple = (ripple_a + ripple_b - 1.0) * 0.32 * (1.0 - far * 0.7) * (1.0 + g.weather.z)
         * select(1.0, 0.45, is_sea);
     n = normalize(n + vec3<f32>(ripple.x, 0.0, ripple.y));
+    // A curtain is never smooth: its ropes and threads tilt it every way, which breaks up the
+    // sky it mirrors into streaks.
+    let roped = vec3<f32>(falling.y - 0.5, (falling.x - 0.5) * 0.4, falling.z - 0.5) * FALL_BUMPS;
+    n = select(n, normalize(n + roped), curtain);
 
     // ---- foam, in square pixels fixed on the water, from what the waves are doing
-    let foam_at = floor(fixed_rest * FOAM_PIXELS) / FOAM_PIXELS;
+    let foam_at = fixed_rest;
     let lod = max(log2(distance_to / 30.0), 0.0);
     let foam_a = textureSampleLevel(noise_tex, noise_sampler, foam_at * 0.073 + still * 0.4, lod).b;
     let foam_b = textureSampleLevel(noise_tex, noise_sampler, foam_at * 0.29 - still * 0.7, lod).a;
@@ -1665,23 +1999,38 @@ fn fs_water(in: WaterOut) -> @location(0) vec4<f32> {
     let size = vec2<f32>(textureDimensions(water_depth));
     let pixel = vec2<i32>(in.clip.xy);
     let straight = behind_water(pixel, size);
-    let straight_depth = max(in.world_pos.y - straight.y, 0.0);
+    // A curtain's water is as thick as it is, whatever is behind it.
+    let straight_depth = select(max(in.world_pos.y - straight.y, 0.0), FALL_THICK, curtain);
+    // Over the last of a stream before the lip of a fall, a look through the water goes on past
+    // the edge and finds the fall's whole height under it, which would paint a deep band across
+    // the stream: there it is as thick as the stream, and what is beyond the edge isn't seen.
+    let near_lip = select(0.0, smoothstep(-LIP_REACH, 0.0, in.fall.x), flowing && !curtain);
+    let past_edge = near_lip * smoothstep(1.0, 3.0, straight_depth);
     let bend = n.xz * material.water_look.y * WATER_BEND * size.y * saturate(straight_depth * 0.5) / (1.0 + distance_to * 0.08);
     let bent_pixel = clamp(pixel + vec2<i32>(bend), vec2<i32>(0), vec2<i32>(size) - 1);
     let bent_behind = behind_water(bent_pixel, size);
-    // What stands out of the water isn't bent into it.
-    let is_under = bent_behind.y < in.world_pos.y;
+    // What stands out of the water isn't bent into it, nor is what is in front of a curtain.
+    let below = bent_behind.y < in.world_pos.y;
+    let beyond = distance(bent_behind, g.camera_pos.xyz) > distance_to;
+    let is_under = select(below, beyond, curtain);
     let seen_pixel = select(pixel, bent_pixel, is_under);
     let behind = select(straight, bent_behind, is_under);
-    let thickness = distance(behind, in.world_pos);
+    var thickness = select(distance(behind, in.world_pos), FALL_THICK, curtain);
+    thickness = mix(thickness, min(thickness, LIP_DEPTH), near_lip);
     let clarity = material.water_shallow.w;
     let through = exp(-thickness / clarity * WATER_ABSORPTION);
-    let under = textureLoad(water_scene, seen_pixel, 0).rgb;
+    let under = mix(
+        textureLoad(water_scene, seen_pixel, 0).rgb,
+        LIP_BED * (g.ambient_sky.rgb + g.sun_color.rgb * max(g.sun_dir.y, 0.0)),
+        past_edge,
+    );
 
     // ---- the water's own color
     var s: Surface;
     // On a sea, how deep it is goes by the bottom: a hull just under the surface isn't a shoal.
-    let water_below = select(in.world_pos.y - behind.y, max(in.world_pos.y - behind.y, depth_below), is_sea);
+    var water_below = select(in.world_pos.y - behind.y, max(in.world_pos.y - behind.y, depth_below), is_sea);
+    water_below = select(water_below, FALL_THICK, curtain);
+    water_below = mix(water_below, min(water_below, LIP_DEPTH), near_lip);
     let deepness = 1.0 - exp(-max(water_below, 0.0) / (clarity * 0.5));
     let body = mix(shallow_color, deep_color, deepness);
     let picture = mix((layer_a.rgb + layer_b.rgb) * 0.5, average.rgb, far);
@@ -1694,7 +2043,7 @@ fn fs_water(in: WaterOut) -> @location(0) vec4<f32> {
 
     let shadow = shadow_factor(in.world_pos, n);
     var color = shade(s, g.sun_dir.xyz, g.sun_color.rgb * shadow, 0.0);
-    color += point_lights(in.world_pos, s) + hemisphere(n) * s.albedo;
+    color += point_lights(in.world_pos, s, -1) + hemisphere(n) * s.albedo;
     // A murky water gives back more of the light that enters it, and a clear one lets it through.
     let murk = material.water_look.x;
     color *= 0.75 + murk * 0.5;
@@ -1720,7 +2069,8 @@ fn fs_water(in: WaterOut) -> @location(0) vec4<f32> {
 
     // The water mirrors the sky more the lower you look along it, and hides what's under it.
     // Far away the waves hide part of it, and the color of the water itself shows.
-    let mirror = (0.02 + 0.98 * pow(1.0 - max(dot(n, s.v), 0.0), 5.0)) * (1.0 - far * WATER_FAR_DEEPEN);
+    let mirror = (0.02 + 0.98 * pow(1.0 - max(dot(n, s.v), 0.0), 5.0)) * (1.0 - far * WATER_FAR_DEEPEN)
+        * select(1.0, FALL_MIRROR, curtain);
     var mirrored = reflect(-s.v, n);
     mirrored.y = abs(mirrored.y);
     color += g.sun_color.rgb * pow(max(dot(mirrored, g.sky_glow.xyz), 0.0), 300.0) * WATER_GLINT * (1.0 - mirror) * shadow;
@@ -1736,7 +2086,8 @@ fn fs_water(in: WaterOut) -> @location(0) vec4<f32> {
     // ---- the rest of the foam
     // Around what stands in the water and along its shore, reaching out in a broken ring.
     // Far off the depth buffer can't tell a few centimeters apart, and every shallow would ring.
-    let ring = (1.0 - saturate(straight_depth / CONTACT_FOAM)) * (1.0 - smoothstep(300.0, 900.0, distance_to));
+    let ring = (1.0 - saturate(straight_depth / CONTACT_FOAM)) * (1.0 - smoothstep(300.0, 900.0, distance_to))
+        * select(1.0, 0.0, curtain);
     let on_edge = smoothstep(0.5, 0.56, lace + ring * ring * 0.62 - 0.12) * step(0.001, ring) * (0.35 + 0.65 * web);
     // The front of each breaker, and what it leaves behind as it goes in.
     var on_break = 0.0;
@@ -1761,21 +2112,36 @@ fn fs_water(in: WaterOut) -> @location(0) vec4<f32> {
     let foam_light = g.sun_color.rgb * shadow * max(g.sun_dir.y, 0.05) + hemisphere(vec3<f32>(0.0, 1.0, 0.0));
     color = mix(color, material.water_foam.rgb * foam_light, foam);
 
-    // ---- a fall: hard steps from the water's own color to white, whiter the further down
-    if in.fall.x > 0.01 {
-        let whiten = strand + in.fall.w * 0.2 - 0.04;
-        var strands = mix(deep_color, shallow_color, 0.35);
-        if whiten > 0.62 {
-            strands = material.water_foam.rgb;
-        } else if whiten > 0.52 {
-            strands = mix(shallow_color, material.water_foam.rgb, 0.45);
-        }
-        color = mix(color, strands * foam_light * FALL_BRIGHTNESS, smoothstep(0.1, 0.55, in.fall.x));
+    // ---- a fall: glassy over the lip, then torn into white ropes that thicken on the way down,
+    // threads of light running down them, and frayed at its sides into what is behind. On a
+    // stream's surface there is none: its falls are curtains.
+    let fall_share = select(select(in.fall.x, 0.0, flowing), in.fall.x, curtain);
+    var cover = 1.0;
+    if fall_share > 0.01 {
+        let fallen = saturate(in.fall.w);
+        // Foam scatters light from every side, and is white in any of it.
+        var fall_light = g.sun_color.rgb * shadow * (0.35 + 0.65 * max(dot(n, g.sun_dir.xyz), 0.0))
+            + hemisphere(n) + hemisphere(vec3<f32>(0.0, 1.0, 0.0)) * 0.35;
+        fall_light = mix(fall_light, vec3<f32>(dot(fall_light, vec3<f32>(0.2126, 0.7152, 0.0722))), FALL_GREY);
+        // From a few white ropes over clear water at the lip to nearly all white at the foot.
+        let rope = falling.x * 0.45 + falling.y * 0.35 + falling.z * 0.2;
+        let aerated = saturate(fallen * 1.15 + 0.12);
+        let white = smoothstep(0.64 - 0.34 * aerated, 0.72 - 0.28 * aerated, rope);
+        let threads = smoothstep(0.58, 0.7, falling.z * 0.55 + falling.w * 0.45);
+        // Through the clear water the rock shows, darkened; on it, the light runs in threads.
+        let glass = color * 0.85 + fall_light * threads * 0.12;
+        let foam = material.water_foam.rgb * fall_light * FALL_BRIGHTNESS * (0.82 + 0.36 * falling.y);
+        let sheet = mix(glass, foam, white) + fall_light * threads * 0.1 * white;
+        color = mix(color, sheet, fall_share);
+        // Its sides tear into loose ropes, softly, and more so the further it falls.
+        let tear = falling.x * 0.5 + falling.w * 0.5;
+        let edge = abs(in.fall.z) + (0.5 - tear) * (0.35 + FALL_RAGGED * fallen);
+        cover = 1.0 - smoothstep(FALL_FRAY, FALL_FRAY + FALL_FRAY_SPAN, edge) * fall_share;
     }
 
     // A river fading into the sea gives way to what is behind it, already fogged.
     let behind_color = textureLoad(water_scene, pixel, 0).rgb;
-    return vec4<f32>(mix(behind_color, apply_fog(color, in.world_pos), saturate(in.shown)), 1.0);
+    return vec4<f32>(mix(behind_color, apply_fog(color, in.world_pos), saturate(in.shown) * cover), 1.0);
 }
 
 // ---------------------------------------------------------------- particles
@@ -1811,14 +2177,21 @@ struct ParticleOut {
     @location(10) view_depth: f32,
     // Meters from the head, along a trail.
     @location(11) along: f32,
+    @location(12) world: vec3<f32>,
+    // Where the particle is, and half its size.
+    @location(13) @interpolate(flat) center: vec4<f32>,
 }
 
 // Light falling on a particle, without shadows: a particle has no surface, so
 // each source counts in full and the sun is softened as if scattered inside it.
 fn particle_light(world_pos: vec3<f32>) -> vec3<f32> {
-    var total = (g.ambient_sky.rgb + g.ambient_ground.rgb) * 0.5 + g.sun_color.rgb * 0.35;
+    let room = room_at(world_pos, vec3<f32>(0.0));
+    var total = ((g.ambient_sky.rgb + g.ambient_ground.rgb) * 0.5 + g.sun_color.rgb * 0.35) * select(1.0, INDOOR_SKY, room >= 0);
     for (var i = 0u; i < g.counts.x; i++) {
         let pl = g.point_lights[i];
+        if i32(pl.params.y) - 1 != room {
+            continue;
+        }
         let d = distance(pl.position_radius.xyz, world_pos);
         if d < pl.position_radius.w {
             total += point_light_radiance(pl, d, g.camera_pos.w);
@@ -1832,8 +2205,8 @@ fn vs_particle(@builtin(vertex_index) index: u32, p: ParticleIn) -> ParticleOut 
     let corner = vec2<f32>(f32(index & 1u), f32(index >> 1u)) * 2.0 - 1.0;
     let center = p.position_size.xyz;
     let half_size = p.position_size.w * 0.5;
-    let lying = p.params.w > 9.5;
-    let shape = p.params.w - select(0.0, 10.0, lying);
+    let lying = p.params.w > 31.5;
+    let shape = p.params.w - select(0.0, 32.0, lying);
     let trail = u32(shape + 0.5) == 5u;
 
     // Camera axes; straight up or down, any right vector will do.
@@ -1859,27 +2232,54 @@ fn vs_particle(@builtin(vertex_index) index: u32, p: ParticleIn) -> ParticleOut 
     let side = vec2<f32>(-axis.y, axis.x);
     let offset = axis * corner.y * (half_size + stretch) + side * corner.x * half_size;
     var world = center + right * offset.x + up * offset.y;
+    // A stretched one keeps its length in the world, and only turns around it to face the
+    // camera: rain stays upright whichever way the camera looks, and seen from below it runs
+    // to a point overhead. Laid out on screen instead, it swung around as the camera tilted.
+    let reach = length(p.stretch_rotation.xyz);
+    var long_side = stretch;
+    if !lying && !trail && reach > 1e-4 {
+        let run = p.stretch_rotation.xyz / reach;
+        let seen = cross(run, normalize(center - g.camera_pos.xyz));
+        let turned = length(seen);
+        let wide = select(right, seen / max(turned, 1e-5), turned > 0.02);
+        world = center + run * corner.y * (half_size + reach) + wide * corner.x * half_size;
+        long_side = reach;
+    }
     if trail {
         // End to end in the world, so the pieces meet whatever the depth.
         let across = side * corner.x * half_size;
         world = center + p.stretch_rotation.xyz * corner.y + right * across.x + up * across.y;
     }
+    // A piece of a blade's sheet: four corners in the world, the base and the tip at two
+    // moments (see `BladeTrail`), so the pieces meet edge to edge.
+    let ribbon = u32(shape + 0.5) == 13u;
+    let later = f32(index & 1u);
+    let up_blade = f32(index >> 1u);
+    var here = center;
+    if ribbon {
+        let start = mix(center, p.stretch_rotation.xyz, up_blade);
+        let end = mix(p.flow.xyz, p.look.xyz, up_blade);
+        world = mix(start, end, later);
+        here = (center + p.stretch_rotation.xyz + p.flow.xyz + p.look.xyz) * 0.25;
+    }
 
     var light = vec3<f32>(p.params.x);
     if p.params.y > 0.0 {
-        light += particle_light(center) * p.params.y;
+        light += particle_light(here) * p.params.y;
     }
     let color = srgb_to_linear(p.color.rgb) * light;
 
     // Fog fades added light away and tints what covers the background. Blending
     // comes from alpha alone, so additive particles write none. Right at the lens
     // they fade out instead of filling the screen.
-    let opacity = p.color.a * smoothstep(0.1, 0.8, distance(center, g.camera_pos.xyz));
+    let opacity = p.color.a * smoothstep(0.1, 0.8, distance(here, g.camera_pos.xyz));
     let cover = opacity * (1.0 - p.params.z);
-    let fog = fog_at(center);
+    let fog = fog_at(here);
 
     var out: ParticleOut;
     out.clip = g.view_proj * vec4<f32>(world, 1.0);
+    out.world = world;
+    out.center = vec4<f32>(center, half_size);
     out.uv = corner;
     out.color = vec4<f32>(color * opacity * (1.0 - fog.a) + fog.rgb * fog.a * cover, cover);
     out.shape = shape;
@@ -1895,10 +2295,47 @@ fn vs_particle(@builtin(vertex_index) index: u32, p: ParticleIn) -> ParticleOut 
         out.body = srgb_to_linear(p.body.rgb) * p.body.a * fade;
         out.heart = srgb_to_linear(p.heart.rgb) * p.heart.a * fade;
         out.color = vec4<f32>(fog.rgb * fog.a * cover, cover);
-        out.texels = vec2<f32>(half_size, half_size + stretch) * p.look.y;
+        out.texels = vec2<f32>(half_size, half_size + long_side) * p.look.y;
         out.view_depth = dot(world - g.camera_pos.xyz, forward);
     }
+    if ribbon {
+        out.uv = vec2<f32>(mix(p.stretch_rotation.w, p.detail.x, later), up_blade);
+        out.along = mix(p.flow.w, -1.0 - p.look.w, later);
+        out.look = vec4<f32>(0.0);
+        out.flow = vec4<f32>(0.0);
+        out.texels = vec2<f32>(0.0);
+    }
     return out;
+}
+
+// A blade's sheet. `uv.x` is how old (0 at the blade, 1 gone), `uv.y` how far up the blade
+// (0 the base, 1 the tip), `along` the meters the tip has traveled. It is a crescent: the
+// whole blade's width at the head, only the edge at the tail, with a hot line along the
+// tip's path and strands, running along the path, that eat it from the tail.
+fn blade_ribbon(in: ParticleOut) -> vec4<f32> {
+    let t = clamp(in.uv.x, 0.0, 1.0);
+    let v = clamp(in.uv.y, 0.0, 1.0);
+    let seed = in.detail.y;
+    let bite = in.detail.z;
+    let s = in.along;
+    let a = textureSampleLevel(noise_tex, noise_sampler, vec2<f32>(s * 0.18 + seed, v * 0.8 + seed * 0.31), 0.0);
+    let b = textureSampleLevel(noise_tex, noise_sampler, vec2<f32>(s * 0.55 + seed * 1.7, v * 3.4), 0.0);
+    let strand = a.r * 0.55 + b.g * 0.45;
+    let life = 1.0 - t;
+    let inner = mix(0.1, 0.88, pow(t, 0.7));
+    let band = smoothstep(inner, inner + mix(0.4, 0.08, t), v + (strand - 0.5) * 0.3 * bite);
+    let eaten = smoothstep(0.0, 0.28, strand + 0.6 - t * (0.6 + 0.6 * bite));
+    let edge = smoothstep(0.84, 0.985, v) * (1.0 - 0.6 * smoothstep(0.985, 1.0, v));
+    var heat = band * (0.2 + 0.8 * v * v) * life + edge * pow(life, 0.5) * 0.95 + exp(-t * 16.0) * v * 0.7;
+    heat *= mix(1.0, 0.55 + 0.9 * strand, bite);
+    let alpha = clamp((band * (0.3 + 0.7 * life) + edge * life) * eaten, 0.0, 1.0);
+    if alpha <= 0.002 {
+        discard;
+    }
+    let h = clamp(heat, 0.0, 1.0);
+    var color = mix(in.rim, in.body, clamp(h * 2.0, 0.0, 1.0));
+    color = mix(color, in.heart, clamp(h * 2.0 - 1.0, 0.0, 1.0));
+    return vec4<f32>(color + in.color.rgb, in.color.a) * alpha;
 }
 
 // Two thin rings, with a band of strokes between them, a different sign in each cell.
@@ -1924,10 +2361,50 @@ fn rune_field(uv: vec2<f32>) -> f32 {
     return field;
 }
 
-// A shape as a field: 0 on its outline and up to 1 inside, below 0 outside.
-fn particle_field(uv: vec2<f32>, shape: f32) -> f32 {
+// A broken line: random heights at whole numbers of `y`, straight between them.
+fn jag(y: f32, key: f32) -> f32 {
+    let i = floor(y);
+    let a = fract(sin((i + key) * 127.1) * 43758.5453);
+    let b = fract(sin((i + 1.0 + key) * 127.1) * 43758.5453);
+    return mix(a, b, y - i) - 0.5;
+}
+
+// Lightning from the top of the particle to the bottom, where it is held, with one fork.
+// It strikes anew many times a second.
+fn bolt_field(uv: vec2<f32>, seed: f32) -> f32 {
+    let key = seed * 37.0 + floor(g.camera_pos.w * 18.0) * 7.3;
+    let free = clamp((uv.y + 1.0) * 1.6, 0.0, 1.0);
+    let path = (jag(uv.y * 2.6, key) * 1.1 + jag(uv.y * 8.0, key * 1.7) * 0.32) * free;
+    var field = 1.0 - abs(uv.x - path) / 0.085;
+    let down = 0.25 - uv.y;
+    if down > 0.0 && down < 0.85 {
+        let side = sign(jag(0.5, key + 3.0));
+        let fork = path + side * down * 0.55 + jag(uv.y * 7.0, key + 5.0) * 0.35 * down;
+        field = max(field, (1.0 - abs(uv.x - fork) / 0.05) * (1.0 - down / 0.85));
+    }
+    return field;
+}
+
+// A shape as a field: 0 on its outline and up to 1 inside, below 0 outside. `seed` tells
+// particles of the same emitter apart.
+fn particle_field(uv: vec2<f32>, shape: f32, seed: f32) -> f32 {
     let index = u32(shape + 0.5);
     switch index {
+        case 8u: {
+            // Inside one circle and outside another, set lower.
+            return min(1.0 - length(uv), length(uv + vec2<f32>(0.0, 0.3)) - 0.92) * 5.0;
+        }
+        case 9u: { return bolt_field(uv, seed); }
+        case 10u: {
+            var field = 1.0;
+            for (var i = 0.0; i < 3.0; i += 1.0) {
+                let turn = i * 2.094 + (fract(sin((seed + i) * 91.7) * 4375.85) - 0.5) * 0.9;
+                let reach = 0.24 + fract(sin((seed + i) * 57.3) * 2861.33) * 0.16;
+                field = min(field, reach - dot(vec2<f32>(cos(turn), sin(turn)), uv));
+            }
+            return field * 3.0;
+        }
+        case 11u: { return (1.0 - length(vec2<f32>(abs(uv.x) + 0.75, uv.y)) / 1.25) * 2.5; }
         case 1u: { return 1.0 - abs(uv.x) - abs(uv.y); }
         case 2u: {
             // Round at the bottom, pointed at the top, and cooler the higher it goes.
@@ -1952,11 +2429,121 @@ fn particle_field(uv: vec2<f32>, shape: f32) -> f32 {
     }
 }
 
+// Fire (`ParticleShape::Flame`): the tongue's shape cut out of a turbulent field that is
+// fixed in the world and rises through it. Tongues next to each other share the field, so
+// they burn as one body instead of a pile of sprites, and two layers rising at different
+// speeds and bent by slow swirls make it boil instead of slide. The noise bites deeper the
+// higher it goes: the root is solid and the tip tears into licks. flow.xy is the field's
+// motion in m/s (y below 0 rises), flow.z its repeats per meter, flow.w how hard the swirls
+// bend it and lash the tip, detail.z how deep the noise bites. xy the noise, z the heat.
+fn fire_burn(in: ParticleOut) -> vec3<f32> {
+    var right = cross(g.camera_forward.xyz, vec3<f32>(0.0, 1.0, 0.0));
+    if dot(right, right) < 1e-4 {
+        right = vec3<f32>(1.0, 0.0, 0.0);
+    }
+    right = normalize(right);
+    let ahead = vec3<f32>(right.z, 0.0, -right.x);
+    var place = vec2<f32>(dot(in.world, right), in.world.y + dot(in.world, ahead) * 0.5);
+    if in.look.y > 0.0 && g.air.z < 0.5 {
+        place = (floor(place * in.look.y) + 0.5) / in.look.y;
+    }
+    let freq = max(in.flow.z, 0.05);
+    let rise = in.flow.xy * g.camera_pos.w;
+    let swirl = textureSampleLevel(noise_tex, noise_sampler, (place + rise * 0.4) * freq * 0.3 + 0.21, 3.0);
+    let p = (place + rise) * freq + (swirl.rg - 0.5) * (0.6 + in.flow.w * 2.4);
+    let a = textureSampleLevel(noise_tex, noise_sampler, p * vec2<f32>(1.0, 0.5), 2.5);
+    let b = textureSampleLevel(noise_tex, noise_sampler, (p + rise * freq * 0.7) * vec2<f32>(1.8, 0.9) + 0.37, 2.0);
+    let turb = (a.b * 0.65 + b.a * 0.35 - 0.5) * 4.0;
+
+    // The tongue: round at its root, narrowing to a tip that the swirls lash about.
+    let up = clamp(in.uv.y * 0.5 + 0.5, 0.0, 1.0);
+    let sway = (swirl.b - 0.5) * 2.0 * in.flow.w * up * up;
+    let width = max(pow(1.0 - up, 0.75) * sqrt(clamp(up * 7.0, 0.0, 1.0)), 1e-3);
+    let body = 1.0 - pow(min(abs(in.uv.x - sway) / width, 2.0), 1.6);
+    let bite = in.detail.z * (0.35 + 1.1 * up);
+    let heat = body * (1.0 - 0.5 * up) + turb * bite - in.look.x;
+    return vec3<f32>(a.rg, heat);
+}
+
+// A whole fire in one particle (`ParticleShape::Volume`), raymarched through the sphere
+// the particle stands for, like a blazing aura (`blaze`) around one round bed of fuel low in
+// it. It stops at the scenery, and the turbulence is tied to the fire, so it stays put.
+const VOLUME_STEPS: i32 = 36;
+
+fn fuel(p: vec3<f32>, half: f32) -> f32 {
+    let h = clamp(p.y, 0.0, half * 0.25);
+    return length(p - vec3<f32>(0.0, h, 0.0)) - half * 0.18;
+}
+
+fn fire_volume(in: ParticleOut) -> vec4<f32> {
+    let c = in.center.xyz;
+    let half = max(in.center.w, 1e-3);
+    let eye = g.camera_pos.xyz;
+    let dir = normalize(in.world - eye);
+    let oc = eye - c;
+    let b = dot(oc, dir);
+    let disc = b * b - (dot(oc, oc) - half * half);
+    if disc <= 0.0 {
+        discard;
+    }
+    let root = sqrt(disc);
+    let enter = max(-b - root, 0.0);
+    let ahead = dot(dir, g.camera_forward.xyz);
+    let leave = min(-b + root, scene_view_depth(in.clip.xy) / max(ahead, 1e-3));
+    if leave <= enter {
+        discard;
+    }
+    let base = c - vec3<f32>(0.0, half * 0.55, 0.0);
+    let hug = half * 0.14;
+    let reach = half * 0.75;
+    let freq = max(in.flow.z, 0.05);
+    let rise = in.flow.xy * g.camera_pos.w;
+    let sway = in.flow.w * half;
+    let dt = (leave - enter) / f32(VOLUME_STEPS);
+    let jitter = fract(52.9829189 * fract(dot(in.clip.xy, vec2<f32>(0.06711056, 0.00583715))));
+    var light = vec3<f32>(0.0);
+    var through = 1.0;
+    let cover = clamp(in.color.a * 4.0, 0.0, 1.0);
+    for (var i = 0; i < VOLUME_STEPS; i++) {
+        let q = eye + dir * (enter + dt * (f32(i) + jitter)) - base;
+        let here = fuel(q, half);
+        if here > reach + hug {
+            continue;
+        }
+        // Fires stay put, so the turbulence is fixed in the world: no two burn alike.
+        let w = q + base;
+        let slow = blaze_swirl((vec3<f32>(w.x, w.y * 0.5, w.z) + vec3<f32>(rise.x, rise.y * 0.55, 0.0)) * freq * 0.6, 1.5);
+        let bent = q + (slow.xyz - 0.5) * sway;
+        let wb = bent + base;
+        let fast = blaze_noise((vec3<f32>(wb.x, wb.y * 0.45, wb.z) + vec3<f32>(rise, 0.0)) * freq + 0.17, 1.0);
+        let tongue = saturate((fast.r * 0.7 + slow.a * 0.3 - 0.5) * 3.2 + 0.5);
+        let pulled = fuel(bent - vec3<f32>(0.0, tongue * reach, 0.0), half);
+        var heat = saturate(1.0 - pulled / hug);
+        heat *= exp(-max(here, 0.0) / (reach * 0.8));
+        heat *= 0.45 + 0.75 * tongue;
+        if heat > 0.002 {
+            let a = 1.0 - exp(-heat * heat * 26.0 / half * 0.25 * dt);
+            let hot = heat * heat;
+            var color = mix(in.rim, in.body, saturate(hot * 2.6));
+            color = mix(color, in.heart, saturate(hot * 2.6 - 1.0));
+            light += color * (0.3 + hot) * a * through;
+            through *= 1.0 - a * cover;
+        }
+        if through < 0.02 {
+            break;
+        }
+    }
+    return vec4<f32>(light, (1.0 - through) * cover);
+}
+
 // What is left of a particle: xy the noise there, z how far inside the part that has not
 // burned away it is, 0 on the outline. No derivatives, so it can run after a branch.
 fn particle_burn(in: ParticleOut) -> vec3<f32> {
+    if u32(in.shape + 0.5) == 2u {
+        return fire_burn(in);
+    }
     var uv = in.uv;
-    if in.texels.x > 0.0 {
+    if in.texels.x > 0.0 && g.air.z < 0.5 {
         uv = (floor(uv * in.texels) + 0.5) / in.texels;
     }
     let drift = in.flow.xy * g.camera_pos.w + in.detail.y * vec2<f32>(7.3, 3.1);
@@ -1969,7 +2556,7 @@ fn particle_burn(in: ParticleOut) -> vec3<f32> {
     let hold = select(1.0, clamp(uv.y * 0.5 + 0.6, 0.0, 1.0), flame);
     let bent = uv + (noise.rg - 0.5) * 2.0 * in.flow.w * hold;
     let bite = mix(1.0, noise.b * 2.0, in.detail.z);
-    return vec3<f32>(noise.rg, particle_field(bent, in.shape) * bite - in.look.x);
+    return vec3<f32>(noise.rg, particle_field(bent, in.shape, in.detail.y) * bite - in.look.x);
 }
 
 // How far in front of the camera the scenery is at this pixel.
@@ -2002,6 +2589,12 @@ fn fs_particle(in: ParticleOut) -> @location(0) vec4<f32> {
     if in.detail.w < 0.5 {
         return in.color * mask;
     }
+    if u32(in.shape + 0.5) == 12u {
+        return fire_volume(in);
+    }
+    if u32(in.shape + 0.5) == 13u {
+        return blade_ribbon(in);
+    }
 
     let burn = particle_burn(in);
     var heat = burn.z;
@@ -2009,6 +2602,11 @@ fn fs_particle(in: ParticleOut) -> @location(0) vec4<f32> {
     // With steps of color the outline is as hard as they are, as if painted. Without, a
     // soft shape fades all the way to its center, as the plain one does.
     var alpha = smoothstep(0.0, 0.2, heat);
+    if u32(in.shape + 0.5) == 2u {
+        // Fire has no outline: it thins into the air.
+        alpha = smoothstep(0.0, 0.35, heat);
+        heat = heat * 1.15;
+    }
     if in.shape < 0.5 {
         let inside = clamp(heat, 0.0, 1.0);
         alpha = inside * inside;
@@ -2044,4 +2642,246 @@ fn fs_particle_bend(in: ParticleOut) -> @location(0) vec4<f32> {
     let pixel = in.clip.xy + (burn.xy - 0.5) * 2.0 * reach * strength;
     let inside = clamp(vec2<i32>(pixel), vec2<i32>(0), vec2<i32>(size) - 1);
     return vec4<f32>(textureLoad(scene_copy, inside, 0).rgb, 1.0);
+}
+
+// ---------------------------------------------------------------------------------------
+// Aura skins (`Shading::Aura`): the body's own mesh, skinned like it and drawn a hair off
+// its surface, painted with a living pattern that flows over the body (fire licking up,
+// veins of lightning, smoke, a crust of magma with glowing cracks, a ghost's insides) and
+// lit at the outline. The pattern is stuck to the pose, so it moves with the skin, and it
+// climbs the model's up. The look lives in the material's water slots (see material.rs):
+// water_shallow = thickness, -, noise scale, climb speed;
+// water_foam = outline light, edge power, cover, bands;
+// water_look = pixels, warp, pattern, body brightness;
+// base_color = heart (linear) and glow; emissive = rim (linear).
+
+struct AuraOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) world_pos: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    // Posed, in the model's own space: the pattern sticks to the body.
+    @location(2) local: vec3<f32>,
+    @location(3) local_n: vec3<f32>,
+    // The instance's emissive: how lit the aura is, for fading in and out.
+    @location(4) power: f32,
+}
+
+@vertex
+fn vs_aura(v: VertexIn, i: InstanceIn) -> AuraOut {
+    let skin = skin_matrix(v, i);
+    let skin_n = mat3x3<f32>(skin[0].xyz, skin[1].xyz, skin[2].xyz);
+    let normal_m = mat3x3<f32>(i.normal_0.xyz, i.normal_1.xyz, i.normal_2.xyz) * skin_n;
+    let n = normalize(normal_m * v.normal);
+    let posed = skin * vec4<f32>(v.position, 1.0);
+    let world = (instance_model(i) * posed).xyz + n * material.water_shallow.x;
+    var out: AuraOut;
+    out.clip = g.view_proj * vec4<f32>(world, 1.0);
+    out.world_pos = world;
+    out.normal = n;
+    out.local = posed.xyz;
+    out.local_n = normalize(skin_n * v.normal);
+    out.power = i.tint.a;
+    return out;
+}
+
+// The noise wrapped around a body: three projections blended by the normal, so no side
+// smears.
+fn aura_noise(q: vec3<f32>, n: vec3<f32>) -> vec4<f32> {
+    var w = pow(abs(n), vec3<f32>(4.0));
+    w = w / max(w.x + w.y + w.z, 1e-4);
+    return textureSample(noise_tex, noise_sampler, q.zy) * w.x
+        + textureSample(noise_tex, noise_sampler, q.xz) * w.y
+        + textureSample(noise_tex, noise_sampler, q.xy) * w.z;
+}
+
+// A thin bright line where the noise crosses its middle.
+fn aura_ridge(v: f32, sharp: f32) -> f32 {
+    return pow(saturate(1.0 - abs(v * 2.0 - 1.0)), sharp);
+}
+
+@fragment
+fn fs_aura(in: AuraOut) -> @location(0) vec4<f32> {
+    if u32(material.water_look.z + 0.5) == 5u {
+        return blaze(in);
+    }
+    let a = material.water_shallow;
+    let b = material.water_foam;
+    let look = material.water_look;
+    let pattern = u32(look.z + 0.5);
+    let t = g.camera_pos.w;
+    let to_eye = normalize(g.camera_pos.xyz - in.world_pos);
+    let n = normalize(in.normal);
+    let rim = pow(1.0 - saturate(abs(dot(n, to_eye))), b.y);
+    var q = in.local;
+    if look.x > 0.0 {
+        q = (floor(q * look.x) + 0.5) / look.x;
+    }
+    let s = a.z * 0.15;
+    let nl = normalize(in.local_n);
+    // Magma's crust barely moves; everything else climbs.
+    let climb = vec3<f32>(0.0, t * a.w * s, 0.0);
+    let qs = q * s;
+    // Domain warp: the pattern is bent by a slower layer of itself, so it curls like a fluid.
+    let bend = aura_noise(qs * 0.6 - climb * 0.5 + vec3<f32>(0.13, 0.0, 0.71), nl);
+    let warped = qs + (bend.xyz - 0.5) * look.y;
+    let f1 = aura_noise(warped - climb, nl);
+    let f2 = aura_noise(warped * 2.3 - climb * 1.8 + vec3<f32>(0.37, 0.19, 0.53), nl);
+    let fbm = f1.r * 0.62 + f2.g * 0.38;
+    var value = 0.0;
+    switch pattern {
+        // Veins of lightning crawling over the skin, flickering.
+        case 1u: {
+            let flick = 0.55 + 0.45 * sin(t * 23.0 + f2.a * 40.0);
+            value = max(aura_ridge(f1.b, 18.0), aura_ridge(f2.b, 26.0) * 0.7) * flick;
+        }
+        // Smoke: soft, slow.
+        case 2u: {
+            value = smoothstep(0.3, 0.85, fbm) * 0.75;
+        }
+        // Magma: glowing cracks in a dark crust that breathes.
+        case 3u: {
+            let slow = aura_noise(qs * 1.4 + (bend.xyz - 0.5) * look.y * 0.5 - climb * 0.08, nl);
+            let breath = 0.75 + 0.25 * sin(t * 2.1 + slow.a * 6.0);
+            value = (aura_ridge(slow.r, 6.0) + aura_ridge(slow.b, 10.0) * 0.6) * breath + smoothstep(0.7, 0.95, fbm) * 0.5;
+        }
+        // A ghost: the whole body glows, with currents inside.
+        case 4u: {
+            value = 0.35 + 0.65 * smoothstep(0.25, 0.9, fbm) + aura_ridge(f2.b, 12.0) * 0.4;
+        }
+        // Fire running up the skin.
+        default: {
+            let tongues = smoothstep(0.42, 0.78, fbm + (f2.b - 0.5) * 0.25);
+            value = tongues * (0.7 + 0.3 * f1.a);
+        }
+    }
+    var heat = saturate(value + rim * b.x);
+    if b.w > 0.0 {
+        heat = floor(heat * b.w + 0.5) / b.w;
+    }
+    let heart = material.base_color.rgb;
+    let edge = material.emissive.rgb;
+    var glow = mix(edge, heart, heat) * heat * material.base_color.w;
+    // What it covers the body with: the rim color at its own brightness (dark for magma,
+    // pale for a ghost).
+    let cover = b.z * saturate(1.0 - heat * 0.5);
+    var color = glow + edge * look.w * cover;
+    let fog = fog_at(in.world_pos);
+    color *= 1.0 - fog.a;
+    let power = saturate(in.power);
+    return vec4<f32>(color * power, cover * power);
+}
+
+// ---------------------------------------------------------------------------------------
+// A blazing aura (`AuraPattern::Blaze`): fire as a volume around the body. The body is the
+// bones' capsules (`g.fire`); the box drawn around it marches each ray through. Fire is
+// whatever lies within `hug` of the body pulled down by a turbulence that rises: where the
+// noise is high, a point well above a shoulder still counts as next to it, so tongues
+// stand off the body and climb, and they cool the further they are from it.
+const BLAZE_STEPS: i32 = 24;
+// Never a smaller step than this share of the way through, so a ray along the skin ends.
+const BLAZE_LEAST_STEP: f32 = 0.02;
+
+fn blaze_body(p: vec3<f32>) -> f32 {
+    var d = 1e3;
+    for (var i = 0u; i < g.fire_count.x; i++) {
+        let a = g.fire[i * 2u];
+        let b = g.fire[i * 2u + 1u].xyz;
+        let ab = b - a.xyz;
+        let h = clamp(dot(p - a.xyz, ab) / max(dot(ab, ab), 1e-6), 0.0, 1.0);
+        d = min(d, length(p - a.xyz - ab * h) - a.w);
+    }
+    return d;
+}
+
+// The cheap half of `blaze_noise`: one slanted projection, for the slow swirls.
+fn blaze_swirl(p: vec3<f32>, level: f32) -> vec4<f32> {
+    return textureSampleLevel(noise_tex, noise_sampler, vec2<f32>(p.x + p.z * 0.62, p.y), level);
+}
+
+// Noise in 3D out of the 2D one: two slanted projections, so no side smears.
+fn blaze_noise(p: vec3<f32>, level: f32) -> vec4<f32> {
+    let a = textureSampleLevel(noise_tex, noise_sampler, vec2<f32>(p.x + p.z * 0.62, p.y), level);
+    let b = textureSampleLevel(noise_tex, noise_sampler, vec2<f32>(p.z - p.x * 0.62, p.y) + vec2<f32>(0.31, 0.57), level);
+    return (a + b) * 0.5;
+}
+
+fn blaze(in: AuraOut) -> vec4<f32> {
+    let freq = max(material.water_shallow.z, 0.05);
+    let speed = material.water_shallow.w;
+    let hug = max(material.water_foam.x, 0.01);
+    let reach = max(material.water_foam.y, 0.01);
+    let cover = material.water_foam.z;
+    let sway = material.water_look.y;
+    let glow = material.base_color.w;
+    let heart = material.base_color.rgb;
+    let rim = material.emissive.rgb;
+    let t = g.camera_pos.w;
+    if g.fire_count.x == 0u || in.power <= 0.0 {
+        discard;
+    }
+    let anchor = g.fire_frame[2].xyz;
+    let trail = g.fire_frame[3].xyz;
+    // How far from the body fire can be at all: up by the tongues, back along the trail.
+    let far = reach + hug + length(trail);
+
+    // Only the stretch of the ray inside the body's bounds, grown by that.
+    let eye = g.camera_pos.xyz;
+    let dir = normalize(in.world_pos - eye);
+    let lo = g.fire_frame[0].xyz - vec3<f32>(hug + length(trail)) - vec3<f32>(0.0, 0.1, 0.0);
+    let hi = g.fire_frame[1].xyz + vec3<f32>(hug + length(trail)) + vec3<f32>(0.0, reach, 0.0);
+    let inv = 1.0 / select(dir, vec3<f32>(1e-5), abs(dir) < vec3<f32>(1e-5));
+    let a0 = (lo - eye) * inv;
+    let a1 = (hi - eye) * inv;
+    let enter = max(max(max(min(a0.x, a1.x), min(a0.y, a1.y)), min(a0.z, a1.z)), 0.0);
+    let leave = min(min(max(a0.x, a1.x), max(a0.y, a1.y)), max(a0.z, a1.z));
+    if leave <= enter {
+        discard;
+    }
+    let span = leave - enter;
+    let dt = span / f32(BLAZE_STEPS);
+    // Each pixel starts at its own fraction of a step, so the steps never show as layers.
+    let jitter = fract(52.9829189 * fract(dot(in.clip.xy, vec2<f32>(0.06711056, 0.00583715))));
+    var along = enter + dt * jitter;
+    var light = vec3<f32>(0.0);
+    var through = 1.0;
+    for (var i = 0; i < BLAZE_STEPS * 2; i++) {
+        if along > leave || through < 0.02 {
+            break;
+        }
+        let p = eye + dir * along;
+        let here = blaze_body(p);
+        if here < -0.015 {
+            break;
+        }
+        if here > far {
+            // Nothing can burn this far out: skip the empty air in one go.
+            along += max(here - far, span * BLAZE_LEAST_STEP);
+            continue;
+        }
+        // The turbulence rides with the body, rising through it; two layers rising at
+        // different speeds, the slow one bending the fast, make it boil.
+        let q = p - anchor;
+        let slow = blaze_swirl(vec3<f32>(q.x, q.y * 0.5 - t * speed * 0.55, q.z) * freq * 0.6, 1.5);
+        let bent = q + (slow.xyz - 0.5) * sway * 0.5;
+        let fast = blaze_noise(vec3<f32>(bent.x, bent.y * 0.45 - t * speed, bent.z) * freq + 0.17, 1.0);
+        let tongue = saturate((fast.r * 0.7 + slow.a * 0.3 - 0.5) * 3.2 + 0.5);
+        // A point counts as burning if the body is near once pulled down and forward: the
+        // tongues climb off it and stream back as it moves.
+        let pulled = blaze_body(bent + anchor - tongue * (vec3<f32>(0.0, reach, 0.0) + trail));
+        var heat = saturate(1.0 - pulled / hug);
+        heat *= exp(-max(here, 0.0) / (reach * 0.8));
+        heat *= 0.45 + 0.75 * tongue;
+        let step = min(dt, leave - along);
+        if heat > 0.002 {
+            let density = heat * heat * 26.0;
+            let a = 1.0 - exp(-density * step);
+            let hot = heat * heat;
+            let color = mix(rim, heart, saturate(hot * 1.3)) * (0.25 + hot * 2.2) * glow;
+            light += color * a * through;
+            through *= 1.0 - a * cover;
+        }
+        along += dt;
+    }
+    let fog = fog_at(in.world_pos);
+    return vec4<f32>(light * (1.0 - fog.a), 1.0 - through) * in.power;
 }

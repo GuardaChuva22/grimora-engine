@@ -28,7 +28,7 @@ env_logger = "0.11"
 anyhow = "1"
 hecs = "0.11"
 rapier3d = "0.36"
-kira = { version = "0.12", default-features = false, features = ["cpal", "wav", "pcm", "ogg", "vorbis"] }
+kira = { version = "0.12", default-features = false, features = ["cpal", "wav", "pcm", "ogg", "vorbis", "mp3"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 gilrs = "0.11"
 gltf = { version = "1.4", default-features = false, features = ["import", "utils", "names", "extras", "KHR_materials_emissive_strength"] }

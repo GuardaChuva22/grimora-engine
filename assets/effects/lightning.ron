@@ -1,0 +1,58 @@
+// A bolt striking the ground where the effect is played: the branch itself (it strikes anew
+// many times a second, see `Bolt`), a second, thinner one right after, the flash and its light,
+// a wave along the ground, sparks that bounce and glint where they land, and smoke.
+[
+    (
+        rate: 0.0, burst: 1, lifetime: (0.3, 0.3), max_distance: 300.0,
+        sizes: [2.6, 2.4], upright: 5.0, shape: Bolt,
+        ramp: [(0.3, 0.45, 1.0, 2.0), (0.65, 0.82, 1.0, 5.0), (1.0, 1.0, 1.0, 10.0)],
+        colors: [(1.0, 1.0, 1.0, 1.0), (1.0, 1.0, 1.0, 0.9), (1.0, 1.0, 1.0, 0.0)],
+        erode: [0.0, 0.05, 0.75], bands: 3.0, twinkle: 0.5, emissive: 6.0, additive: 1.0,
+        light: (color: (0.7, 0.82, 1.0), intensity: 16.0, radius: 34.0, linger: 0.22),
+    ),
+    (
+        rate: 0.0, burst: 1, delay: 0.14, lifetime: (0.2, 0.2), max_distance: 300.0, seed: 5,
+        sizes: [1.9, 1.7], upright: 6.5, shape: Bolt,
+        ramp: [(0.3, 0.45, 1.0, 1.5), (0.65, 0.82, 1.0, 3.5), (1.0, 1.0, 1.0, 7.0)],
+        colors: [(1.0, 1.0, 1.0, 0.8), (1.0, 1.0, 1.0, 0.0)],
+        erode: [0.1, 0.8], bands: 3.0, twinkle: 0.7, emissive: 5.0, additive: 1.0,
+    ),
+    (
+        // The flash at the foot.
+        rate: 0.0, burst: 1, lifetime: (0.24, 0.24), position: (0.0, 0.4, 0.0), max_distance: 300.0,
+        sizes: [2.0, 6.5], colors: [(0.75, 0.86, 1.0, 1.0), (0.5, 0.65, 1.0, 0.25), (0.4, 0.5, 1.0, 0.0)],
+        emissive: 9.0, additive: 1.0, soft: 0.6,
+    ),
+    (
+        rate: 0.0, burst: 1, lifetime: (0.55, 0.55), position: (0.0, 0.06, 0.0), flat: true, shape: Wave,
+        sizes: [1.0, 5.5, 8.0, 9.0],
+        ramp: [(0.2, 0.3, 0.9, 1.0), (0.5, 0.7, 1.0, 3.0), (1.0, 1.0, 1.0, 6.0)],
+        colors: [(1.0, 1.0, 1.0, 1.0), (1.0, 1.0, 1.0, 0.6), (1.0, 1.0, 1.0, 0.0)],
+        erode: [0.0, 0.3, 0.8, 1.6], noise: 3.0, grain: 0.6, bands: 3.0, pixels: 20.0,
+        emissive: 4.0, additive: 1.0,
+    ),
+    (
+        rate: 0.0, burst: 44, lifetime: (0.5, 1.3), position: (0.0, 0.2, 0.0), area: (0.2, 0.1, 0.2),
+        spread: 75.0, speed: (3.0, 10.0), acceleration: (0.0, -12.0, 0.0), drag: 0.8, bounce: 0.45,
+        sizes: [0.05, 0.04, 0.0], size_jitter: 0.5, stretch: 0.035, shape: Diamond, twinkle: 0.4,
+        colors: [(1.0, 1.0, 1.0, 1.0), (1.0, 1.0, 1.0, 1.0), (1.0, 1.0, 1.0, 0.0)],
+        tints: [(0.55, 0.7, 1.0, 1.0), (1.0, 1.0, 1.0, 1.0), (0.8, 0.7, 1.0, 1.0)],
+        emissive: 10.0, additive: 1.0,
+    ),
+    (
+        // A glint wherever a spark lands.
+        from: 4, when: Bounce, burst: 1, lifetime: (0.12, 0.22), shape: Star, spin: 200.0,
+        sizes: [0.0, 0.22, 0.0], colors: [(0.8, 0.9, 1.0, 1.0), (0.6, 0.75, 1.0, 0.0)],
+        emissive: 8.0, additive: 1.0,
+    ),
+    (
+        rate: 16.0, duration: 0.7, rates: [1.0, 0.5, 0.0], delay: 0.1, lifetime: (1.4, 2.4),
+        area: (0.5, 0.1, 0.5), spread: 30.0, speed: (0.4, 1.1), acceleration: (0.0, 0.5, 0.0), drag: 0.8,
+        curl: 0.8, curl_scale: 1.5, windy: 1.0, spin: 30.0,
+        sizes: [0.5, 1.3, 1.9], size_jitter: 0.3,
+        ramp: [(0.1, 0.1, 0.13, 1.0), (0.22, 0.22, 0.27, 1.0), (0.36, 0.36, 0.42, 1.0)],
+        colors: [(1.0, 1.0, 1.0, 0.0), (1.0, 1.0, 1.0, 0.5), (1.0, 1.0, 1.0, 0.3), (1.0, 1.0, 1.0, 0.0)],
+        erode: [0.1, 0.25, 0.6, 1.5], noise: 2.0, grain: 0.7, warp: 0.1, flow: (0.0, -0.15), pixels: 18.0,
+        lit: 1.0, soft: 0.5,
+    ),
+]

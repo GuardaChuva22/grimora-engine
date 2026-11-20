@@ -31,6 +31,13 @@ pub struct GenState {
     /// knows what that means.
     #[serde(skip_serializing_if = "BTreeSet::is_empty")]
     pub used: BTreeSet<GenId>,
+    /// What the village thinks of the player, -100..100: greetings, prices, who talks.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub reputation: i32,
+}
+
+fn is_zero(n: &i32) -> bool {
+    *n == 0
 }
 
 impl GenState {
@@ -47,7 +54,7 @@ impl GenState {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.removed.is_empty() && self.moved.is_empty() && self.used.is_empty()
+        self.removed.is_empty() && self.moved.is_empty() && self.used.is_empty() && self.reputation == 0
     }
 
     /// Notes where `id` is if that isn't where it was made, and forgets an old move otherwise.

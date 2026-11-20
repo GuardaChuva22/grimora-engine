@@ -199,7 +199,8 @@ fn the_dead_stay_down_cannot_fight_and_cannot_be_hit() {
     world.get_mut::<Fighter>(a).unwrap().attack();
     let events = run(&mut physics, &mut world, NOBODY, 0.6);
     assert_eq!(hits(&events), [(b, true)]);
-    assert_eq!(clip(&world, b), "die");
+    // The wanderer has the bones for a ragdoll, so it falls as one instead of playing `die`.
+    assert!(world.is_ragdoll(b));
     assert!(world.get::<Health>(b).unwrap().is_dead());
     assert_eq!(world.damage(b, 1.0, &mut physics), None);
 
@@ -207,9 +208,7 @@ fn the_dead_stay_down_cannot_fight_and_cannot_be_hit() {
     let at = world.transform(b).unwrap().position;
     let player = at + Vec3::new(1.0, 1.0, 0.0);
     run(&mut physics, &mut world, player, 2.0);
-    assert_eq!(world.transform(b).unwrap().position, at);
-    assert_eq!(clip(&world, b), "die");
-    assert!(world.get::<Animator>(b).unwrap().finished());
+    assert!(world.is_ragdoll(b));
     assert!(!world.get::<Brain>(b).unwrap().noticed());
 
     // Its capsule is gone, so nobody bumps into the body.
@@ -260,7 +259,7 @@ fn being_hit_wakes_it_up_and_knocks_it_back() {
     let b = format!(
         r#"(name: "b", mesh: Model(path: "{path}"), position: (0.0, 0.0, -1.5), animation: "idle",
             npc: (notice: (radius: 0.1, reaction: Follow(distance: 1.0))),
-            combat: (health: 30.0, team: 1))"#
+            combat: (health: 100.0, team: 1))"#
     );
     let (mut physics, mut world) = world(&format!("{a}, {b}"));
     let (a, b) = (world.find("a").unwrap(), world.find("b").unwrap());

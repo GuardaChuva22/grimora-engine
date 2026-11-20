@@ -38,8 +38,12 @@ const RIVER_VIEW_MARGIN: f32 = 6.0;
 const LEVELS_SIZE: usize = 512;
 const LEVELS_CELL: f32 = 2.0;
 const LEVELS_MOVE: f32 = 128.0;
-/// How far away a river can be heard, in meters.
-const RIVER_HEARD: f32 = 40.0;
+/// How far away a brook and a wide river can be heard, in meters.
+const BROOK_HEARD: f32 = 28.0;
+const RIVER_HEARD: f32 = 75.0;
+/// Half widths, in meters, between which a stream goes from a brook's sound to a river's.
+const BROOK_UNTIL: f32 = 1.2;
+const RIVER_FROM: f32 = 4.0;
 /// How high above the sea the waves stop being heard, in meters.
 const SEA_HEARD: f32 = 70.0;
 /// On a generated world, how far inland the surf carries, and how far out at sea it fades to a
@@ -136,7 +140,8 @@ impl World {
     }
 
     /// How loud, `0..1`, the sea and the rivers are to someone at `at`.
-    pub(crate) fn water_noise(&self, at: Vec3) -> (f32, f32) {
+    /// How loud the sea, the brooks and the wide rivers are at `at`, 0 to 1.
+    pub(crate) fn water_noise(&self, at: Vec3) -> (f32, f32, f32) {
         let mut sea = 0.0;
         if let Some((_, level)) = self.waters.sea() {
             let height = (1.0 - (at.y - level).abs() / SEA_HEARD).clamp(0.0, 1.0);
@@ -164,23 +169,33 @@ impl World {
             };
             sea = height * shore;
         }
-        let mut river = f32::MAX;
+        // The loudest point of each kind: a wide river carries further than a brook, and a
+        // stream in between is heard as some of both.
+        let (mut brook, mut river) = (0.0f32, 0.0f32);
         for body in &self.waters.bodies {
             if let WaterShape::River { points, .. } = &body.shape {
                 for point in points {
-                    river = river.min(point.position.distance(at) - point.half_width);
+                    let off = (point.position.distance(at) - point.half_width).max(0.0);
+                    if off > RIVER_HEARD {
+                        continue;
+                    }
+                    let t = ((point.half_width - BROOK_UNTIL) / (RIVER_FROM - BROOK_UNTIL)).clamp(0.0, 1.0);
+                    let wide = t * t * (3.0 - 2.0 * t);
+                    let heard = |far: f32| (1.0 - off / far).clamp(0.0, 1.0).powi(2);
+                    brook = brook.max(heard(BROOK_HEARD) * (1.0 - wide).sqrt());
+                    river = river.max(heard(RIVER_HEARD) * wide.sqrt());
                 }
             }
         }
-        let river = (1.0 - river.max(0.0) / RIVER_HEARD).clamp(0.0, 1.0);
-        (sea, river * river)
+        (sea, brook, river)
     }
 
     /// Tells the renderer about the waves and about the water nearest `camera`, whose
     /// bottom and shore it shows, and how far under it the camera is.
     pub fn update_water_view(&mut self, camera: Vec3, dt: f32) {
         let wind = &self.environment.wind;
-        self.waters.wave_scale = wind.scale.max(0.0);
+        self.waters.wave_scale = grimora_core::water::wave_scale(wind.scale);
+        // The swell and the lakes' ripples keep the scene's direction (`gust.zw` in scene.wgsl).
         self.waters.wind = wind.direction.normalize_or(Vec2::X);
         self.waters.wind_speed = wind.speed;
         let submerged = self.environment.water.submerged;

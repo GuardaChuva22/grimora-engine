@@ -1,0 +1,31 @@
+// Smoke from a chimney: puffs that leave dark and dense, climb, swell, lean and thin out into
+// the air. Lit by the sun, so it greys in the day and goes blue-black at night.
+[
+    (
+        windy: 0.5,
+        rate: 2.6,
+        lifetime: (4.0, 6.5),
+        position: (0.0, 0.0, 0.0),
+        area: (0.1, 0.02, 0.1),
+        spread: 8.0,
+        speed: (0.5, 0.8),
+        acceleration: (0.25, 0.12, 0.08),
+        drag: 0.25,
+        curl: 0.6,
+        curl_scale: 1.5,
+        sizes: [0.35, 0.8, 1.5, 2.2],
+        size_jitter: 0.3,
+        colors: [(1.0, 1.0, 1.0, 0.0), (1.0, 1.0, 1.0, 0.42), (1.0, 1.0, 1.0, 0.25), (1.0, 1.0, 1.0, 0.0)],
+        ramp: [(0.24, 0.22, 0.24, 1.0), (0.36, 0.34, 0.36, 1.0), (0.5, 0.48, 0.5, 1.0)],
+        erode: [0.15, 0.3, 0.55, 0.95],
+        noise: 1.2,
+        flow: (0.0, -0.2),
+        warp: 0.3,
+        grain: 0.8,
+        bands: 3.0,
+        pixels: 18.0,
+        soft: 0.3,
+        lit: 0.9,
+        max_distance: 300.0,
+    ),
+]

@@ -1,0 +1,19 @@
+// Holy: the body turns to pale gold light with slow currents inside; soft light rises off it,
+// feathers drift up, stars circle and signs turn underfoot.
+(
+    name: "Sagrada",
+    ramp: [(0.9, 0.7, 0.35, 1.6), (1.0, 0.86, 0.5, 4.0), (1.0, 0.96, 0.82, 8.0), (1.0, 1.0, 1.0, 12.0)],
+    bands: 3.0,
+    skin: [
+        (pattern: Ghost, scale: 2.5, speed: 0.6, warp: 0.5, outline: 1.2, edge: 1.8, cover: 0.45, body: 1.4, glow: 1.6),
+    ],
+    wisps: [
+        (rate: 50.0, size: 0.18, tall: 0.8, life: (0.7, 1.2), push: 0.15, rise: 1.0, curl: 0.8, curl_scale: 0.4, shape: Soft, opacity: 0.35, additive: 1.0, grain: 0.5, warp: 0.4),
+    ],
+    glow: (opacity: 0.08, size: 0.85, breath: 0.1, breath_rate: 0.8, color: Some((1.0, 0.92, 0.65, 1.0))),
+    sparks: (rate: 8.0, size: 0.07, speed: (0.2, 0.6), rise: 0.4, curl: 0.8, life: (1.4, 2.4), shape: Leaf, twinkle: 0.2, spin: 60.0, tints: [(1.0, 1.0, 1.0, 1.0), (1.0, 0.9, 0.6, 1.0)], glow: 5.0),
+    orbs: (count: 6.0, distance: 0.55, speed: 1.5, size: 0.08, trail: 0.5, wander: 0.4, shape: Star, glow: 7.0),
+    ground: (runes: 2.4, runes_spin: 15.0),
+    light: (color: (1.0, 0.92, 0.7), intensity: 3.5, radius: 7.0, flicker: 0.0, linger: 0.4),
+    burst: (wave: 7.0, streaks: 36, flash: 14.0),
+)

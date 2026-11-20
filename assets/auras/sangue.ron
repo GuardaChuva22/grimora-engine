@@ -1,0 +1,17 @@
+// Blood: a crimson fury. Dark red fire crawls up the skin, heavy red tongues tear off it
+// and drops fall from the body; the ground beats.
+(
+    name: "Sangue",
+    power: 1.1,
+    ramp: [(0.15, 0.0, 0.01, 1.0), (0.6, 0.0, 0.03, 2.2), (1.0, 0.1, 0.1, 5.0), (1.0, 0.55, 0.45, 9.0)],
+    bands: 0.0,
+    skin: [
+        (pattern: Fire, scale: 4.5, speed: 1.4, warp: 0.6, outline: 0.8, edge: 2.0, cover: 0.35, body: 0.15, glow: 1.8),
+        (pattern: Blaze, scale: 1.4, speed: 1.4, warp: 0.9, outline: 0.1, edge: 0.95, cover: 0.45, glow: 1.0),
+    ],
+    sparks: (rate: 12.0, size: 0.03, speed: (0.3, 1.0), rise: -5.0, curl: 0.3, life: (0.4, 0.8), shape: Leaf, stretch: 0.03, twinkle: 0.0, tints: [(0.8, 0.0, 0.02, 1.0), (0.4, 0.0, 0.0, 1.0)], glow: 2.0),
+    ground: (pulse: 0.9, pulse_size: 2.4, color: Some((0.9, 0.05, 0.05, 1.0))),
+    hands: (rate: 14.0, size: 0.09, sparks: 4.0),
+    light: (color: (1.0, 0.1, 0.08), intensity: 2.8, radius: 5.0, flicker: 0.3, linger: 0.3),
+    burst: (wave: 7.0, streaks: 40, flash: 10.0),
+)

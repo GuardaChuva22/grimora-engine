@@ -12,6 +12,10 @@ use crate::bag::{Equipped, HeldKind};
 use crate::{Sandbox, actions};
 
 const STOW_BOOK: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/models/chartest/chartest_stow.ron");
+/// The belt with a holster on the right hip, made on the character's own skeleton.
+const HOLSTER: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/models/chartest/accessories/Coldre_Couro.glb");
+/// The node of [`HOLSTER`] with the second holster, on the left hip: only there with a pistol in it.
+const LEFT_HOLSTER: &str = "Coldre_Couro_Esquerdo";
 
 const INTO_CHANGE_FADE: f32 = 0.14;
 const OUT_OF_CHANGE_FADE: f32 = 0.22;
@@ -22,8 +26,8 @@ const OFFER_CLIP: &str = "item_offer";
 const EAT_CLIP: &str = "item_eat";
 /// A thing in the hand is never bigger than this for each cell it takes in the inventory, however
 /// big its model is, in meters, and never bigger than the most a hand can take.
-const LARGEST_PER_CELL: f32 = 0.125;
-const LARGEST_THING: f32 = 0.28;
+const LARGEST_PER_CELL: f32 = 0.45;
+const LARGEST_THING: f32 = 1.6;
 /// What has no model yet is a small box of this size.
 const NO_MODEL_SIZE: f32 = 0.07;
 /// A blade longer than this, in meters, doesn't fit a belt.
@@ -32,6 +36,8 @@ const LONGEST_ON_THE_BELT: f32 = 1.02;
 const SHORT_BLADE: f32 = 0.4;
 /// What a blade sounds like coming out of its sheath.
 const DRAW_KNIFE_SOUND: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/sounds/draw_knife.wav");
+/// Anything leaving the hand, put away on the body or in the bag.
+const UNEQUIP_SOUND: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/sounds/ui/unequip.mp3");
 const DRAW_SWORD_SOUND: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/sounds/draw_sword.wav");
 /// The handle the hand closes on, in `chartest_grip.ron`: its joint's -X goes out of the palm, so
 /// something round sits this much short of its own radius from there, against the palm.
@@ -113,7 +119,11 @@ fn families_of(item: &ItemDesc) -> &'static [StowFamily] {
     match &item.kind {
         ItemKind::Weapon { weapon, .. } => {
             let tip = weapon.blade.as_ref().map_or(0.8, |blade| blade.tip);
-            if weapon.clip.starts_with("heavy") || tip > LONGEST_ON_THE_BELT || item.id == "machado_grande" {
+            if weapon.clip.starts_with("heavy")
+                || weapon.clip.starts_with("great")
+                || tip > LONGEST_ON_THE_BELT
+                || item.id == "machado_grande"
+            {
                 &[StowFamily::Back, StowFamily::Slung]
             } else {
                 &[StowFamily::Sword]
@@ -197,6 +207,10 @@ pub struct Gear {
     pub scheduled: Option<String>,
     /// The second button is held down for the capture.
     offering_for_a_capture: bool,
+    /// The belt and right holster, then the left holster, once loaded.
+    holster_meshes: Option<Option<(MeshId, MeshId)>>,
+    /// What of [`HOLSTER`] is worn: the belt and right holster, and the left one.
+    holsters: [Option<Entity>; 2],
 }
 
 impl Gear {
@@ -371,6 +385,7 @@ impl Sandbox {
         self.stock_for_a_capture(ctx);
         self.drop_what_is_gone(ctx);
         self.put_on_the_body(ctx);
+        self.wear_holsters(ctx);
         let cut_short = dodging
             || self.dead_for.is_some()
             || ctx.world.get::<Health>(self.avatar).is_some_and(|health| health.staggered());
@@ -378,6 +393,43 @@ impl Sandbox {
         self.run_action(ctx, cut_short);
         self.hold_hand(ctx);
         self.run_glides(ctx);
+    }
+
+    /// The belt with the holster is worn while a pistol is carried, and the left holster too
+    /// while a pistol goes there. It stays while the pistol is in the hand.
+    fn wear_holsters(&mut self, ctx: &mut Context) {
+        let on = |side: &str| {
+            self.bag
+                .gear
+                .carried
+                .iter()
+                .any(|carried| carried.place.as_deref().is_some_and(|place| place.starts_with(side)))
+        };
+        let left = on("holster_l");
+        let wanted = [left || on("holster_r"), left];
+        if wanted[0] && self.bag.gear.holster_meshes.is_none() {
+            let loaded = grimora::scene::load_model_split(std::path::Path::new(HOLSTER), LEFT_HOLSTER)
+                .map_err(|err| eprintln!("[sandbox] {err:#}"))
+                .ok()
+                .map(|(belt, left, _)| (ctx.world.add_mesh(belt), ctx.world.add_mesh(left)));
+            self.bag.gear.holster_meshes = Some(loaded);
+        }
+        let avatar = self.avatar;
+        let meshes = self.bag.gear.holster_meshes.flatten();
+        for (side, wanted) in wanted.into_iter().enumerate() {
+            let worn = self.bag.gear.holsters[side]
+                .filter(|&entity| ctx.world.get::<Worn>(entity).is_some_and(|worn| worn.parent == avatar));
+            match (worn, wanted, meshes) {
+                (Some(entity), false, _) => {
+                    ctx.world.despawn(entity, &mut ctx.physics);
+                    self.bag.gear.holsters[side] = None;
+                }
+                (None, true, Some((belt, left))) => {
+                    self.bag.gear.holsters[side] = Some(ctx.world.dress(avatar, if side == 0 { belt } else { left }));
+                }
+                _ => self.bag.gear.holsters[side] = worn,
+            }
+        }
     }
 
     fn stock_for_a_capture(&mut self, ctx: &mut Context) {
@@ -771,6 +823,7 @@ impl Sandbox {
         self.stop_action(ctx);
         self.bag.equipped = None;
         self.set_blows(ctx, None);
+        ctx.audio.play(UNEQUIP_SOUND, 0.7);
         let Some(place) = self.bag.gear.place_of(piece) else {
             // No place on the body: it goes straight to the bag.
             self.send_to_body(ctx, piece, false);
@@ -779,7 +832,6 @@ impl Sandbox {
         };
         self.bag.gear.stage = Some(Stage::Putting { piece, let_go: false });
         self.play_change(ctx, &place.stow(), &place.hand, place.pass.is_some());
-        ctx.audio.play_pitched(crate::STEP_SOUND, 0.3, 1.1);
     }
 
     fn start_taking(&mut self, ctx: &mut Context, wanted: Option<u32>) {

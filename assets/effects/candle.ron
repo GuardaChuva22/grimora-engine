@@ -1,0 +1,57 @@
+// A candle: a small teardrop of flame on the wick, its glow, and a hair of smoke.
+// The flame is a few centimeters tall and barely moves: it leans and breathes, never jets.
+[
+    // glow round the flame
+    (
+        rate: 5.0,
+        lifetime: (0.5, 0.8),
+        position: (0.0, 0.025, 0.0),
+        sizes: [0.12, 0.16, 0.13],
+        size_jitter: 0.15,
+        colors: [(1.0, 0.6, 0.25, 0.0), (1.0, 0.55, 0.2, 0.07), (1.0, 0.4, 0.1, 0.0)],
+        emissive: 1.0,
+        additive: 1.0,
+        soft: 0.3,
+        max_distance: 30.0,
+    ),
+    // the flame itself
+    // the fire itself: a volume of flame (shape Volume), raymarched
+    (
+        rate: 1.0,
+        lifetime: (2.0, 2.0),
+        position: (0.0, 0.024, 0.0),
+        speed: (0.0, 0.0),
+        sizes: [0.07],
+        colors: [(1.0, 1.0, 1.0, 0.0), (1.0, 1.0, 1.0, 1.0), (1.0, 1.0, 1.0, 0.0)],
+        shape: Volume,
+        ramp: [(0.6, 0.12, 0.03, 1.5), (1.0, 0.55, 0.12, 4.0), (1.0, 0.92, 0.7, 9.0)],
+        noise: 30.0,
+        flow: (0.02, -0.06),
+        warp: 0.25,
+        emissive: 1.0,
+        additive: 0.85,
+        max_distance: 70.0,
+    ),
+    // a thread of smoke, now and then
+    (
+        rate: 1.2,
+        lifetime: (1.0, 1.8),
+        position: (0.0, 0.05, 0.0),
+        speed: (0.08, 0.15),
+        acceleration: (0.0, 0.05, 0.0),
+        drag: 0.6,
+        curl: 0.8,
+        curl_scale: 0.15,
+        sizes: [0.01, 0.03, 0.06],
+        colors: [(1.0, 1.0, 1.0, 0.0), (1.0, 1.0, 1.0, 0.18), (1.0, 1.0, 1.0, 0.0)],
+        ramp: [(0.12, 0.1, 0.12, 1.0), (0.16, 0.14, 0.16, 1.0), (0.2, 0.18, 0.2, 1.0)],
+        erode: [0.2, 0.45, 0.9],
+        noise: 1.2,
+        grain: 0.7,
+        bands: 2.0,
+        pixels: 200.0,
+        lit: 0.3,
+        emissive: 0.2,
+        max_distance: 12.0,
+    ),
+]

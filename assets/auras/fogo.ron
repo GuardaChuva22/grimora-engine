@@ -1,0 +1,20 @@
+// Fire: the body burns. A volume of fire hugs the skin and tongues of it climb off every
+// part of the body (`Blaze`: raymarched around the bones, see `blaze` in scene.wgsl), over
+// fire running up the skin itself. A few embers fly off.
+// Every field is in AuraDesc (crates/grimora_scene/src/aura.rs); ramps are (r, g, b, glow).
+// For a Blaze: scale = turbulence repeats per meter, speed = rise (m/s), outline = how thick
+// the burning layer on the skin is (m), edge = how tall the tongues get (m), warp = sway,
+// cover = how much it hides what is behind.
+(
+    name: "Fogo",
+    ramp: [(0.45, 0.02, 0.02, 1.2), (1.0, 0.22, 0.02, 3.2), (1.0, 0.65, 0.2, 6.0), (1.0, 0.9, 0.6, 10.0)],
+    bands: 0.0,
+    skin: [
+        (pattern: Fire, scale: 5.0, speed: 1.6, warp: 0.5, outline: 0.9, edge: 2.2, cover: 0.12, body: 0.3, glow: 1.4),
+        (pattern: Blaze, scale: 1.6, speed: 2.0, warp: 0.7, outline: 0.09, edge: 1.1, cover: 0.2, glow: 1.1),
+    ],
+    sparks: (rate: 14.0, size: 0.018, rise: 1.8, curl: 2.6, tints: [(1.0, 0.8, 0.4, 1.0), (1.0, 0.3, 0.08, 1.0)]),
+    haze: 0.008,
+    light: (color: (1.0, 0.5, 0.18), intensity: 3.5, radius: 6.0, flicker: 0.35, linger: 0.3),
+    burst: (wave: 5.0, streaks: 30, flash: 10.0),
+)

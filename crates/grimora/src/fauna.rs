@@ -9,6 +9,7 @@
 //! matrices, and what each fish draws is only an index in it.
 
 mod bird;
+mod cattle;
 mod crab;
 mod ecology;
 mod encounter;
@@ -25,6 +26,8 @@ use grimora_render::{DrawItem, MeshHandle};
 use grimora_scene::{Life, SceneFauna, SpeciesDesc, SwimDesc, Terrain};
 
 use self::bird::Flock;
+use self::cattle::Herd;
+pub(crate) use self::cattle::PenPlace;
 use self::crab::Colony;
 use self::ecology::{Ledger, Population};
 use self::encounter::{BodyPose, Carcass, PlayerBody, Wake};
@@ -97,6 +100,8 @@ pub struct Fauna {
     colonies: Vec<Colony>,
     rays: Vec<Rays>,
     blooms: Vec<Bloom>,
+    /// The village's cattle.
+    herds: Vec<Herd>,
     /// What died, until it's eaten or rots.
     carcasses: Vec<Carcass>,
     /// `0..1`, as of the last update, for what glows in the dark.
@@ -110,6 +115,8 @@ pub struct Fauna {
     player: Option<PlayerBody>,
     events: Vec<FaunaEvent>,
     sounds: Vec<FaunaSound>,
+    /// Whether the last strike landed on a big animal (one that makes a blade stop for a moment).
+    pub(crate) struck_big: bool,
 }
 
 impl Fauna {
@@ -149,6 +156,7 @@ impl Fauna {
                 }
                 Life::Flying => fauna.flocks.extend(Flock::new(&group, meshes)),
                 Life::Crawling => fauna.colonies.extend(Colony::new(&group, meshes)),
+                Life::Grazing => log::error!("{}: cattle come with a village pen", group.species.name),
             }
         }
     }
@@ -160,6 +168,7 @@ impl Fauna {
             + self.crab_count()
             + self.rays.iter().map(|rays| rays.rays.len()).sum::<usize>()
             + self.jelly_count()
+            + self.herds.iter().map(Herd::population).sum::<usize>()
     }
 
     /// How many there are of each group, in the order of the groups.
@@ -172,6 +181,7 @@ impl Fauna {
         names.extend(self.colonies.iter().filter_map(|group| name(group)));
         names.extend(self.rays.iter().filter_map(|group| name(group)));
         names.extend(self.blooms.iter().filter_map(|group| name(group)));
+        names.extend(self.herds.iter().filter_map(|group| name(group)));
         names
     }
 
@@ -184,6 +194,7 @@ impl Fauna {
         census.extend(self.colonies.iter().map(|group| count(group)));
         census.extend(self.rays.iter().map(|group| count(group)));
         census.extend(self.blooms.iter().map(|group| count(group)));
+        census.extend(self.herds.iter().map(|group| count(group)));
         census
     }
 
@@ -195,6 +206,7 @@ impl Fauna {
         groups.extend(self.colonies.iter_mut().map(|group| group as &mut dyn Population));
         groups.extend(self.rays.iter_mut().map(|group| group as &mut dyn Population));
         groups.extend(self.blooms.iter_mut().map(|group| group as &mut dyn Population));
+        groups.extend(self.herds.iter_mut().map(|group| group as &mut dyn Population));
         groups
     }
 
@@ -436,6 +448,9 @@ impl Fauna {
         for colony in &self.colonies {
             colony.push_draws(handles, draws, joints);
         }
+        for herd in &self.herds {
+            herd.push_draws(handles, draws, joints);
+        }
     }
 }
 
@@ -490,7 +505,7 @@ impl World {
         self.fauna.daylight = place.daylight;
         self.fauna.focus = focus;
         let mut wake = Wake::new(focus, self.fauna.player.take());
-        let Fauna { schools, flocks, colonies, rays, blooms, carcasses, .. } = &mut self.fauna;
+        let Fauna { schools, flocks, colonies, rays, blooms, herds, carcasses, .. } = &mut self.fauna;
         for school in schools.iter_mut() {
             school.update(&place, &threats, focus, dt);
         }
@@ -510,6 +525,10 @@ impl World {
         }
         for flock in flocks.iter_mut().filter(|g| awake(&**g)) {
             flock.update(&place, physics, schools, &threats, focus, dt, &mut wake);
+        }
+        for herd in herds.iter_mut().filter(|g| awake(&**g)) {
+            herd.update(&place, physics, &threats, focus, dt, &mut wake);
+            carcasses.append(&mut herd.fallen);
         }
         carcasses.retain_mut(|carcass| carcass.update(&place, dt));
         if let Some(day) = self.day_cycle.as_ref().filter(|day| day.day_length > 0.0) {
@@ -553,6 +572,7 @@ impl World {
     pub fn strike_fauna_by(&mut self, hits: &mut dyn FnMut(Vec3, f32) -> bool) -> usize {
         let mut wake = Wake::new(self.fauna.focus, None);
         let mut dead = Vec::new();
+        let before: usize = self.fauna.herds.iter().map(|h| h.struck_count()).sum();
         for group in self.fauna.groups() {
             let from = dead.len();
             group.strike(hits, &mut dead);
@@ -561,6 +581,8 @@ impl World {
             }
         }
         let killed = dead.len();
+        let after: usize = self.fauna.herds.iter().map(|h| h.struck_count()).sum();
+        self.fauna.struck_big = after > before;
         self.fauna.carcasses.append(&mut dead);
         self.fauna.threats.append(&mut wake.threats);
         self.fauna.keep(wake.events, wake.sounds);
@@ -576,7 +598,10 @@ impl World {
             self.day_cycle.as_ref(),
         );
         self.fauna.daylight = place.daylight;
-        let Fauna { schools, flocks, colonies, rays, blooms, .. } = &mut self.fauna;
+        let Fauna { schools, flocks, colonies, rays, blooms, herds, .. } = &mut self.fauna;
+        for herd in herds {
+            herd.place(&place);
+        }
         for school in schools.iter_mut() {
             school.go_to_depth(&place);
         }

@@ -21,12 +21,15 @@
 //! }
 //! ```
 
+mod aura;
 mod combat;
 mod config;
 mod fauna;
 mod fly_camera;
+mod folk;
 mod gamepad;
 pub mod generated;
+mod house;
 mod interaction;
 mod items;
 pub mod land;
@@ -34,9 +37,11 @@ mod lock_on;
 mod npc;
 mod options;
 pub mod portrait;
+mod ragdoll;
 mod runner;
 pub mod save;
 mod shot;
+mod society;
 pub mod story;
 mod streaming;
 mod third_person;
@@ -46,23 +51,30 @@ mod world;
 
 use grimora_core::Vec3;
 
+pub use aura::{Aura, AuraSkin, SkinPoint};
 pub use combat::{CombatEvent, Fighter, Frozen, Guard, Health, Stamina};
 pub use config::{EngineConfig, USAGE};
 pub use fauna::{BirdDoing, CrabDoing, Fauna, FaunaCount, FaunaEvent, FaunaSound, RayDoing, Threat};
 pub use fly_camera::FlyCamera;
-pub use interaction::{Interaction, TriggerEvent, TriggerState};
-pub use items::{Container, DroppedItem, HOTBAR, Inventory, ItemStack, ItemState, Landing, Pickup, Placed};
+pub use folk::{FOLK_NEAR, Villager};
 pub use generated::{GenId, GenState, Generated};
+pub use house::{DOOR_OPENS, Door, Dwelling, Roof, Uses};
+pub use interaction::{InteractKind, Interaction, Nearby, TriggerEvent, TriggerState};
+pub use items::{Container, DroppedItem, HOTBAR, Inventory, ItemStack, ItemState, Landing, Pickup, Placed};
 pub use land::{Land, LandStats};
 pub use npc::{Agent, AgentStatus, Brain, NpcEvent};
 pub use options::{Options, RESOLUTIONS, ShadowQuality, UI_SCALES};
+pub use ragdoll::{Push, Ragdoll, Recoil, Thud};
 pub use runner::{Context, run};
 pub use save::SaveStore;
 pub use shot::{Shot, ShotDesc, ShotTarget};
+pub use society::VillagerTalk;
 pub use streaming::StreamingStats;
-pub use third_person::{CharacterState, ThirdPersonController};
+pub use third_person::{CharacterState, Flight, ThirdPersonController};
 pub use water::Floating;
-pub use world::{Attached, Body, Collider, Entity, Light, MeshId, Name, Renderable, SceneIndex, World, Worn};
+pub use world::{
+    Attached, AutoWeather, Body, Collider, Entity, Light, MeshId, Name, Renderable, SceneIndex, World, Worn,
+};
 
 pub use grimora_audio as audio;
 pub use grimora_core as core;
@@ -94,7 +106,7 @@ pub trait Game: 'static {
 pub mod prelude {
     pub use crate::{
         Agent, AgentStatus, Body, Brain, CharacterState, Collider, CombatEvent, Context, EngineConfig, Entity,
-        FaunaEvent, Fighter, Floating, FlyCamera, Frozen, Game, Guard, HOTBAR, Health, Interaction, Inventory,
+        FaunaEvent, Fighter, Flight, Floating, FlyCamera, Frozen, Game, Guard, HOTBAR, Health, Interaction, Inventory,
         ItemStack, Landing, Light, MeshId, Name, NpcEvent, Options, Pickup, Placed, Renderable, SaveStore,
         ShadowQuality, Shot, ShotDesc, ShotTarget, Stamina, ThirdPersonController, TriggerEvent, World, Worn,
     };

@@ -11,6 +11,12 @@ use grimora_scene::{
 };
 pub use hecs::Entity;
 
+/// How near and how far from the camera a storm's bolts come down, in meters.
+const STRIKE_NEAR: f32 = 60.0;
+const STRIKE_FAR: f32 = 190.0;
+/// The distance at which the bolt's effect is played at its own size.
+const STRIKE_SCALE: f32 = 22.0;
+
 /// How far above the terrain a hit still counts as the terrain: its collider and
 /// `height_at` agree, but a step lands a little over it.
 const TERRAIN_SLACK: f32 = 0.08;
@@ -63,6 +69,11 @@ pub struct Body(pub BodyHandle);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Collider(pub ColliderHandle);
 
+/// What each triangle of an entity's triangle-mesh [`Collider`] is underfoot (a house's earth
+/// floor, its planks, its thatch); wins over a plain [`Ground`] on the same entity.
+#[derive(Debug, Clone)]
+pub struct TriangleGrounds(pub std::sync::Arc<Vec<Ground>>);
+
 /// Position of the entity in the scene file's `objects`; saved games use it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SceneIndex(pub usize);
@@ -96,6 +107,10 @@ pub struct World {
     /// sky of [`World::environment`] every frame, so to change those for good,
     /// change its keys.
     pub day_cycle: Option<DayCycle>,
+    /// The weather changes by itself over the hours (see [`AutoWeather`]), when set.
+    pub auto_weather: Option<AutoWeather>,
+    /// The wind: how hard, which way and its gusts, written into `environment.wind` each frame.
+    pub wind: grimora_core::WindSim,
     /// Lights not attached to an entity (the scene's `lights`, and any the game
     /// adds). Lights on entities are [`Light`] components.
     pub lights: Vec<PointLight>,
@@ -112,6 +127,8 @@ pub struct World {
     /// Where something fell in since the last frame, and how hard.
     pub(crate) splashes: Vec<(Vec3, f32)>,
     falling: WeatherParticles,
+    /// Where the rain lands around the camera.
+    landing: grimora_core::RainSplashes,
     /// Which triggers the player is in and which `once` ones already fired, by
     /// name, so it survives streaming; see [`World::update_triggers`].
     pub trigger_state: TriggerState,
@@ -121,6 +138,13 @@ pub struct World {
     pub(crate) meshes: Vec<MeshData>,
     /// Meshes whose data changed since the renderer last looked; see [`World::replace_mesh`].
     replaced_meshes: Vec<MeshId>,
+    /// The aura shells made of each mesh, by (mesh, layer), reused each time one is lit.
+    pub(crate) aura_meshes: HashMap<(usize, usize), MeshId>,
+    /// Each mesh's bounds `(min, max)`, measured once for the prompts over things (see
+    /// [`World::interactables_near`]).
+    pub(crate) mesh_bounds: HashMap<usize, (glam::Vec3, glam::Vec3)>,
+    /// Where the burning body was last frame, and the trail of its flames.
+    pub(crate) fire_trail: (glam::Vec3, glam::Vec3),
     /// The ground of a generated world (`--world`); see [`crate::land`].
     pub(crate) land: Option<crate::land::Land>,
     streamer: Option<Streamer>,
@@ -158,6 +182,49 @@ impl std::fmt::Debug for World {
     }
 }
 
+/// Seconds a weather the clock picked takes to settle in.
+const AUTO_WEATHER_CHANGE: f32 = 45.0;
+
+/// The weather turning by itself: every few game hours it may keep on or change, by its odds,
+/// the same way for the same seed.
+#[derive(Debug, Clone)]
+pub struct AutoWeather {
+    /// How likely each weather is: clear, overcast, rain, storm, snow.
+    pub odds: [f32; 5],
+    /// Game hours until the next turn.
+    pub left: f32,
+    pub seed: u64,
+    turns: u64,
+}
+
+impl AutoWeather {
+    /// A warm land's: mostly clear, some cloud and rain, now and then a storm, never snow.
+    pub fn warm(seed: u64) -> Self {
+        Self { odds: [0.46, 0.24, 0.18, 0.12, 0.0], left: 3.0, seed, turns: 0 }
+    }
+
+    /// The next weather after `now`, and how long it lasts.
+    fn next(&mut self, now: Weather) -> Weather {
+        self.turns += 1;
+        let mut rng = grimora_core::Rng::new(self.seed ^ self.turns.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        self.left = rng.range(2.0, 9.0);
+        // Weather keeps on a while more often than it turns.
+        if rng.f32() < 0.35 {
+            return now;
+        }
+        let all = [Weather::Clear, Weather::Overcast, Weather::Rain, Weather::Storm, Weather::Snow];
+        let total: f32 = self.odds.iter().sum();
+        let mut pick = rng.f32() * total.max(1e-6);
+        for (w, odds) in all.iter().zip(self.odds) {
+            if pick < odds {
+                return *w;
+            }
+            pick -= odds;
+        }
+        Weather::Clear
+    }
+}
+
 impl World {
     /// Spawns an entity per scene object, with its collider or body added to
     /// `physics`. Nothing streamed is loaded yet: call [`World::load_around`]
@@ -187,6 +254,8 @@ impl World {
                 environment,
                 sky_textures: scene.sky_textures,
                 day_cycle,
+                auto_weather: None,
+                wind: grimora_core::WindSim::new(0x77696e64),
                 lights: scene.lights,
                 ecs,
                 terrain: scene.terrain,
@@ -200,9 +269,13 @@ impl World {
                 water_sounds: scene.water_sounds,
                 splashes: Vec::new(),
                 falling: WeatherParticles::default(),
+                landing: Default::default(),
                 trigger_state: TriggerState::default(),
                 meshes: scene.meshes,
                 replaced_meshes: Vec::new(),
+                aura_meshes: HashMap::new(),
+                mesh_bounds: HashMap::new(),
+                fire_trail: (glam::Vec3::ZERO, glam::Vec3::ZERO),
                 land: None,
                 streamed_waters: 0,
                 streamer,
@@ -259,6 +332,9 @@ impl World {
         for fighter in self.ecs.query_mut::<&mut Fighter>() {
             fighter.shift(offset);
         }
+        for trail in self.ecs.query_mut::<&mut grimora_core::BladeTrail>() {
+            trail.shift(offset);
+        }
         for light in &mut self.lights {
             light.position += offset;
         }
@@ -283,6 +359,7 @@ impl World {
             streamer.shift(offset);
         }
         self.falling.shift(offset);
+        self.landing.shift(offset);
         self.waters.shift(offset, self.origin);
         self.fauna.shift(offset);
     }
@@ -321,6 +398,7 @@ impl World {
         let (entity, id) = self
             .ecs
             .query::<(Entity, &Transform, &crate::Generated)>()
+            .without::<&crate::Villager>()
             .iter()
             .map(|(e, t, g)| (e, g.id, flat(t.position)))
             .filter(|&(_, _, d)| d <= radius)
@@ -455,6 +533,11 @@ impl World {
             let position = transform.position + transform.rotation * light.position;
             lights.push(PointLight { position, ..light.clone() });
         }
+        let lit = lights.len();
+        for system in self.ecs.query::<&ParticleSystem>().iter() {
+            system.lights(&mut lights);
+        }
+        let effects = lights.split_off(lit);
         // Those of the night come on as the daylight goes.
         let daylight = self.day_cycle.as_ref().map_or(0.0, DayCycle::daylight);
         lights.retain_mut(|light| {
@@ -463,6 +546,7 @@ impl World {
             }
             light.intensity > 0.0
         });
+        lights.extend(effects);
         lights
     }
 
@@ -513,10 +597,28 @@ impl World {
 
     /// Runs the clock for `dt` seconds. The engine calls this each frame, unless paused.
     pub fn update_day(&mut self, dt: f32) {
+        if let (Some(day), Some(auto)) = (&mut self.day_cycle, &mut self.auto_weather)
+            && day.day_length > 0.0
+        {
+            auto.left -= dt / day.day_length * 24.0;
+            if auto.left <= 0.0 {
+                let next = auto.next(day.weather());
+                day.change_weather(next, AUTO_WEATHER_CHANGE);
+            }
+        }
         if let Some(day) = &mut self.day_cycle {
             day.advance(dt);
             day.apply(&mut self.environment);
         }
+        let origin = self.origin().world();
+        self.wind.update(&mut self.environment.wind, grimora_core::DVec2::new(origin.x, origin.z), dt);
+    }
+
+    /// The wind at a point (local), in m/s, gusts and all: what sails, flags and smoke feel.
+    pub fn wind_at(&self, at: Vec3) -> Vec3 {
+        let wind = &self.environment.wind;
+        let speed = wind.speed_ms * grimora_core::wind::gust_at(wind, grimora_core::Vec2::new(at.x, at.z));
+        Vec3::new(wind.blowing.x, 0.0, wind.blowing.y) * speed
     }
 
     /// Looping sounds to play: [`World::sounds`] plus those of loaded regions.
@@ -536,6 +638,7 @@ impl World {
         if let Some(slot) = self.meshes.get_mut(id.0) {
             *slot = mesh;
             self.replaced_meshes.push(id);
+            self.mesh_bounds.remove(&id.0);
         }
     }
 
@@ -571,6 +674,7 @@ impl World {
     /// [`World::dress`] made where its wearer is. The engine calls this after
     /// [`World::update_animations`].
     pub fn update_attachments(&mut self) {
+        self.update_auras();
         let mut worn = Vec::new();
         let mut gone = Vec::new();
         for (entity, piece) in self.ecs.query::<(Entity, &Worn)>().iter() {
@@ -640,12 +744,61 @@ impl World {
     /// Advances every [`ParticleSystem`], with `camera` deciding which are near
     /// enough to bother, and removes the finished one-shots. The engine calls
     /// this after `Game::update`.
+    /// Every [`grimora_core::BladeTrail`] on a fighter follows its blade while it cuts.
+    fn update_blade_trails(&mut self, dt: f32) {
+        let blades: Vec<(Entity, Option<grimora_scene::Blade>)> = self
+            .ecs
+            .query::<(Entity, &grimora_core::BladeTrail, &Fighter)>()
+            .iter()
+            .map(|(e, _, f)| (e, f.striking().then(|| f.weapon.blade.clone().unwrap_or_default())))
+            .collect();
+        for (entity, blade) in blades {
+            let ends = blade.and_then(|b| {
+                let joint = self.joint_transform(entity, &b.joint)?;
+                let point = |along: f32| joint.position + joint.rotation * (Vec3::Y * along);
+                Some((point(b.base), point(b.tip)))
+            });
+            if let Ok(mut trail) = self.ecs.get::<&mut grimora_core::BladeTrail>(entity) {
+                trail.update(dt, ends);
+            }
+        }
+    }
+
     pub fn update_particles(&mut self, dt: f32, camera: Vec3) {
         let mut finished = Vec::new();
-        for (entity, transform, system, renderable) in
-            self.ecs.query_mut::<(Entity, &Transform, &mut ParticleSystem, Option<&Renderable>)>()
-        {
-            system.update(transform, dt, camera, renderable.is_none_or(|r| r.visible));
+        self.update_blade_trails(dt);
+        self.fade_auras(dt);
+        self.strike_lightning(camera);
+        let night = self.day_cycle.as_ref().is_some_and(|d| d.daylight() < 0.35);
+        // The ground under those whose particles bounce.
+        let unsure: Vec<(Entity, Vec3)> = self
+            .ecs
+            .query::<(Entity, &Transform, &ParticleSystem)>()
+            .iter()
+            .filter(|(_, t, s)| s.needs_floor(t.position))
+            .map(|(e, t, _)| (e, t.position))
+            .collect();
+        for (entity, at) in unsure {
+            let height = self.ground_height(at.x, at.z);
+            if let Ok(mut system) = self.ecs.get::<&mut ParticleSystem>(entity) {
+                system.set_floor(height, at);
+            }
+        }
+        let air = self.environment.wind.clone();
+        let wind_at = |at: Vec3| {
+            let speed = air.speed_ms * grimora_core::wind::gust_at(&air, grimora_core::Vec2::new(at.x, at.z));
+            Vec3::new(air.blowing.x, 0.0, air.blowing.y) * speed
+        };
+        for (entity, transform, system, renderable, lit) in self.ecs.query_mut::<(
+            Entity,
+            &Transform,
+            &mut ParticleSystem,
+            Option<&Renderable>,
+            Option<&crate::house::Lit>,
+        )>() {
+            let burning = lit.is_none_or(|l| !l.night_only || night);
+            system.wind = wind_at(transform.position);
+            system.update(transform, dt, camera, burning && renderable.is_none_or(|r| r.visible));
             if system.despawn_when_done && system.finished() {
                 finished.push(entity);
             }
@@ -654,6 +807,34 @@ impl World {
             let _ = self.ecs.despawn(entity);
         }
         self.falling.update(dt, camera, &self.environment);
+        let mut landing = std::mem::take(&mut self.landing);
+        landing.update(dt, camera, &self.environment, |x, z| {
+            let ground = self.ground_height(x, z);
+            Some(match self.water_at(x, z) {
+                Some(water) if water.level > ground => (water.level, true),
+                _ => (ground, false),
+            })
+        });
+        self.landing = landing;
+    }
+
+    /// Brings the bolt of a storm's strike down on the ground somewhere around `camera`, the
+    /// same place on every run, larger the farther it is so it reads against the sky.
+    fn strike_lightning(&mut self, camera: Vec3) {
+        let Some(strike) = self.day_cycle.as_mut().and_then(DayCycle::take_strike) else { return };
+        let Some(path) = &self.weather_sounds.lightning else { return };
+        let effect = match grimora_scene::load_effect(path) {
+            Ok(effect) => effect,
+            Err(error) => return log::error!("lightning effect: {error:#}"),
+        };
+        let mut rng = grimora_core::Rng::new(strike.wrapping_mul(977).wrapping_add(13));
+        let (sin, cos) = rng.range(0.0, std::f32::consts::TAU).sin_cos();
+        let distance = rng.range(STRIKE_NEAR, STRIKE_FAR);
+        let (x, z) = (camera.x + cos * distance, camera.z + sin * distance);
+        let at = Vec3::new(x, self.ground_height(x, z), z);
+        let mut system = ParticleSystem::new(effect, Vec3::ZERO, distance / STRIKE_SCALE, strike);
+        system.despawn_when_done = true;
+        self.ecs.spawn((Transform::from_position(at), system));
     }
 
     /// Plays `effect` (see `grimora_scene::load_effect`) at `position`. The
@@ -673,7 +854,23 @@ impl World {
         for system in self.ecs.query::<&ParticleSystem>().iter() {
             system.collect(&mut particles);
         }
+        for trail in self.ecs.query::<&grimora_core::BladeTrail>().iter() {
+            trail.collect(&mut particles);
+        }
+        let start = particles.len();
         self.falling.collect(&mut particles);
+        self.landing.collect(&mut particles);
+        // No rain or snow under a roof.
+        let roofs: Vec<(Transform, crate::house::Roof)> =
+            self.ecs.query::<(&Transform, &crate::house::Roof)>().iter().map(|(t, r)| (*t, *r)).collect();
+        if !roofs.is_empty() {
+            // Only the weather (everything from `start` on) is checked: fires burn under roofs.
+            let mut k = 0;
+            particles.retain(|p| {
+                k += 1;
+                k <= start || !roofs.iter().any(|(t, roof)| roof.covers(t, Vec3::from(p.position)))
+            });
+        }
         particles
     }
 
@@ -697,31 +894,44 @@ impl World {
         Some(Transform { position, rotation, scale })
     }
 
-    /// What a step at `foot` lands on: whatever is just below it (an object's
-    /// `ground`, stone if it names none) or the terrain there, made mud by rain.
+    /// What a step at `foot` lands on: whatever is just below it (the triangle's or the
+    /// object's `ground`, a plant's, a guess of stone if nothing says) or the terrain there.
+    /// Rain makes soft ground mud, but not under a roof.
     pub fn ground_under(&self, physics: &Physics, foot: Vec3) -> Ground {
         const ABOVE: f32 = 0.4;
         const BELOW: f32 = 0.8;
         let terrain = self.terrain.as_ref();
+        let terrain_at = |point: Vec3| match &self.land {
+            Some(land) => land.ground_at(self.origin().to_world(point)),
+            None => terrain.map_or(Ground::Dirt, |t| t.ground_at(point.x, point.z)),
+        };
         let on_terrain = |point: Vec3| {
             if let Some(land) = &self.land {
                 let at = self.origin().to_world(point);
-                return (at.y < land.height_at(at) + f64::from(TERRAIN_SLACK)).then(|| land.ground_at(at));
+                return at.y < land.height_at(at) + f64::from(TERRAIN_SLACK);
             }
-            terrain
-                .filter(|t| point.y < t.height_at(point.x, point.z) + TERRAIN_SLACK)
-                .map(|t| t.ground_at(point.x, point.z))
+            terrain.is_some_and(|t| point.y < t.height_at(point.x, point.z) + TERRAIN_SLACK)
         };
         let hit = physics.raycast_scenery(foot + Vec3::Y * ABOVE, Vec3::NEG_Y, ABOVE + BELOW);
         let ground = match hit {
-            Some(hit) => on_terrain(hit.point).unwrap_or_else(|| {
-                let mut owners = self.ecs.query::<(&Collider, Option<&Ground>)>();
-                let owner = owners.iter().find(|(collider, _)| collider.0 == hit.collider);
-                owner.and_then(|(_, ground)| ground.copied()).unwrap_or(Ground::Stone)
-            }),
-            None => terrain.map_or(Ground::Dirt, |t| t.ground_at(foot.x, foot.z)),
+            Some(hit) => {
+                let mut owners = self.ecs.query::<(&Collider, Option<&Ground>, Option<&TriangleGrounds>)>();
+                let owner = owners.iter().find(|(collider, ..)| collider.0 == hit.collider);
+                let said = owner.and_then(|(_, ground, triangles)| {
+                    let triangle = triangles.and_then(|t| t.0.get(hit.triangle as usize).copied());
+                    triangle.or(ground.copied())
+                });
+                said.or_else(|| self.land.as_ref().and_then(|land| land.plant_ground(hit.collider)))
+                    .unwrap_or_else(|| if on_terrain(hit.point) { terrain_at(hit.point) } else { Ground::Stone })
+            }
+            None => terrain_at(foot),
         };
-        ground.soaked(self.environment.precipitation.wet)
+        let covered = self
+            .ecs
+            .query::<(&Transform, &crate::house::Roof)>()
+            .iter()
+            .any(|(at, roof)| roof.covers(at, foot + Vec3::Y * 0.5));
+        if covered { ground } else { ground.soaked(self.environment.precipitation.wet) }
     }
 
     /// Ground height at `(x, z)`, or 0 without terrain.
@@ -850,6 +1060,7 @@ pub(crate) fn object_builder(
 
 /// Despawns `entity` and removes its collider or body from `physics`.
 pub(crate) fn despawn(ecs: &mut hecs::World, entity: Entity, physics: &mut Physics) -> bool {
+    crate::ragdoll::remove_ragdoll(ecs, entity, physics);
     if let Ok(body) = ecs.get::<&Body>(entity) {
         physics.remove_body(body.0);
     }

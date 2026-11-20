@@ -9,6 +9,8 @@ use grimora::render::{ART_PIXEL, ImageId};
 const TEXT: Vec4 = Vec4::new(0.9, 0.87, 0.76, 1.0);
 const DIM: Vec4 = Vec4::new(0.7, 0.68, 0.6, 0.9);
 const PALE: Vec4 = Vec4::new(0.98, 0.95, 0.84, 1.0);
+/// How far (meters) a villager's line over their head is read.
+const SAYING_HEARD: f32 = 18.0;
 const WARN: Vec4 = Vec4::new(0.95, 0.5, 0.42, 1.0);
 const GREEN: Vec4 = Vec4::new(0.55, 0.85, 0.5, 1.0);
 const GOLD: Vec4 = Vec4::new(0.95, 0.8, 0.5, 1.0);
@@ -455,6 +457,25 @@ impl Hud {
             let top = base - ART_PIXEL * (3 - row) as f32;
             ui.rect(Rect::new(Vec2::new(middle.x - width * 0.5, top), Vec2::new(width, ART_PIXEL)), PALE);
         }
+    }
+
+    /// A villager's line over their head, if the camera is near enough to hear it.
+    pub fn draw_saying(&self, ctx: &mut Context, point: Vec3, text: &str) {
+        let far = ctx.camera.position.distance(point);
+        if far > SAYING_HEARD {
+            return;
+        }
+        let ui = &mut ctx.ui;
+        let size = ui.size();
+        let clip = ctx.camera.view_projection(size.x / size.y.max(1.0)) * point.extend(1.0);
+        if clip.w <= 0.0 {
+            return;
+        }
+        let (x, y) = (clip.x / clip.w, clip.y / clip.w);
+        let at = Vec2::new((x + 1.0) * 0.5 * size.x, (1.0 - y) * 0.5 * size.y);
+        let alpha = ((SAYING_HEARD - far) / 4.0).clamp(0.0, 1.0);
+        let style = TextStyle::new(16.0).color(faded(PALE, alpha)).anchor(Anchor::Bottom);
+        ui.text(at, text, &style);
     }
 
     /// A mark on the locked enemy: the four corners of a square.

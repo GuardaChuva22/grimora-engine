@@ -149,3 +149,22 @@ O verificador separa os dois grupos, mas só há duas notas. Ele sabe apontar de
 
 ## draw_sling_r (saque do mosquete das costas), nota 3
 Crítica: "o braço ainda entorta, ainda mais na hora de desequipar, o mosquete atravessa o corpo/braço; quem pega é a mão esquerda e nem é na coronha, é no cano". Causas: (1) overlay sem `set_overlay_steady`, então o tronco seguia o balanço do quadril do clipe de baixo e a coronha entrava no quadril; (2) mão errada para o lado do mosquete. Refeito: a direita pega a coronha atrás do quadril. A geometria decide o pulso: com a pegada na altura do quadril e o mosquete quase em pé, o antebraço desce paralelo à coronha e o pulso dobra 100°; em diagonal, com a pegada no fim das costas (y 1,05), caiu para uns 87° só no quadro da pegada. Métricas de esforço não pegam cotovelo debatendo: a busca cobra velocidade do cotovelo. Busca a 10 Hz deixa passar penetração entre quadros: refine a 20-30 Hz.
+
+## Arremetida (2026-11-11): nota implícita muito baixa, "horrendo"
+
+Clipes `leap_*` escritos à mão por pose (`gen_leap_clips.py`, apagado): carga, subida, encolher, quebra, voo deitado, pouso de joelho. O usuário: o agachamento e o pulo originais (`jump_land` segurado, `jump`) eram melhores, e o voo "péssimo" (corpo deitado reto, braços colados para trás, cabeça virada, parece boneco de pano). Os portões passavam todos (pulso, `clearance`), e não diziam nada sobre isso.
+
+Regras: não troque um clipe nativo aprovado por um escrito à mão sem pedido. Para um movimento de corpo inteiro novo (voo, acrobacia), procure antes um clipe de captura nos pacotes que o usuário trouxe (`assets/animations/quaternius/UAL2_Standard.glb`, escolhido pelo nome em `LEAP`, `import_quaternius_clips.py`) e só escreva à mão o que não existir. Deitar o corpo inteiro pelo controlador (`Flight::lean` perto de 1,5) esconde a pose: mantenha a inclinação baixa (0,6) e deixe o clipe mostrar o movimento.
+
+## Katana (2026-11-11, `tools/gen_katana_clips.py`)
+- Duas mãos juntas no cabo pedem outro polo do cotovelo esquerdo: `POLE_L 0.02,0.56,0.04,-0.21` (com o das grandes, pulso esquerdo 104).
+- Chave por chave os limites passavam, mas os antebraços entravam na barriga (até 105 mm): ponha a profundidade do `clearance` na varredura de pose (deep + short + foot + excesso de pulso). Mãos baixas à esquerda no fim do corte (elevação -59) afundam; -26 com alcance 0,98 fica limpo.
+- Na volta do corte para a guarda, o antebraço desfaz a torção do tenouchi (twist passa por 0): o pico de pulso fica no meio da transição, não nas chaves. Meça os quadros entre chaves.
+- Resultado ainda sem nota do usuário.
+
+## draw_holster_r0 / l0 (saque das pistolas do coldre), 2026-11-19
+
+- Crítica: "simplesmente horríveis, totalmente bugadas". No jogo, logo depois de pegar, o pulso ia a 114° e a torção a 154°: a mão virava do avesso. Causas: (1) o polo do cotovelo era interpolado em linha reta entre chaves muito diferentes e passava rente à linha do braço, e aí o solver do jogo virava o cotovelo; o gerador, com outro ombro, não via; (2) girar a mão em linha reta no mundo, do coldre até a pegada, torce o antebraço até 175°.
+- Agora: `holster_frames` em `gen_stow_clips.py` escreve um quadro por chave, com o polo escolhido a cada quadro (perto do anterior) e gravado perpendicular ao braço; a pistola sai reta pelo cano e só tomba no fim (`tip`), e o giro até a pegada é interpolado em relação ao antebraço. Plano achado por busca em `HOLSTER_PLANS`.
+- Busca sem limites trapaceia: achou tronco a 60-87° e a pistola descendo. Prenda tronco (até ~15/30/15°) e direção do caminho antes de buscar.
+- Meça no jogo (`CLIP=draw_holster` em `gun_clips`): o gerador dizia braço alcançando, o jogo dava 65 mm curto ao pegar com tronco (15, 30, 15). Inclinar para o outro lado (z -10) resolveu.

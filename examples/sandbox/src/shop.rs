@@ -77,8 +77,15 @@ impl Sandbox {
             }
             rows
         } else {
+            // The village's shops charge by what it thinks of the player.
+            let markup = if shop.id.starts_with("vila_") {
+                (1.0 - ctx.world.village_reputation() as f32 / 200.0).clamp(0.6, 1.6)
+            } else {
+                1.0
+            };
             let price = |ware: &grimora::scene::story::WaresDesc| {
-                ware.price.or(catalog.get(&ware.item).map(|item| item.price)).unwrap_or(0)
+                let base = ware.price.or(catalog.get(&ware.item).map(|item| item.price)).unwrap_or(0);
+                ((base as f32 * markup).round() as u32).max(1)
             };
             shop.wares.iter().map(|ware| (ware.item.clone(), price(ware), None)).collect()
         };

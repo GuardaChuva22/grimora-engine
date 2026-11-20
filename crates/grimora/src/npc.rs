@@ -76,6 +76,8 @@ pub struct Agent {
     pub clip_speeds: (f32, f32),
     /// Comes before the names of its clips.
     pub clip_prefix: String,
+    /// A whole clip name played in place of `<prefix>idle` while standing still (a routine action).
+    pub rest_clip: Option<String>,
     collider: ColliderHandle,
     /// Where its clip moves it this frame, on top of walking.
     root_motion: Vec3,
@@ -84,6 +86,9 @@ pub struct Agent {
     look_at: Option<Vec3>,
     path: Vec<Vec3>,
     complete: bool,
+    /// How far (flat) the target was when the path was found: a path that stops short of it
+    /// but got this much nearer is followed by another from where it ends.
+    planned_gap: f32,
     status: AgentStatus,
     wants_path: bool,
     replan_in: f32,
@@ -135,6 +140,7 @@ impl Agent {
             animate: true,
             clip_speeds: (2.0, 4.5),
             clip_prefix: String::new(),
+            rest_clip: None,
             collider,
             root_motion: Vec3::ZERO,
             velocity: Vec3::ZERO,
@@ -142,6 +148,7 @@ impl Agent {
             look_at: None,
             path: Vec::new(),
             complete: false,
+            planned_gap: 0.0,
             status: AgentStatus::Idle,
             wants_path: false,
             replan_in: 0.0,
@@ -225,6 +232,7 @@ impl Agent {
         let path = physics.find_path(self.body.position, target, &shape);
         self.path = path.points;
         self.complete = path.complete;
+        self.planned_gap = flat(target - self.body.position).length();
         self.wants_path = false;
         self.replan_in = REPLAN_DELAY;
         if self.path.is_empty() {
@@ -248,7 +256,12 @@ impl Agent {
         let Some(&next) = self.path.first() else {
             // Still waiting for its first path, or the path is over.
             if !self.wants_path {
-                self.finish(if self.complete { AgentStatus::Arrived } else { AgentStatus::Failed });
+                if !self.complete && remaining < self.planned_gap - 1.0 {
+                    // A long way, found a piece at a time.
+                    self.wants_path = true;
+                } else {
+                    self.finish(if self.complete { AgentStatus::Arrived } else { AgentStatus::Failed });
+                }
             }
             return Vec3::ZERO;
         };
@@ -330,6 +343,34 @@ impl Agent {
     fn play_clip(&self, animator: &mut Animator) {
         let speed = flat(self.velocity).length();
         let (walk, run) = self.clip_speeds;
+        // Sitting down and getting up play once, in between the seated clips and the rest.
+        const SEATED: [&str; 3] = ["sit_idle", "sit_talk", "eat"];
+        let wants_seat = speed < 0.3 && self.rest_clip.as_deref().is_some_and(|c| SEATED.contains(&c));
+        let current = animator.current().map(str::to_owned);
+        let seated = current.as_deref().is_some_and(|c| SEATED.contains(&c));
+        if wants_seat && current.as_deref().is_some_and(|c| !SEATED.contains(&c) && c != "sit_down") {
+            animator.play_once("sit_down", 0.25);
+            return;
+        }
+        if current.as_deref() == Some("sit_down") && wants_seat && !animator.finished() {
+            return;
+        }
+        if !wants_seat && (seated || current.as_deref() == Some("sit_up")) {
+            if seated {
+                animator.play_once("sit_up", 0.25);
+            }
+            if !animator.finished() {
+                return;
+            }
+        }
+        if speed < 0.3
+            && let Some(rest) = &self.rest_clip
+        {
+            if animator.play(rest, 0.3) {
+                animator.speed = 1.0;
+            }
+            return;
+        }
         let (clip, rate) = if speed < 0.3 {
             ("idle", 1.0)
         } else if speed < (self.walk_speed + self.run_speed) * 0.5 {

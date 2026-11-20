@@ -102,6 +102,19 @@ mod tests {
     }
 
     #[test]
+    fn every_effect_in_the_assets_loads() {
+        let folder = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/effects");
+        for entry in std::fs::read_dir(folder).unwrap() {
+            let path = entry.unwrap().path();
+            let effect = load_effect(&path).unwrap_or_else(|e| panic!("{}: {e:#}", path.display()));
+            for (i, desc) in effect.iter().enumerate() {
+                let parent = desc.from.map(|p| p as usize);
+                assert!(parent.is_none_or(|p| p != i && p < effect.len()), "{}: emitter {i}", path.display());
+            }
+        }
+    }
+
+    #[test]
     fn the_cache_notices_a_changed_file() {
         let path = std::env::temp_dir().join(format!("grimora_effect_{}.ron", std::process::id()));
         std::fs::write(&path, "[(rate: 1.0)]").unwrap();

@@ -44,6 +44,14 @@ pub enum FaunaEvent {
         species: String,
         at: Vec3,
     },
+    /// A big animal took a blow (and went down, if `killed`): for the game to make it felt.
+    Struck {
+        species: String,
+        at: Vec3,
+        /// The way the blow came, on the ground.
+        from: Vec3,
+        killed: bool,
+    },
 }
 
 /// A noise an animal made: the engine plays these.
@@ -107,6 +115,14 @@ impl Wake {
     }
 
     /// It went in or out of the sand.
+    /// Like [`Wake::play`], at a pitch of the caller's choosing.
+    pub fn play_pitched(&mut self, species: &SpeciesDesc, file: &Path, pitch: f32, emitter: Emitter) {
+        if emitter.position.distance(self.focus) > emitter.max_distance {
+            return;
+        }
+        self.sounds.push(FaunaSound { file: file.to_path_buf(), volume: species.sounds.volume, pitch, emitter });
+    }
+
     pub fn dig(&mut self, species: &SpeciesDesc, puff: Option<&ParticleEffect>, at: Vec3) {
         if let Some(puff) = puff {
             self.puffs.push((puff.clone(), at));

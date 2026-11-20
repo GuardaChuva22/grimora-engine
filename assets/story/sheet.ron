@@ -1,0 +1,67 @@
+// The character's sheet, shown on the Inventário and Habilidades tabs. Only shown for now:
+// nothing in the game reads or changes these numbers yet. Vida, Defesa and Resistência come
+// from the game itself; Fluxo Arcano is `arcane` here until the game has it.
+// `level` in a skill is optional: write `Some(4)` or leave it out.
+(
+    name: "Andarilho",
+    people: "Humano",
+    level: 3,
+    experience: (439, 600),
+    arcane: (18, 34),
+    attributes: [
+        (name: "Vigor", value: 4, description: "Quanto o corpo aguenta: vida, fôlego e o peso que se carrega."),
+        (name: "Força", value: -1, description: "O peso de cada golpe e o que se consegue erguer."),
+        (name: "Destreza", value: 3, description: "Mãos e pés certos: armas leves, esquiva e mira."),
+        (name: "Instinto", value: 2, description: "Perceber antes de ver: emboscadas, rastros e o que se esconde."),
+        (name: "Intelecto", value: 0, description: "Ler, lembrar e entender: alquimia, mapas e engenhos."),
+        (name: "Carisma", value: 0, description: "Como os outros te recebem: preços, conversas e ameaças."),
+        (name: "Vontade", value: 3, description: "Resistir ao medo, à dor e ao que sussurra de dentro."),
+        (name: "Essência", value: 1, description: "O quanto do arcano passa por você sem te queimar."),
+        (name: "Sorte", value: 0, description: "O que ninguém controla, mas alguns parecem ter mais."),
+    ],
+    columns: [
+        (
+            name: "Perícias",
+            color: (0.85, 0.82, 0.7),
+            entries: [
+                (name: "Espadas", level: Some(4), description: "Lâminas de uma e de duas mãos: cortes, estocadas e defesa."),
+                (name: "Ameaçar", level: Some(3), description: "Fazer recuar sem levantar a mão, ou com ela já levantada."),
+                (name: "Arcano", level: Some(6), description: "Conhecimento das forças que não se vê, e de como pedir a elas."),
+                (name: "Investigar", level: Some(1), description: "Achar o que foi escondido e entender o que aconteceu ali."),
+                (name: "Socar", level: Some(1), description: "Brigar de mãos vazias."),
+                (name: "Chutar", level: Some(1), description: "Afastar, derrubar e arrombar."),
+                (name: "Esquivar", level: Some(4), description: "Sair do caminho do golpe a tempo."),
+            ],
+        ),
+        (
+            name: "Talentos",
+            color: (0.55, 0.75, 0.9),
+            entries: [
+                (name: "Pele Grossa", description: "Golpes leves deixam menos marca."),
+            ],
+        ),
+        (
+            name: "Tradições",
+            color: (0.78, 0.45, 0.9),
+            entries: [
+                (name: "Ars Metrica", level: Some(1), description: "A magia da medida: o que tem forma exata pode ser dobrado."),
+            ],
+        ),
+        (
+            name: "Obras Alquímicas",
+            color: (0.95, 0.75, 0.35),
+            entries: [
+                (name: "Quintessência", description: "O quinto elemento, destilado do que sobra dos outros quatro."),
+            ],
+        ),
+        (
+            name: "Profanações",
+            color: (0.5, 0.85, 0.4),
+            entries: [
+                (name: "Pulmão de Cinza", description: "Respirar fumaça como se fosse ar. Algo ficou lá dentro."),
+                (name: "Colônia Errante", description: "Há outros vivendo no seu corpo, e às vezes eles saem."),
+                (name: "Infecção Simpática", description: "O que fere você passa a ferir também quem estiver ligado a você."),
+            ],
+        ),
+    ],
+)

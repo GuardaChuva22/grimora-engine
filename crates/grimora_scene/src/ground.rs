@@ -35,23 +35,110 @@ impl Ground {
     /// A guess from a picture's file name (`tabuas_de_madeira.png` is wood), for objects
     /// that don't say what they are.
     pub fn from_picture(path: &str) -> Option<Ground> {
-        let name = path.rsplit(['/', '\\']).next().unwrap_or(path).to_lowercase();
+        Ground::from_name(path.rsplit(['/', '\\']).next().unwrap_or(path))
+    }
+
+    /// A guess from a material's or a picture's name, in Portuguese or English. Metal and
+    /// wood come first: a stone well's planks, an iron-bound chest's boards, say what they are.
+    pub fn from_name(name: &str) -> Option<Ground> {
+        let name = name.to_lowercase();
         let has = |words: &[&str]| words.iter().any(|word| name.contains(word));
-        Some(if has(&["madeira", "tabua", "wood", "plank"]) {
-            Ground::Wood
-        } else if has(&["ferro", "metal", "iron"]) {
+        Some(if has(&["ferro", "metal", "iron", "steel", "bronze", "cobre", "copper", "grade", "chapa"]) {
             Ground::Metal
-        } else if has(&["areia", "sand"]) {
+        } else if has(&[
+            "madeira",
+            "tabua",
+            "wood",
+            "plank",
+            "timber",
+            "deck",
+            "hull",
+            "trim",
+            "crate",
+            "seat",
+            "endgrain",
+            "cupboard",
+            "bark",
+            "casca",
+            "tronco",
+            "caule",
+            "cepo",
+            "aduela",
+            "boia",
+            "barril",
+            "door",
+            "porta",
+            "piso_madeira",
+            "lenha",
+            "galho",
+            "branch",
+            "log",
+        ]) {
+            Ground::Wood
+        } else if has(&["areia", "sand", "duna"]) {
             Ground::Sand
-        } else if has(&["grama", "grass"]) {
-            Ground::Grass
-        } else if has(&["lama", "mud", "pantano"]) {
+        } else if has(&["lama", "mud", "pantano", "lodo", "swamp"]) {
             Ground::Mud
-        } else if has(&["terra", "dirt"]) {
+        } else if has(&[
+            "pedra", "stone", "rock", "rocha", "tijolo", "brick", "laje", "slab", "marmore", "marble", "carved",
+            "groove", "laterita", "cascalho", "gravel", "seixo", "pebble", "calcada", "cobble", "telha", "pilar",
+            "altar", "matacao",
+        ]) {
+            Ground::Stone
+        } else if has(&[
+            "grama", "grass", "capim", "palha", "straw", "thatch", "folha", "leaf", "musgo", "moss", "feno",
+        ]) {
+            Ground::Grass
+        } else if has(&[
+            "terra",
+            "dirt",
+            "barro",
+            "clay",
+            "taipa",
+            "cupinzeiro",
+            "mound",
+            "ash",
+            "cinza",
+            "solo",
+            "soil",
+        ]) {
             Ground::Dirt
         } else {
             return None;
         })
+    }
+
+    /// What one stands on when on top of `mesh`: each material's guess, weighed by how much
+    /// of its surface faces up. `None` when no material says.
+    pub fn of_mesh(mesh: &grimora_core::MeshData) -> Option<Ground> {
+        let guesses: Vec<Option<Ground>> = mesh
+            .materials
+            .iter()
+            .map(|m| {
+                let named = m.name.as_deref().and_then(Ground::from_name);
+                named.or_else(|| m.base_color_texture.as_ref().and_then(|t| Ground::from_picture(&t.name)))
+            })
+            .collect();
+        let mut weight = [0.0f32; Ground::ALL.len()];
+        let mut weigh = |material: usize, indices: &[u32]| {
+            let Some(Some(ground)) = guesses.get(material) else { return };
+            let slot = Ground::ALL.iter().position(|g| g == ground).unwrap_or(0);
+            for t in indices.chunks_exact(3) {
+                let p = |i: u32| glam::Vec3::from(mesh.vertices[i as usize].position);
+                let up = (p(t[1]) - p(t[0])).cross(p(t[2]) - p(t[0])).y.abs();
+                // Faces seen from the side still count a little: a log's flank, a rock's face.
+                weight[slot] += up + 0.01;
+            }
+        };
+        if mesh.submeshes.is_empty() {
+            weigh(0, &mesh.indices);
+        } else {
+            for sub in &mesh.submeshes {
+                weigh(sub.material, &mesh.indices[sub.indices.start as usize..sub.indices.end as usize]);
+            }
+        }
+        let (best, most) = weight.iter().enumerate().fold((0, 0.0), |b, (i, &w)| if w > b.1 { (i, w) } else { b });
+        (most > 0.0).then_some(Ground::ALL[best])
     }
 
     /// Rain turns soft ground into mud; sand, stone, wood and metal only get wet.

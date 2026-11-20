@@ -91,6 +91,10 @@ pub enum ItemKind {
         /// Degrees around the blade from how the file has it to how the `weapon.R` joint wants it.
         #[serde(default = "default_turn")]
         turn: f32,
+        /// The file has it lying down, its blade along +X (kitchen knives): stood up along Y
+        /// in the hand, and `grip` is then along that X.
+        #[serde(default)]
+        lying: bool,
     },
     /// Fires. Its model's barrel runs along X, with Y up.
     Gun {
@@ -133,9 +137,10 @@ impl ItemDesc {
     /// From the joint that holds it ([`ItemDesc::hold_joint`]) to the model, if it's held at all.
     pub fn hold(&self) -> Option<Transform> {
         match self.kind {
-            ItemKind::Weapon { grip, turn, .. } => Some(Transform {
+            ItemKind::Weapon { grip, turn, lying, .. } => Some(Transform {
                 position: Vec3::NEG_Y * grip * self.scale,
-                rotation: Quat::from_rotation_y(turn.to_radians()),
+                rotation: Quat::from_rotation_y(turn.to_radians())
+                    * if lying { Quat::from_rotation_z(std::f32::consts::FRAC_PI_2) } else { Quat::IDENTITY },
                 scale: Vec3::splat(self.scale),
             }),
             ItemKind::Grimoire { at, turn, .. } | ItemKind::Gun { at, turn, .. } => Some(Transform {

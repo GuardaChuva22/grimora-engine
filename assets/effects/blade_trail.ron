@@ -1,17 +1,19 @@
-// The pale smear behind a blade: a soft point that lives an instant, laid down
-// along the way as the emitter follows the blade. `sandbox` turns `emitting` on
-// while the blade hurts.
+// Glints shed by the edge while the blade cuts; the sheet itself is the engine's
+// `BladeTrail`. `sandbox` turns `emitting` on while the blade hurts.
 [
     (
-        // The tip moves over half a meter a frame: dense, or it reads as dots.
-        rate: 1100.0,
-        max_particles: 260,
-        lifetime: (0.07, 0.13),
-        speed: (0.0, 0.05),
-        sizes: [0.06, 0.0],
-        colors: [(0.92, 0.88, 0.78, 0.55), (0.55, 0.48, 0.4, 0.0)],
-        emissive: 1.4,
+        rate: 70.0,
+        max_particles: 40,
+        lifetime: (0.18, 0.4),
+        speed: (0.2, 0.9),
+        spread: 180.0,
+        drag: 3.5,
+        acceleration: (0.0, -1.2, 0.0),
+        sizes: [0.035, 0.012, 0.0],
+        colors: [(1.0, 0.98, 0.92, 0.0), (0.85, 0.9, 1.0, 1.0), (0.5, 0.6, 1.0, 0.0)],
+        emissive: 2.5,
         additive: 1.0,
+        stretch: 0.03,
         shape: Soft,
     ),
 ]

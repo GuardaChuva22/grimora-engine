@@ -68,6 +68,9 @@ pub struct WorldState {
     /// The weather, in a scene with a day cycle.
     #[serde(default)]
     pub weather: Option<Weather>,
+    /// How the wind was blowing.
+    #[serde(default)]
+    pub wind: Option<grimora_core::WindState>,
     /// What was taken from the world, what's in the chests and what was dropped.
     #[serde(default)]
     pub items: ItemState,
@@ -175,7 +178,7 @@ impl WorldState {
             }
         }
         let mut generated = world.generated.clone();
-        for (transform, made) in world.ecs.query::<(&Transform, &Generated)>().iter() {
+        for (transform, made) in world.ecs.query::<(&Transform, &Generated)>().without::<&crate::Villager>().iter() {
             generated.note_place(made.id, &made.made, origin.transform_to_world(transform));
         }
         let camera = CameraState { position: origin.to_world(camera.position), yaw: camera.yaw, pitch: camera.pitch };
@@ -185,6 +188,7 @@ impl WorldState {
             triggers: world.trigger_state.clone(),
             time_of_day: world.time_of_day(),
             weather: world.weather(),
+            wind: Some(world.wind.state),
             items: world.item_state.clone(),
             fauna: world.fauna.census(),
             generated,
@@ -239,6 +243,9 @@ impl WorldState {
             && world.weather() != Some(weather)
         {
             world.set_weather(weather);
+        }
+        if let Some(wind) = self.wind {
+            world.wind.state = wind;
         }
         camera.position = origin.to_local(self.camera.position);
         camera.yaw = self.camera.yaw;

@@ -36,7 +36,8 @@ fn rain_starts_and_stops_with_the_change_of_weather() {
     assert!(world.environment.precipitation.wet > 0.0);
 
     world.change_weather(Weather::Clear, 1.0);
-    for _ in 0..12 {
+    // The last splashes finish fading.
+    for _ in 0..20 {
         frame(&mut world);
     }
     assert!(world.active_particles().is_empty());

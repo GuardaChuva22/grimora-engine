@@ -3,6 +3,7 @@
 [
     // the crack of light
     (
+        light: (color: (0.6, 0.88, 1.0), intensity: 3.0, radius: 6.0, linger: 0.15),
         rate: 0.0,
         burst: 1,
         lifetime: (0.2, 0.2),

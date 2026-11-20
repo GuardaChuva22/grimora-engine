@@ -117,6 +117,72 @@ pub struct ParticleDesc {
     pub max_distance: f32,
     /// Mixed with the entity's position; equal emitters don't move in step.
     pub seed: u64,
+    /// Radius of a circle around `direction` that particles start on, on top of `area`.
+    pub ring: f32,
+    /// Radius of a sphere they start on the surface of.
+    pub shell: f32,
+    /// How much they leave straight away from the emitter's center instead of along
+    /// `direction`, `0..1`: a ring that widens, a burst from a shell. Negative goes inwards.
+    pub outward: f32,
+    /// Multiplies `rate` over the `duration`, keys evenly spaced: a fire that swells and dies.
+    pub rates: Vec<f32>,
+    /// Each particle takes a color of its own somewhere between these keys, multiplying
+    /// `colors`: sparks of many hues, leaves of many greens.
+    pub tints: Vec<Vec4>,
+    /// Swells and shrinks by this share of its size, `pulse_rate` times a second, each
+    /// particle in its own time: breathing lights, fireflies.
+    pub pulse: f32,
+    pub pulse_rate: f32,
+    /// How much of its speed a particle keeps when it hits the ground, `0..1`. 0 falls
+    /// through it. A small value lands and stays: leaves, ash, debris.
+    pub bounce: f32,
+    /// How much the weather's wind carries it: 1 for smoke, less for sparks.
+    pub windy: f32,
+    /// A light it casts on the scenery, as bright as the particles alive are.
+    pub light: Option<ParticleLight>,
+    /// Makes this a child of the emitter with this index in the file: it releases nothing
+    /// by itself, only where and `when` that one's particles say.
+    pub from: Option<u32>,
+    pub when: Spawn,
+    /// How much of the parent particle's velocity a child starts with.
+    pub inherit: f32,
+    /// Share of particles, `0..1`, born on the skin of the body the system is given
+    /// ([`ParticleSystem::body`]) instead of at `position`; `area` jitters them off it, and
+    /// `outward` then means along the skin's normal. Auras emanate this way.
+    pub body: f32,
+}
+
+/// The light of an emitter: it sits in the middle of the live particles, follows their
+/// opacity, and dies away after them instead of going out in one frame.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ParticleLight {
+    /// sRGB.
+    pub color: Vec3,
+    /// With every particle of the `burst` (or of a steady `rate`) at full opacity.
+    pub intensity: f32,
+    pub radius: f32,
+    pub flicker: f32,
+    /// Seconds the light takes to die once the particles are gone.
+    pub linger: f32,
+}
+
+impl Default for ParticleLight {
+    fn default() -> Self {
+        Self { color: Vec3::ONE, intensity: 2.0, radius: 6.0, flicker: 0.0, linger: 0.12 }
+    }
+}
+
+/// When a child emitter (`ParticleDesc::from`) releases particles.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Spawn {
+    /// Its `burst` (at least one) where each parent particle dies: fireworks.
+    #[default]
+    Death,
+    /// Its `burst` where each parent particle hits the ground.
+    Bounce,
+    /// `rate` particles a second behind each parent particle: smoke behind debris.
+    Trail,
 }
 
 impl Default for ParticleDesc {
@@ -168,6 +234,20 @@ impl Default for ParticleDesc {
             distort: 0.0,
             max_distance: 60.0,
             seed: 0,
+            ring: 0.0,
+            shell: 0.0,
+            outward: 0.0,
+            rates: Vec::new(),
+            tints: Vec::new(),
+            pulse: 0.0,
+            pulse_rate: 1.0,
+            bounce: 0.0,
+            windy: 0.0,
+            light: None,
+            from: None,
+            when: Spawn::Death,
+            inherit: 0.0,
+            body: 0.0,
         }
     }
 }
@@ -191,6 +271,20 @@ pub enum ParticleShape {
     Runes,
     /// A shockwave: a sharp front and a long tail dying away behind it. Goes with `flat`.
     Wave,
+    /// The arc a blade leaves, thick in the middle and thin at the tips, bulging up.
+    Crescent,
+    /// A branch of lightning that strikes again many times a second. Goes with `upright`.
+    Bolt,
+    /// A splinter with three sides, no two alike: debris, glass, ice.
+    Shard,
+    /// Pointed at both ends: leaves, petals, feathers, drops.
+    Leaf,
+    /// A whole fire as a volume, raymarched inside the particle's sphere: a round bed of
+    /// fuel low in it, with tongues climbing off it through a rising turbulence (`noise`
+    /// repeats per meter, `flow` its motion in m/s, `warp` the sway). One particle is the
+    /// whole flame: keep it still, and for a fire that never ends emit one every half
+    /// `lifetime`, with `colors` going 0, 1, 0, so two always add up to one.
+    Volume,
 }
 
 impl ParticleShape {
@@ -205,6 +299,11 @@ impl ParticleShape {
             Self::Star => 4.0,
             Self::Runes => 6.0,
             Self::Wave => 7.0,
+            Self::Crescent => 8.0,
+            Self::Bolt => 9.0,
+            Self::Shard => 10.0,
+            Self::Leaf => 11.0,
+            Self::Volume => 12.0,
         }
     }
 }
@@ -212,7 +311,7 @@ impl ParticleShape {
 impl ParticleDesc {
     /// Keeps emitting for as long as it lives.
     pub fn looping(&self) -> bool {
-        (self.rate > 0.0 && self.duration.is_none()) || self.repeat > 0.0
+        self.from.is_none() && ((self.rate > 0.0 && self.duration.is_none()) || self.repeat > 0.0)
     }
 
     fn longest_life(&self) -> f32 {
@@ -239,7 +338,7 @@ pub struct ParticleInstance {
     pub emissive: f32,
     pub lit: f32,
     pub additive: f32,
-    /// See [`ParticleShape::index`], plus 10 if it lies flat.
+    /// See [`ParticleShape::index`], plus [`FLAT`] if it lies flat.
     pub shape: f32,
     /// x how much burned away, y pixels per meter, z meters of soft contact, w bending.
     pub look: [f32; 4],
@@ -346,9 +445,9 @@ impl WeatherParticles {
             };
             self.instances.push(ParticleInstance {
                 position: position.to_array(),
-                size: 0.035,
-                color: [0.72, 0.8, 0.95, 0.3 * fade],
-                stretch: (rain_velocity * speed * 0.03).to_array(),
+                size: 0.018 + 0.014 * place.w,
+                color: [0.72, 0.8, 0.95, (0.2 + 0.2 * place.w) * fade],
+                stretch: (rain_velocity * speed * (0.016 + 0.014 * place.z)).to_array(),
                 rotation: 0.0,
                 emissive: 0.15,
                 lit: 0.85,
@@ -369,14 +468,14 @@ impl WeatherParticles {
             };
             self.instances.push(ParticleInstance {
                 position: position.to_array(),
-                size: 0.07 + 0.07 * place.w,
-                color: [0.92, 0.95, 1.0, 0.9 * fade],
+                size: 0.09 + 0.09 * place.w,
+                color: [0.92, 0.95, 1.0, 0.95 * fade],
                 stretch: [0.0; 3],
                 rotation: phase,
                 emissive: 0.1,
                 lit: 0.9,
                 additive: 0.1,
-                shape: 1.0,
+                shape: 0.0,
                 ..ParticleInstance::PLAIN
             });
         }
@@ -397,14 +496,14 @@ impl WeatherParticles {
             }
             self.instances.push(ParticleInstance {
                 position: position.to_array(),
-                size: 0.02 + 0.04 * place.w,
-                color: [tint.x, tint.y, tint.z, 0.4 * fade * under],
+                size: 0.03 + 0.05 * place.w,
+                color: [tint.x, tint.y, tint.z, 0.45 * fade * under],
                 stretch: [0.0; 3],
                 rotation: phase,
                 emissive: 0.2,
                 lit: 0.6,
                 additive: 0.3,
-                shape: 1.0,
+                shape: 0.0,
                 ..ParticleInstance::PLAIN
             });
         }
@@ -413,6 +512,114 @@ impl WeatherParticles {
     /// Everything falling now, for the renderer.
     pub fn collect(&self, out: &mut Vec<ParticleInstance>) {
         out.extend_from_slice(&self.instances);
+    }
+}
+
+/// Raindrops landing a second at full rain, and how far from the camera they are drawn.
+const SPLASHES: f32 = 520.0;
+const SPLASH_REACH: f32 = 17.0;
+/// Seconds a landing shows, on the ground and on water, where the ring spreads wider.
+const SPLASH_LIFE: f32 = 0.32;
+const RIPPLE_LIFE: f32 = 0.7;
+
+/// One raindrop landed.
+#[derive(Debug, Clone, Copy)]
+struct Landing {
+    position: Vec3,
+    age: f32,
+    on_water: bool,
+}
+
+/// Where the rain lands around the camera: a ring that spreads on the ground or the water
+/// and a little crown of water jumping back up. Whoever owns it tells it where the ground is.
+#[derive(Debug, Clone)]
+pub struct RainSplashes {
+    landings: Vec<Landing>,
+    owed: f32,
+    rng: Rng,
+}
+
+impl Default for RainSplashes {
+    fn default() -> Self {
+        Self { landings: Vec::new(), owed: 0.0, rng: Rng::new(0x73706c61) }
+    }
+}
+
+impl RainSplashes {
+    /// `ground` gives the height of what the rain lands on at `(x, z)`, and whether that
+    /// is water; `None` where nothing lands.
+    pub fn update(
+        &mut self,
+        dt: f32,
+        camera: Vec3,
+        env: &Environment,
+        mut ground: impl FnMut(f32, f32) -> Option<(f32, bool)>,
+    ) {
+        self.landings.retain_mut(|l| {
+            l.age += dt;
+            l.age < if l.on_water { RIPPLE_LIFE } else { SPLASH_LIFE }
+        });
+        let rain = env.precipitation.rain.clamp(0.0, 1.0) * (1.0 - env.water.submerged.clamp(0.0, 1.0));
+        if rain <= 0.02 {
+            self.owed = 0.0;
+            return;
+        }
+        self.owed += rain * SPLASHES * dt.min(MAX_STEP);
+        while self.owed >= 1.0 {
+            self.owed -= 1.0;
+            // More of them close by, where they can be told apart.
+            let (sin, cos) = self.rng.range(0.0, std::f32::consts::TAU).sin_cos();
+            let far = self.rng.f32().powf(0.8) * SPLASH_REACH;
+            let (x, z) = (camera.x + cos * far, camera.z + sin * far);
+            if let Some((height, on_water)) = ground(x, z) {
+                self.landings.push(Landing { position: Vec3::new(x, height, z), age: 0.0, on_water });
+            }
+        }
+    }
+
+    pub fn shift(&mut self, offset: Vec3) {
+        for landing in &mut self.landings {
+            landing.position += offset;
+        }
+    }
+
+    pub fn collect(&self, out: &mut Vec<ParticleInstance>) {
+        const WHITE: [f32; 4] = [1.0; 4];
+        for landing in &self.landings {
+            let (life, wide) = if landing.on_water { (RIPPLE_LIFE, 0.75) } else { (SPLASH_LIFE, 0.26) };
+            let t = landing.age / life;
+            let left = (1.0 - t) * (1.0 - t);
+            out.push(ParticleInstance {
+                position: (landing.position + Vec3::Y * 0.03).to_array(),
+                size: 0.05 + wide * (1.0 - left),
+                color: [0.8, 0.87, 1.0, 0.3 * left],
+                emissive: 0.2,
+                lit: 0.9,
+                additive: 0.4,
+                shape: ParticleShape::Ring.index() + FLAT,
+                // Burned down to a thin line, thinner as it spreads.
+                look: [0.55 + 0.35 * t, 0.0, 0.0, 0.0],
+                detail: [0.0, 0.0, 0.0, 1.0],
+                rim: WHITE,
+                body: WHITE,
+                heart: WHITE,
+                ..ParticleInstance::PLAIN
+            });
+            if t < 0.6 {
+                // The crown: up and back down in the first part of it.
+                let jump = (t / 0.6 * std::f32::consts::PI).sin();
+                out.push(ParticleInstance {
+                    position: (landing.position + Vec3::Y * (0.03 + 0.07 * jump)).to_array(),
+                    size: 0.03,
+                    color: [0.85, 0.9, 1.0, 0.55 * (1.0 - t / 0.6)],
+                    stretch: [0.0, 0.05 * jump + 0.001, 0.0],
+                    emissive: 0.2,
+                    lit: 0.9,
+                    additive: 0.4,
+                    ..ParticleInstance::PLAIN
+                });
+            }
+        }
     }
 }
 
@@ -442,6 +649,20 @@ fn distance_fade(distance: f32, max_distance: f32) -> f32 {
 }
 
 const MIN_LIFE: f32 = 0.01;
+/// Added to the shape of a particle that lies flat; `vs_particle` takes it off again.
+pub const FLAT: f32 = 32.0;
+/// How much of its speed along the ground a particle keeps each time it touches it.
+const GROUND_GRIP: f32 = 0.6;
+/// Below this speed, in m/s, a bounce is a landing.
+const REST_SPEED: f32 = 0.6;
+/// How far above the ground a particle rests, clear of it.
+const FLOOR_CLEAR: f32 = 0.02;
+/// The most deaths or bounces of one emitter that its children hear of in a frame.
+const MOST_EVENTS: usize = 48;
+/// How far an emitter moves before the ground under it is measured again.
+const FLOOR_MOVE: f32 = 1.5;
+/// Meters per second of a wind of strength 1.
+pub const WIND_SPEED: f32 = 2.5;
 /// Longest step simulated at once; a hitch must not teleport every particle.
 const MAX_STEP: f32 = 0.1;
 /// Step of the catch-up that makes a looping effect already burning when it starts.
@@ -464,6 +685,8 @@ struct Particle {
     spin: f32,
     /// Offsets its wander from the other particles'.
     phase: f32,
+    /// Its own color, from `ParticleDesc::tints`.
+    tint: Vec4,
     /// Where it has been, newest first.
     trail: VecDeque<Vec3>,
     /// Seconds since the last point of the trail.
@@ -486,6 +709,12 @@ struct Emitter {
     /// How much it shows at the camera's distance: it fades out before `max_distance`,
     /// where it sleeps, so it never vanishes in one frame.
     fade: f32,
+    /// Where particles died and hit the ground this frame, and how fast, for children.
+    deaths: Vec<(Vec3, Vec3)>,
+    bounces: Vec<(Vec3, Vec3)>,
+    /// How bright its light is, and where.
+    glow: f32,
+    light_at: Vec3,
 }
 
 /// The running effect of an entity, which it follows through its
@@ -507,6 +736,14 @@ pub struct ParticleSystem {
     /// How far the world's origin has moved since this began, so the curls it swirls in stay
     /// fixed in the world: see [`ParticleSystem::shift`].
     moved: Vec3,
+    /// The height of the ground under it and where that was measured, for `bounce`.
+    floor: Option<(f32, Vec3)>,
+    /// The weather's wind, in m/s, for `windy`. Whoever updates the system sets it.
+    pub wind: Vec3,
+    /// Points on the skin of the body it wraps and their normals, world space, for emitters
+    /// with `body`. Whoever moves the system keeps them up to date.
+    pub body: Vec<(Vec3, Vec3)>,
+    has_children: bool,
 }
 
 impl ParticleSystem {
@@ -524,8 +761,13 @@ impl ParticleSystem {
                 started: false,
                 last_origin: Vec3::ZERO,
                 fade: 1.0,
+                deaths: Vec::new(),
+                bounces: Vec::new(),
+                glow: 0.0,
+                light_at: Vec3::ZERO,
             })
             .collect();
+        let has_children = effect.iter().any(|d| d.from.is_some());
         Self {
             effect,
             emitters,
@@ -534,6 +776,40 @@ impl ParticleSystem {
             emitting: true,
             despawn_when_done: false,
             moved: Vec3::ZERO,
+            floor: None,
+            wind: Vec3::ZERO,
+            body: Vec::new(),
+            has_children,
+        }
+    }
+
+    /// True if some particle bounces and the ground under `position` isn't known yet, or
+    /// was measured too far from there.
+    pub fn needs_floor(&self, position: Vec3) -> bool {
+        self.effect.iter().any(|d| d.bounce > 0.0)
+            && self.floor.is_none_or(|(_, at)| ((at - position) * Vec3::new(1.0, 0.0, 1.0)).length() > FLOOR_MOVE)
+    }
+
+    /// Tells it the height of the ground under `position`.
+    pub fn set_floor(&mut self, height: f32, position: Vec3) {
+        self.floor = Some((height, position));
+    }
+
+    /// Adds the light of every emitter that has one and is lit.
+    pub fn lights(&self, out: &mut Vec<crate::PointLight>) {
+        for (desc, emitter) in self.effect.iter().zip(&self.emitters) {
+            let Some(light) = &desc.light else { continue };
+            let intensity = light.intensity * emitter.glow * emitter.fade;
+            if intensity > 0.01 {
+                out.push(crate::PointLight {
+                    position: emitter.light_at,
+                    color: light.color,
+                    intensity,
+                    radius: light.radius * self.scale,
+                    flicker: light.flicker,
+                    night_only: false,
+                });
+            }
         }
     }
 
@@ -545,8 +821,18 @@ impl ParticleSystem {
         let base = transform.position + transform.rotation * self.offset;
         for (desc, emitter) in self.effect.iter().zip(&mut self.emitters) {
             let origin = base + transform.rotation * (desc.position * self.scale);
-            let step =
-                Step { desc, scale: self.scale, rotation: transform.rotation, origin, emitting, moved: self.moved };
+            let floor = self.floor.map_or(origin.y, |(y, _)| y) + FLOOR_CLEAR;
+            let step = Step {
+                desc,
+                scale: self.scale,
+                rotation: transform.rotation,
+                origin,
+                emitting,
+                moved: self.moved,
+                floor,
+                wind: self.wind,
+                body: &self.body,
+            };
             emitter.fade = distance_fade(origin.distance(camera), desc.max_distance);
             if origin.distance(camera) > desc.max_distance {
                 emitter.particles.clear();
@@ -555,7 +841,7 @@ impl ParticleSystem {
                 emitter.started = !desc.looping();
                 continue;
             }
-            if emitter.waited < desc.delay {
+            if desc.from.is_none() && emitter.waited < desc.delay {
                 emitter.waited += dt;
                 continue;
             }
@@ -564,13 +850,70 @@ impl ParticleSystem {
             }
             emitter.step(&step, dt);
         }
+        if self.has_children {
+            self.release_children(transform, base, dt);
+        }
+    }
+
+    /// Lets every child emitter release what its parent's particles call for this frame.
+    fn release_children(&mut self, transform: &Transform, base: Vec3, dt: f32) {
+        for child in 0..self.emitters.len() {
+            let desc = &self.effect[child];
+            let Some(parent) = desc.from.map(|p| p as usize).filter(|&p| p != child && p < self.emitters.len()) else {
+                continue;
+            };
+            if !self.emitters[child].started {
+                continue;
+            }
+            let mut events = match desc.when {
+                Spawn::Death => self.emitters[parent].deaths.clone(),
+                Spawn::Bounce => self.emitters[parent].bounces.clone(),
+                Spawn::Trail => Vec::new(),
+            };
+            let mut each = desc.burst.max(1);
+            if desc.when == Spawn::Trail {
+                each = 1;
+                let alive = self.emitters[parent].particles.len();
+                self.emitters[child].owed += desc.rate.max(0.0) * dt * alive as f32;
+                let whole = self.emitters[child].owed.floor();
+                self.emitters[child].owed -= whole;
+                for _ in 0..(whole as usize).min(MOST_EVENTS * 4) {
+                    let i = (self.emitters[child].rng.range(0.0, alive as f32) as usize).min(alive.saturating_sub(1));
+                    if let Some(p) = self.emitters[parent].particles.get(i) {
+                        events.push((p.position, p.velocity));
+                    }
+                }
+            }
+            let origin = base + transform.rotation * (desc.position * self.scale);
+            let step = Step {
+                desc,
+                scale: self.scale,
+                rotation: transform.rotation,
+                origin,
+                emitting: true,
+                moved: self.moved,
+                floor: self.floor.map_or(origin.y, |(y, _)| y) + FLOOR_CLEAR,
+                wind: self.wind,
+                body: &self.body,
+            };
+            for (at, velocity) in events {
+                for _ in 0..each {
+                    self.emitters[child].spawn_from(&step, at, velocity * desc.inherit);
+                }
+            }
+        }
     }
 
     /// Moves every live particle by `offset`, as the world's origin moves the other way.
     pub fn shift(&mut self, offset: Vec3) {
         self.moved -= offset;
+        if let Some((height, at)) = &mut self.floor {
+            *height += offset.y;
+            *at += offset;
+        }
         for emitter in &mut self.emitters {
             emitter.last_origin += offset;
+            emitter.light_at += offset;
             for p in &mut emitter.particles {
                 p.position += offset;
                 for point in &mut p.trail {
@@ -585,6 +928,7 @@ impl ParticleSystem {
         self.effect.iter().zip(&self.emitters).all(|(desc, emitter)| {
             emitter.started
                 && emitter.particles.is_empty()
+                && emitter.glow < 0.02
                 && !desc.looping()
                 && desc.duration.is_none_or(|duration| desc.rate <= 0.0 || emitter.elapsed >= duration)
         })
@@ -609,14 +953,17 @@ impl ParticleSystem {
                 || desc.soft > 0.0
                 || desc.distort > 0.0
                 || !matches!(desc.shape, ParticleShape::Soft | ParticleShape::Diamond);
-            let flat = if desc.flat { 10.0 } else { 0.0 };
+            let flat = if desc.flat { FLAT } else { 0.0 };
             for p in &emitter.particles {
                 let t = p.age / p.life;
-                let mut color = sample(&desc.colors, t, Vec4::lerp, Vec4::ONE);
+                let mut color = sample(&desc.colors, t, Vec4::lerp, Vec4::ONE) * p.tint;
                 color.w *= emitter.fade;
                 color.w *= 1.0 - desc.twinkle * (0.5 + 0.5 * (p.age * TWINKLE_RATE + p.phase * 5.0).sin());
                 color.w *= last_fade(t);
-                let size = p.size * sample(&desc.sizes, t, lerp, 0.2) * self.scale;
+                let mut size = p.size * sample(&desc.sizes, t, lerp, 0.2) * self.scale;
+                if desc.pulse != 0.0 {
+                    size *= 1.0 + desc.pulse * (p.age * desc.pulse_rate * std::f32::consts::TAU + p.phase).sin();
+                }
                 let upright = desc.upright > 0.0;
                 let stretch = if upright { Vec3::Y * size * 0.5 * desc.upright } else { p.velocity * desc.stretch };
                 let rooted = if upright { stretch + Vec3::Y * size * 0.5 } else { Vec3::ZERO };
@@ -705,6 +1052,10 @@ struct Step<'a> {
     emitting: bool,
     /// [`ParticleSystem::moved`].
     moved: Vec3,
+    /// The height particles that `bounce` land at.
+    floor: f32,
+    wind: Vec3,
+    body: &'a [(Vec3, Vec3)],
 }
 
 impl Emitter {
@@ -713,7 +1064,7 @@ impl Emitter {
         self.elapsed = 0.0;
         self.owed = 0.0;
         self.last_origin = step.origin;
-        if !step.emitting {
+        if !step.emitting || step.desc.from.is_some() {
             return;
         }
         for _ in 0..step.desc.burst {
@@ -736,15 +1087,23 @@ impl Emitter {
         let (orbit, attract) = (desc.orbit * step.scale * dt, desc.attract * step.scale * dt);
         let axis = step.rotation * desc.direction.normalize_or(Vec3::Y);
         let clock = self.elapsed;
+        let wind = step.wind * desc.windy * dt;
+        let (bounce, floor) = (desc.bounce, step.floor);
+        self.deaths.clear();
+        self.bounces.clear();
+        let (deaths, bounces) = (&mut self.deaths, &mut self.bounces);
         self.particles.retain_mut(|p| {
             p.age += dt;
             if p.age >= p.life {
+                if deaths.len() < MOST_EVENTS {
+                    deaths.push((p.position, p.velocity));
+                }
                 return false;
             }
             let (a, phase) = (p.age, p.phase);
             let drift =
                 Vec3::new((a * 4.1 + phase).sin(), (a * 3.3 + phase * 2.0).sin(), (a * 5.3 + phase * 3.0).cos());
-            let mut push = acceleration + drift * wander;
+            let mut push = acceleration + drift * wander + wind;
             if curl != 0.0 {
                 push += curl_flow((p.position + step.moved) / curl_size, clock) * curl;
             }
@@ -756,6 +1115,17 @@ impl Emitter {
             // Where it was: a point at the head itself would be a piece with no length.
             let before = p.position;
             p.position += p.velocity * dt + carried;
+            if bounce > 0.0 && p.position.y < floor && p.velocity.y < 0.0 {
+                p.position.y = floor;
+                let up = -p.velocity.y * bounce;
+                p.velocity = Vec3::new(p.velocity.x * GROUND_GRIP, up, p.velocity.z * GROUND_GRIP);
+                if up < REST_SPEED {
+                    p.velocity.y = 0.0;
+                    p.spin *= GROUND_GRIP;
+                } else if bounces.len() < MOST_EVENTS {
+                    bounces.push((p.position, p.velocity));
+                }
+            }
             if desc.trail > 0.0 {
                 let points = desc.trail_points.max(1) as usize;
                 let spacing = desc.trail / points as f32;
@@ -771,6 +1141,24 @@ impl Emitter {
         });
 
         self.elapsed += dt;
+        if let Some(light) = &desc.light {
+            let (mut sum, mut at) = (0.0, Vec3::ZERO);
+            for p in &self.particles {
+                let t = p.age / p.life;
+                let weight = sample(&desc.colors, t, Vec4::lerp, Vec4::ONE).w * last_fade(t);
+                sum += weight;
+                at += p.position * weight;
+            }
+            let mean_life = (desc.lifetime.0 + desc.lifetime.1) * 0.5;
+            let full = (desc.burst as f32).max(desc.rate * mean_life).max(1.0);
+            if sum > 1e-4 {
+                self.light_at = at / sum;
+            }
+            self.glow = (sum / full).min(1.5).max(self.glow * (-dt / light.linger.max(1e-3)).exp());
+        }
+        if desc.from.is_some() {
+            return;
+        }
         if desc.repeat > 0.0 && step.emitting {
             self.since_burst += dt;
             if self.since_burst >= desc.repeat {
@@ -783,7 +1171,13 @@ impl Emitter {
         if !step.emitting || desc.duration.is_some_and(|duration| self.elapsed > duration) {
             self.owed = 0.0;
         } else {
-            self.owed += desc.rate.max(0.0) * dt;
+            let swell = match desc.duration {
+                Some(duration) if !desc.rates.is_empty() => {
+                    sample(&desc.rates, self.elapsed / duration.max(1e-3), |a, b, t| a + (b - a) * t, 1.0)
+                }
+                _ => 1.0,
+            };
+            self.owed += desc.rate.max(0.0) * swell * dt;
             // Spread along the way the emitter moved, so a fast one doesn't leave clumps.
             let whole = self.owed.floor();
             for i in 0..whole as u32 {
@@ -796,25 +1190,57 @@ impl Emitter {
     }
 
     fn spawn(&mut self, step: &Step<'_>, origin: Vec3) {
+        self.spawn_from(step, origin, Vec3::ZERO);
+    }
+
+    /// A new particle at `origin`, with `carried` added to the velocity it starts with.
+    fn spawn_from(&mut self, step: &Step<'_>, origin: Vec3, carried: Vec3) {
         let desc = step.desc;
         if self.particles.len() >= desc.max_particles as usize {
             return;
         }
         let rng = &mut self.rng;
+        let mut origin = origin;
+        let mut skin_normal = None;
+        if desc.body > 0.0 && !step.body.is_empty() && rng.range(0.0, 1.0) < desc.body {
+            let (at, normal) = step.body[(rng.range(0.0, step.body.len() as f32) as usize).min(step.body.len() - 1)];
+            origin = at;
+            skin_normal = Some(normal);
+        }
         let area = desc.area * step.scale;
         let box_offset = Vec3::new(rng.jitter(area.x), rng.jitter(area.y), rng.jitter(area.z));
-        let direction = cone_direction(rng, step.rotation * desc.direction.normalize_or(Vec3::Y), desc.spread);
+        let axis = step.rotation * desc.direction.normalize_or(Vec3::Y);
+        let mut offset = step.rotation * box_offset;
+        if desc.ring > 0.0 {
+            let (a, b) = axis.any_orthonormal_pair();
+            let (s, c) = rng.range(0.0, std::f32::consts::TAU).sin_cos();
+            offset += (a * c + b * s) * desc.ring * step.scale;
+        }
+        if desc.shell > 0.0 {
+            offset += cone_direction(rng, Vec3::Y, 180.0) * desc.shell * step.scale;
+        }
+        let mut direction = cone_direction(rng, axis, desc.spread);
+        if desc.outward != 0.0 {
+            let away = skin_normal.unwrap_or_else(|| offset.normalize_or(direction)) * desc.outward.signum();
+            direction = direction.lerp(away, desc.outward.abs().min(1.0)).normalize_or(direction);
+        }
+        let tint = if desc.tints.is_empty() {
+            Vec4::ONE
+        } else {
+            sample(&desc.tints, rng.range(0.0, 1.0), Vec4::lerp, Vec4::ONE)
+        };
         let spin = rng.jitter(desc.spin).to_radians();
         let rotation = rng.range(0.0, std::f32::consts::TAU);
         self.particles.push(Particle {
-            position: origin + step.rotation * box_offset,
-            velocity: direction * rng.range(desc.speed.0, desc.speed.1) * step.scale,
+            position: origin + offset,
+            velocity: direction * rng.range(desc.speed.0, desc.speed.1) * step.scale + carried,
             age: 0.0,
             life: rng.range(desc.lifetime.0, desc.lifetime.1).max(MIN_LIFE),
             size: 1.0 + rng.jitter(desc.size_jitter.clamp(0.0, 1.0)),
             rotation,
             spin,
             phase: rng.range(0.0, std::f32::consts::TAU),
+            tint,
             trail: VecDeque::new(),
             trail_clock: 0.0,
         });
@@ -853,7 +1279,7 @@ mod tests {
         assert!(light.len() > 200 && heavy.len() > light.len() * 3, "{} {}", light.len(), heavy.len());
         assert!(heavy.iter().all(|p| p.stretch[1] < 0.0), "rain is drawn along its fall");
         let flakes = falling(0.0, 1.0, Vec3::ZERO, 3);
-        assert!(flakes.len() > 500 && flakes.iter().all(|p| p.stretch == [0.0; 3] && p.shape == 1.0));
+        assert!(flakes.len() > 500 && flakes.iter().all(|p| p.stretch == [0.0; 3] && p.shape == 0.0));
 
         let far = Vec3::new(5000.0, 80.0, -3000.0);
         for p in falling(1.0, 1.0, far, 7) {
@@ -944,7 +1370,7 @@ mod tests {
         let desc = ParticleDesc { rate: 0.0, burst: 1, flat: true, shape: ParticleShape::Ring, ..Default::default() };
         let mut ring = system(desc);
         ring.update(&Transform::IDENTITY, DT, NEAR, true);
-        assert_eq!(instances(&ring)[0].shape, 13.0);
+        assert_eq!(instances(&ring)[0].shape, 3.0 + FLAT);
     }
 
     #[test]
@@ -1050,6 +1476,56 @@ mod tests {
         assert_eq!(p.stretch, [0.0, 1.0, 0.0]);
         assert!(p.position[1] > 1.9, "stands on its position: {}", p.position[1]);
         assert_eq!(p.rotation, std::f32::consts::FRAC_PI_2);
+    }
+
+    #[test]
+    fn sparks_bounce_and_children_are_born_where_they_land() {
+        let spark = ParticleDesc {
+            rate: 0.0,
+            burst: 4,
+            lifetime: (3.0, 3.0),
+            acceleration: Vec3::new(0.0, -9.8, 0.0),
+            bounce: 0.5,
+            light: Some(ParticleLight::default()),
+            ..Default::default()
+        };
+        let puff =
+            ParticleDesc { burst: 2, lifetime: (0.3, 0.3), from: Some(0), when: Spawn::Bounce, ..Default::default() };
+        let mut sparks = ParticleSystem::new(Arc::from([spark, puff]), Vec3::ZERO, 1.0, 7);
+        let above = Transform::from_position(Vec3::Y * 2.0);
+        assert!(sparks.needs_floor(above.position));
+        sparks.set_floor(0.0, above.position);
+        let mut most = 0;
+        for _ in 0..150 {
+            sparks.update(&above, DT, NEAR, true);
+            most = most.max(sparks.particle_count());
+            assert!(instances(&sparks).iter().all(|p| p.position[1] >= 0.0), "none under the ground");
+        }
+        let mut lights = Vec::new();
+        sparks.lights(&mut lights);
+        assert!(most >= 4 + 8, "each of the four made two more on landing: {most}");
+        assert_eq!(lights.len(), 1);
+        run(&mut sparks, &above, 2.0);
+        assert!(sparks.finished(), "children end with their parent, and the light goes out");
+    }
+
+    #[test]
+    fn a_ring_that_goes_outward_widens() {
+        let desc = ParticleDesc {
+            rate: 0.0,
+            burst: 12,
+            lifetime: (9.0, 9.0),
+            ring: 1.0,
+            outward: 1.0,
+            speed: (2.0, 2.0),
+            ..Default::default()
+        };
+        let mut ring = system(desc);
+        run(&mut ring, &Transform::IDENTITY, 1.0);
+        for p in instances(&ring) {
+            let p = Vec3::from(p.position);
+            assert!(p.y.abs() < 1e-3 && (p.length() - 3.0).abs() < 0.1, "{p}");
+        }
     }
 
     const DT: f32 = 1.0 / 60.0;
@@ -1289,4 +1765,153 @@ mod tests {
         run(&mut other, &Transform::IDENTITY, 1.0);
         assert_ne!(instances(&a), instances(&other));
     }
+}
+
+/// The look of a [`BladeTrail`]: a sheet swept by the blade, hot at the edge and at the
+/// head, that thins toward the edge and breaks into strands along its tail.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BladeTrailDesc {
+    /// Seconds a piece of the sheet lasts.
+    pub life: f32,
+    /// sRGB colors and glow, from the faint rim to the white heart.
+    pub rim: [f32; 4],
+    pub body: [f32; 4],
+    pub heart: [f32; 4],
+    pub opacity: f32,
+    /// How much the strands bite into it, 0 to 1.
+    pub strands: f32,
+}
+
+impl Default for BladeTrailDesc {
+    fn default() -> Self {
+        Self {
+            life: 0.2,
+            rim: [0.35, 0.42, 0.75, 0.6],
+            body: [0.72, 0.82, 1.0, 1.4],
+            heart: [1.0, 0.98, 0.92, 3.0],
+            opacity: 1.0,
+            strands: 0.75,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BladeSample {
+    base: Vec3,
+    tip: Vec3,
+    age: f32,
+    /// Meters the tip has traveled up to here.
+    along: f32,
+    /// Starts a new stroke: no piece joins it to the one before.
+    cut: bool,
+}
+
+/// What a blade leaves behind while it cuts: the base and the tip at each frame, drawn as
+/// one smooth sheet between them (the frames are joined by curves, since a tip moves half a
+/// meter in one), as particles of [`BLADE_RIBBON`].
+#[derive(Debug, Clone)]
+pub struct BladeTrail {
+    pub desc: BladeTrailDesc,
+    samples: VecDeque<BladeSample>,
+    live: bool,
+    seed: f32,
+}
+
+/// The shape index of a piece of a blade's sheet.
+pub const BLADE_RIBBON: f32 = 13.0;
+/// Meters of the tip's path a piece of the sheet covers, and the most pieces between two frames.
+const RIBBON_STEP: f32 = 0.035;
+const RIBBON_MOST: usize = 24;
+
+impl BladeTrail {
+    pub fn new(desc: BladeTrailDesc, seed: u32) -> Self {
+        Self { desc, samples: VecDeque::new(), live: false, seed: (seed % 997) as f32 * 0.137 }
+    }
+
+    /// `blade` is where the base and the tip are now, while the blade cuts.
+    pub fn update(&mut self, dt: f32, blade: Option<(Vec3, Vec3)>) {
+        let life = self.desc.life.max(0.01);
+        for s in &mut self.samples {
+            s.age += dt;
+        }
+        while self.samples.len() > 1 && self.samples[1].age >= life {
+            self.samples.pop_front();
+        }
+        if self.samples.len() == 1 && self.samples[0].age >= life {
+            self.samples.clear();
+        }
+        match blade {
+            Some((base, tip)) => {
+                let last = self.samples.back().copied();
+                let along = last.map_or(0.0, |l| l.along + l.tip.distance(tip));
+                self.samples.push_back(BladeSample { base, tip, age: 0.0, along, cut: !self.live });
+                self.live = true;
+            }
+            None => self.live = false,
+        }
+    }
+
+    pub fn shift(&mut self, offset: Vec3) {
+        for s in &mut self.samples {
+            s.base += offset;
+            s.tip += offset;
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.samples.len() < 2
+    }
+
+    pub fn collect(&self, out: &mut Vec<ParticleInstance>) {
+        let life = self.desc.life.max(0.01);
+        let n = self.samples.len();
+        let d = &self.desc;
+        let at = |i: usize| self.samples[i];
+        for i in 1..n {
+            let (a, b) = (at(i - 1), at(i));
+            if b.cut || a.age >= life {
+                continue;
+            }
+            // The frames around, for the curve: none across a cut.
+            let before = if a.cut || i < 2 { a } else { at(i - 2) };
+            let after = if i + 1 < n && !at(i + 1).cut { at(i + 1) } else { b };
+            let pieces = ((b.tip.distance(a.tip) / RIBBON_STEP).ceil() as usize).clamp(1, RIBBON_MOST);
+            let point = |k: usize| {
+                let u = k as f32 / pieces as f32;
+                let base = catmull_rom(before.base, a.base, b.base, after.base, u);
+                let tip = catmull_rom(before.tip, a.tip, b.tip, after.tip, u);
+                (base, tip, a.age + (b.age - a.age) * u, a.along + (b.along - a.along) * u)
+            };
+            let mut from = point(0);
+            for k in 1..=pieces {
+                let to = point(k);
+                out.push(ParticleInstance {
+                    position: from.0.to_array(),
+                    size: 0.0,
+                    color: [1.0, 1.0, 1.0, d.opacity],
+                    stretch: from.1.to_array(),
+                    rotation: (from.2 / life).min(1.0),
+                    emissive: 1.0,
+                    lit: 0.0,
+                    additive: 1.0,
+                    shape: BLADE_RIBBON,
+                    // Below zero, or it would count as bending what is behind it.
+                    look: [to.1.x, to.1.y, to.1.z, -1.0 - to.3],
+                    flow: [to.0.x, to.0.y, to.0.z, from.3],
+                    detail: [(to.2 / life).min(1.0), self.seed, d.strands, 1.0],
+                    rim: d.rim,
+                    body: d.body,
+                    heart: d.heart,
+                });
+                from = to;
+            }
+        }
+    }
+}
+
+fn catmull_rom(p0: Vec3, p1: Vec3, p2: Vec3, p3: Vec3, t: f32) -> Vec3 {
+    let t2 = t * t;
+    let t3 = t2 * t;
+    0.5 * (2.0 * p1 + (p2 - p0) * t + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2 + (3.0 * p1 - p0 - 3.0 * p2 + p3) * t3)
 }

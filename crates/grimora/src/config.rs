@@ -47,6 +47,8 @@ pub struct EngineConfig {
     /// Replaces the weather of the scene's day when it loads, at once. The game can still
     /// change it after that.
     pub weather: Option<Weather>,
+    /// Sets the scene's clock to this hour when it loads, and lets the day go on from there.
+    pub start_time: Option<f32>,
     /// Where in the world the scene's zero lies, in meters (`f64`): to try it far from the
     /// world's origin, where `f32` alone would shake.
     pub origin_offset: Option<DVec3>,
@@ -82,6 +84,7 @@ impl Default for EngineConfig {
             escape_quits: true,
             time_of_day: None,
             weather: None,
+            start_time: None,
             origin_offset: None,
             origin_shift: None,
             world: None,
@@ -109,6 +112,7 @@ Options:
   --menu <name>             Ask the game to open this menu at startup, to capture it
                             (the sandbox has title, pause, options, video and controls)
   --time <hour>             Stop the scene's day at this hour, from 0 to 24
+  --start-time <hour>       Start the scene's day at this hour and let it run
   --weather <kind>          Start with this weather: clear, overcast, rain, storm or snow
   --origin-offset <x,z>     Put the scene this many meters from the world's origin (f64)
   --origin-shift <x,z>      Move the origin this far right after loading, as walking would
@@ -159,6 +163,7 @@ impl EngineConfig {
                     let (x, z) = parse_xz(&value()?)?;
                     self.at = Some(DVec2::new(x, z));
                 }
+                "--start-time" => self.start_time = Some(value()?.parse().context("--start-time expects an hour")?),
                 "--time" => self.time_of_day = Some(value()?.parse().context("--time expects an hour")?),
                 "--weather" => {
                     self.weather = Some(match value()?.as_str() {

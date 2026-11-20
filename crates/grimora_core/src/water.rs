@@ -719,6 +719,13 @@ fn river_at(points: &[RiverPoint], x: f32, z: f32) -> Option<(f32, Vec3)> {
     best.map(|(_, level, flow)| (level, flow))
 }
 
+/// How high the waves stand for a wind of `wind` times the scene's (`Wind::scale`): 1 in the
+/// scene's own wind, a calm sea in still air and a little over twice in a storm, since much of
+/// a sea's swell comes from afar and the waves grow slower than the wind.
+pub fn wave_scale(wind: f32) -> f32 {
+    (0.35 + 0.65 * wind.max(0.0).powf(0.6)).clamp(0.3, 2.6)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -744,8 +751,11 @@ mod tests {
         // A sea at 2 m, a river beside a beach and a pond inland.
         let mut waters = sea();
         let look = WaterLook { clarity: 3.0, ..WaterLook::default() };
-        let river = (0..20).map(|i| RiverPoint { position: Vec3::new(i as f32 * 10.0, 9.0 - i as f32 * 0.3, 40.0), half_width: 2.0 });
-        waters.bodies.insert(0, WaterBody { shape: WaterShape::river(river.collect(), 1.0), level: 9.0, ripples: 0.0, look });
+        let river = (0..20)
+            .map(|i| RiverPoint { position: Vec3::new(i as f32 * 10.0, 9.0 - i as f32 * 0.3, 40.0), half_width: 2.0 });
+        waters
+            .bodies
+            .insert(0, WaterBody { shape: WaterShape::river(river.collect(), 1.0), level: 9.0, ripples: 0.0, look });
         let pond = WaterShape::Sheet { center: Vec2::new(100.0, -60.0), half: Vec2::splat(15.0) };
         waters.bodies.insert(1, WaterBody { shape: pond, level: 12.0, ripples: 0.0, look });
         // Seen from by the river, from by the pond and from the sea, each place says the same.

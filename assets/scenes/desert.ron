@@ -95,10 +95,13 @@ SceneDesc(
     weather_sounds: (
         rain: "../sounds/rain.wav",
         snow: "../sounds/wind.ogg",
-        thunder: ["../sounds/thunder_1.wav", "../sounds/thunder_2.wav"],
+        // Strong winds only, louder in the gusts: still air is silent.
+        wind: "../sounds/wind.ogg",
+        thunder: ["../sounds/weather/thunder_1.mp3", "../sounds/weather/thunder_2.mp3", "../sounds/weather/thunder_3.mp3", "../sounds/weather/thunder_4.mp3"],
+        // The bolt that comes down with each strike.
+        lightning: "../effects/lightning.ron",
     ),
 
     sounds: [
-        (path: "../sounds/wind.ogg", volume: 0.45),
     ],
 )

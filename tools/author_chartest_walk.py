@@ -18,11 +18,18 @@ SPEED = 1.2
 DURATION = 1.0
 FPS = 60
 DUTY = 0.60
+# The player's ordinary walk; the one above is the slow walk (left Alt), and the villagers'.
+BRISK_SPEED = 2.0
+BRISK_DURATION = 0.72
+BRISK_DUTY = 0.56
+# Walk body: hips lower (m), hips ahead (m), chest leaning on (deg), pelvis and chest turn.
+GAIT_BODY = (0.0, 0.0, 0.0, 1.0)
+BRISK_BODY = (0.022, 0.035, 4.0, 1.6)
 RUN_SPEED = 5.5
 RUN_DURATION = 2/3
 RUN_DUTY = .26
 JUMP_DURATIONS = {'jump':.30,'jump_fall':.24,'jump_land':.40}
-NATIVE_CLIPS = ('sword_walk','sword_run','jump','jump_fall','jump_land','jump_land_walk','jump_land_run')
+NATIVE_CLIPS = ('sword_walk','sword_brisk','sword_run','jump','jump_fall','jump_land','jump_land_walk','jump_land_run')
 FORWARD = np.array([0., 0., -1.])
 
 
@@ -227,9 +234,10 @@ def author(model, running=False, landing=False, motion=None):
         gp, gq = {}, {}
         desired = {}
         # Lowest in double support, rising over each supporting leg.
-        hip_shift = np.array([.018*np.sin(w), -.052-.020*np.cos(2*w), -.020])
-        hips_delta = axis('y',4*np.cos(w)) * axis('z',2*np.sin(w)) * axis('x',2)
-        torso_delta = axis('y',-4*np.cos(w)) * axis('z',-1.1*np.sin(w)) * axis('x',-1.5)
+        sink, ahead, lean, swing = GAIT_BODY
+        hip_shift = np.array([.018*np.sin(w), -.052-sink-.020*np.cos(2*w), -.020-ahead])
+        hips_delta = axis('y',4*swing*np.cos(w)) * axis('z',2*np.sin(w)) * axis('x',2)
+        torso_delta = axis('y',-4*swing*np.cos(w)) * axis('z',-1.1*np.sin(w)) * axis('x',-1.5-lean)
         if running:
             half = phase % .5
             # Lowest as the leg takes the weight, highest in flight: 7 cm, not a bounce.
@@ -374,24 +382,35 @@ def author(model, running=False, landing=False, motion=None):
     return rotations,translations,contacts
 
 
+def brisk(model):
+    """The walk, with the brisk gait's speed, cycle and support in place of the slow one's."""
+    global SPEED, DURATION, DUTY, GAIT_BODY
+    saved = SPEED, DURATION, DUTY, GAIT_BODY
+    SPEED, DURATION, DUTY, GAIT_BODY = BRISK_SPEED, BRISK_DURATION, BRISK_DUTY, BRISK_BODY
+    try:
+        return author(model)
+    finally:
+        SPEED, DURATION, DUTY, GAIT_BODY = saved
+
+
 def main():
     document = json.loads(MODEL.read_text(encoding='utf-8'))
-    generated = document.get('extras',{}).get('chartest_walk')
-    if generated:
-        document['accessors'] = document['accessors'][:generated['accessors']]
-        document['bufferViews'] = document['bufferViews'][:generated['views']]
-        document['buffers'] = document['buffers'][:generated['buffers']]
-        # The original jump lives in the base buffer; replace its channels too.
-        document['animations'] = [a for a in document['animations'] if a['name'] not in NATIVE_CLIPS]
+    # Only this script's buffer goes; the ones written after it (HD mesh, Quaternius) stay.
+    import sys
+    sys.path.insert(0, str(ROOT/'tools'))
+    from gltf_buffers import drop_buffer
+    drop_buffer(document, 'chartest_walk.bin')
+    # The original jump lives in the base buffer; replace its channels too.
+    document['animations'] = [a for a in document['animations'] if a['name'] not in NATIVE_CLIPS]
     model = Model(document)
     clips = [('sword_walk',DURATION,SPEED,author(model)),
+             ('sword_brisk',BRISK_DURATION,BRISK_SPEED,brisk(model)),
              ('sword_run',RUN_DURATION,RUN_SPEED,author(model,running=True))]
     for motion,duration in JUMP_DURATIONS.items():
         clips.append((motion,duration,0,author(model,motion=motion)))
     clips.extend([
         ('jump_land_walk',DURATION,SPEED,author(model,landing=True)),
         ('jump_land_run',RUN_DURATION,RUN_SPEED,author(model,running=True,landing=True))])
-    base = dict(accessors=len(document['accessors']),views=len(document['bufferViews']),buffers=len(document['buffers']))
     data = bytearray()
     buffer_index = len(document['buffers'])
     def accessor(values, kind):
@@ -420,7 +439,7 @@ def main():
         channel(model.names['hips'],'translation',translations)
         document['animations'].append(animation)
     document['buffers'].append(dict(uri='chartest_walk.bin',byteLength=len(data)))
-    document.setdefault('extras',{})['chartest_walk'] = base
+    document.setdefault('extras',{}).pop('chartest_walk',None)
     backup = ROOT/'screenshots/walk-review/before'
     backup.mkdir(parents=True,exist_ok=True)
     if not (backup/MODEL.name).exists(): shutil.copy2(MODEL,backup/MODEL.name)
@@ -435,6 +454,14 @@ def main():
     for name,_,_,(_,_,contacts) in clips:
         (ROOT/f'screenshots/walk-review/{name}-contacts.json').write_text(json.dumps(contacts,indent=1)+'\n')
     print(f'[locomotion] Native walk {DURATION:.2f}s at {SPEED:.2f}m/s; run {RUN_DURATION:.3f}s at {RUN_SPEED:.2f}m/s')
+    # The Quaternius blows and jumps go on top, and replace the jumps written here.
+    if (ROOT/'assets/animations/quaternius').exists():
+        import subprocess, sys
+        subprocess.run([sys.executable, '-I', str(ROOT/'tools/import_quaternius_clips.py')], check=True)
+    # Then the villagers' everyday clips (sitting, sleeping, talking, praying, fishing).
+    if (ROOT/'assets/animations/village').exists():
+        import subprocess, sys
+        subprocess.run([sys.executable, '-I', str(ROOT/'tools/import_village_clips.py')], check=True)
 
 
 if __name__ == '__main__':

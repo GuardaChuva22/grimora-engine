@@ -396,6 +396,10 @@ pub struct Animator {
     left_out: Vec<bool>,
     left_out_amount: f32,
     left_out_target: f32,
+    /// Turns added on top of everything else, joint by joint: see [`Animator::set_offsets`].
+    offsets: Vec<(usize, Quat)>,
+    /// A pose held still that the clips take over from: seconds left and in all.
+    still: Option<(Vec<JointTransform>, f32, f32)>,
 }
 
 /// Seconds for the overlay to let go of a limb or take it back.
@@ -425,6 +429,8 @@ impl Animator {
             left_out: Vec::new(),
             left_out_amount: 0.0,
             left_out_target: 0.0,
+            offsets: Vec::new(),
+            still: None,
         };
         animator.evaluate();
         animator
@@ -692,6 +698,17 @@ impl Animator {
 
         let Some(current) = self.current else { return };
         blend_stack(&self.skeleton, &self.previous, current, &mut self.pose, &mut self.scratch, &mut self.mixing);
+        if let Some((still, left, total)) = &mut self.still {
+            *left -= dt;
+            let t = (1.0 - *left / total.max(1e-6)).clamp(0.0, 1.0);
+            let t = t * t * (3.0 - 2.0 * t);
+            for (pose, held) in self.pose.iter_mut().zip(still.iter()) {
+                *pose = held.lerp(pose, t);
+            }
+            if *left <= 0.0 {
+                self.still = None;
+            }
+        }
         if let Some(over) = &mut self.overlay {
             let duration = clips[over.current.clip].duration;
             advance(&mut over.current, dt, duration);
@@ -747,6 +764,11 @@ impl Animator {
             free.apply(&self.skeleton, &mut self.pose, dt);
         }
         self.apply_bend();
+        for &(joint, turn) in &self.offsets {
+            if let Some(pose) = self.pose.get_mut(joint) {
+                pose.rotation = (turn * pose.rotation).normalize();
+            }
+        }
         if let Some(joint) = self.skeleton.motion {
             self.pose[joint].translation = self.skeleton.joints[joint].rest.translation;
         }
@@ -761,6 +783,13 @@ impl Animator {
         if self.bend.len() != joints.len() {
             self.bend = joints.iter().filter_map(|name| self.skeleton.joint(name)).collect();
         }
+    }
+
+    /// Turns these joints by these amounts, in their parents' frames, on top of whatever plays,
+    /// from the next update on: a body jolted by a blow. An empty list stops it.
+    pub fn set_offsets(&mut self, offsets: &[(usize, Quat)]) {
+        self.offsets.clear();
+        self.offsets.extend_from_slice(offsets);
     }
 
     /// With 1, an overlay faces the way it was written whatever the clip underneath does to the
@@ -819,6 +848,7 @@ impl Animator {
     /// Shows `pose`, one local transform per joint, and stops whatever was playing: for
     /// tools that work out their own poses.
     pub fn set_pose(&mut self, pose: &[JointTransform]) {
+        self.still = None;
         self.current = None;
         self.previous.clear();
         self.overlay = None;
@@ -826,6 +856,12 @@ impl Animator {
         self.pose.extend_from_slice(pose);
         self.pose.resize(self.skeleton.joints.len(), JointTransform::IDENTITY);
         self.evaluate();
+    }
+
+    /// Holds the pose shown now and lets the clips take over from it over `seconds`, whatever
+    /// they start with: a body that lay as a ragdoll getting back up.
+    pub fn fade_from_still(&mut self, seconds: f32) {
+        self.still = Some((self.pose.clone(), seconds, seconds));
     }
 
     /// The current local pose, one transform per joint.

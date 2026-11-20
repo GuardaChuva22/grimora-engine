@@ -47,7 +47,24 @@ const BEACH_TOP: f64 = 3.2;
 const RISE_PER_METER: f64 = 16.0;
 const RISE: (f64, f64) = (500.0, 6000.0);
 /// How steeply the sea floor goes down off a beach, and meters over which it reaches its band.
-const SHELF_SLOPE: f64 = 0.04;
+/// The sea floor, going out from the shore: water to wade in for `WADE` meters, falling by
+/// `WADE_SLOPE`; then down `REEF_DEPTH` to a terrace that starts `REEF_AT` out and goes on
+/// falling by `TERRACE_SLOPE`, where the reefs are; then the drop of `DROP` meters between
+/// `DROP_AT` and `DROP_END`, to the open sea's floor, never shallower than `OPEN_FLOOR`.
+const WADE: f64 = 40.0;
+const WADE_SLOPE: f64 = 0.05;
+const REEF_AT: f64 = 150.0;
+const REEF_DEPTH: f64 = 7.0;
+const TERRACE_SLOPE: f64 = 0.012;
+const DROP_AT: f64 = 340.0;
+const DROP_END: f64 = 600.0;
+const DROP: f64 = 48.0;
+const OPEN_FLOOR: f64 = -60.0;
+/// How far those steps wander in and out, so the drop doesn't run along the beach.
+const REEF_WANDER: f64 = 70.0;
+/// Meters of the sand's dunes, and of the rocky knolls and gullies that stand in patches.
+const DUNES: f64 = 0.7;
+const KNOLLS: f64 = 6.0;
 const SHELF: f64 = 2000.0;
 /// The land's shapes, as (wavelength in meters, share of the band's detail): broad swells,
 /// hills and the small swales between them.
@@ -315,6 +332,31 @@ impl Relief {
         smooth + detail * smoothstep(COAST_REACH, COAST_REACH * 0.6, smooth.abs())
     }
 
+    /// The sea floor `off` meters out from the shore, where the map's band says `band`.
+    fn sea_floor(&self, x: f64, z: f64, off: f64, band: f64) -> f64 {
+        let seed = |k: u64| self.seed.wrapping_add(k);
+        let wander = fbm(x / 420.0, z / 420.0, 2, seed(61)) * REEF_WANDER * smoothstep(WADE, REEF_AT, off);
+        let out = (off + wander).max(0.0);
+        let wade = -WADE_SLOPE * off.min(WADE);
+        let mut h = wade
+            - REEF_DEPTH * smoothstep(WADE, REEF_AT, out)
+            - TERRACE_SLOPE * (out - REEF_AT).clamp(0.0, DROP_END - REEF_AT)
+            - DROP * smoothstep(DROP_AT, DROP_END, out);
+        let floor = band.min(OPEN_FLOOR);
+        h += (floor - h) * smoothstep(DROP_END, DROP_END + SHELF, off);
+        // Nothing stands up in the water one wades in.
+        let under = smoothstep(1.5, 6.0, -h);
+        let dunes = fbm(x / 34.0, z / 34.0, 2, seed(62)) * DUNES;
+        let swells = fbm(x / 600.0, z / 600.0, 3, seed(21)) * SEABED * smoothstep(60.0, 600.0, off);
+        // Rocky ground in patches: ridges with gullies between them, and rubble over both.
+        let rocky = smoothstep(0.05, 0.4, value(x / 170.0, z / 170.0, seed(63)));
+        let ridge = 1.0 - value(x / 19.0, z / 19.0, seed(64)).abs();
+        let knolls = (ridge * ridge - 0.35) * KNOLLS + value(x / 6.0, z / 6.0, seed(65)) * 0.5;
+        h += (dunes + knolls * rocky) * under + swells;
+        // Never over the ramp of the beach: the sea gets no islets.
+        h.min(wade)
+    }
+
     /// The ground as the shore, the bands and the noise make it, before any water digs into it.
     pub fn raw_height_at(&self, x: f64, z: f64) -> f64 {
         let (wx, wz) = (x / WARP_LENGTH, z / WARP_LENGTH);
@@ -326,12 +368,7 @@ impl Relief {
         let d = self.shore_at(x, z);
         if d <= 0.0 {
             // Down off the beach, then over the shelf to the sea's bands.
-            let off = -d;
-            let floor = self.base_at(bx, bz, false).min(-4.0);
-            let slope = (-off * SHELF_SLOPE).max(floor);
-            let h = slope + (floor - slope) * smoothstep(0.0, SHELF, off);
-            let bumps = fbm(x / 600.0, z / 600.0, 3, self.seed.wrapping_add(21)) * SEABED;
-            return h + bumps * smoothstep(60.0, 600.0, off);
+            return self.sea_floor(x, z, -d, self.base_at(bx, bz, false));
         }
         let band = self.base_at(bx, bz, true);
         let filled = self.basin_depth(DVec2::new(x, z));

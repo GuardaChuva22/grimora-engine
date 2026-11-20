@@ -2,6 +2,7 @@
 // frame or two, chips thrown out and falling, and dust that blooms and settles.
 [
     (
+        light: (color: (1.0, 0.8, 0.5), intensity: 2.0, radius: 3.5, linger: 0.08),
         rate: 0.0,
         burst: 1,
         lifetime: (0.03, 0.05),

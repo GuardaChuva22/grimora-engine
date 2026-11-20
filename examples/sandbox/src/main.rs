@@ -21,13 +21,18 @@
 
 mod bag;
 mod bag_screen;
+mod craft;
+mod debug;
 mod dialogue;
 mod gear;
 mod guns;
 mod hud;
 mod journal;
+mod leap;
 mod menu;
+mod prompts;
 mod rest;
+mod sheet;
 mod shop;
 mod spells;
 mod tale;
@@ -58,12 +63,29 @@ const HIT_SPARKS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/effe
 const BLOCK_SPARKS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/effects/block.ron");
 const SWING_SOUND: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/sounds/swing.wav");
 const HIT_SOUND: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/sounds/hit.wav");
+/// A wooden door swinging open, and swinging shut.
+const DOOR_OPEN_SOUND: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/sounds/doors/wooden_door_open.mp3");
+const DOOR_CLOSE_SOUND: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/sounds/doors/wooden_door_close.mp3");
+/// A roll in no armor or in plain clothes: cloth and body on the ground.
+const ROLL_SOUND: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/sounds/roll/roll_light.mp3");
+/// Armor knocking on itself, played on top of `ROLL_SOUND` when something is worn on the body.
+const ROLL_ARMOR_SOUND: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/sounds/roll/roll_armor.mp3");
 /// Two recordings of a blade meeting a blade, taken in turn so a run of blocks doesn't repeat.
 const CLANG_SOUNDS: [&str; 2] = [
     concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/sounds/clang_1.wav"),
     concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/sounds/clang_2.wav"),
 ];
 const CLANG_SOUND: &str = CLANG_SOUNDS[0];
+/// A body falling to the ground, and a limb knocking on it.
+const BODY_FALL_SOUNDS: [&str; 3] = [
+    concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/sounds/body_fall_1.wav"),
+    concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/sounds/body_fall_2.wav"),
+    concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/sounds/body_fall_3.wav"),
+];
+const LIMB_KNOCK_SOUNDS: [&str; 2] = [
+    concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/sounds/limb_knock_1.wav"),
+    concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/sounds/limb_knock_2.wav"),
+];
 const GROUND_HIT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/effects/ground_hit.ron");
 const SWIM_SOUND: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/sounds/swim.wav");
 const BUBBLES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/effects/bubbles.ron");
@@ -76,17 +98,20 @@ const FIRST_WEAPON: &str = "espada_reta";
 /// The pale smear behind the blade while it hurts.
 const BLADE_TRAIL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/effects/blade_trail.ron");
 
-/// Native chartest walk (tools/author_chartest_walk.py); other gaits use sword_moves.py.
-const WALK_SPEED: f32 = 1.2;
+/// Native chartest walks (tools/author_chartest_walk.py); other gaits use sword_moves.py.
+/// The ordinary walk is `sword_brisk`; `sword_walk` is the slow one, with left Alt held.
+const WALK_SPEED: f32 = 2.0;
+const SLOW_SPEED: f32 = 1.2;
 const RUN_SPEED: f32 = 5.5;
 const STRAFE_SPEED: f32 = 0.8;
 const BACK_SPEED: f32 = 0.95;
 /// Seconds a cycle of each gait takes, as they were written, at the speeds above.
-const WALK_CYCLE: f32 = 1.0;
+const WALK_CYCLE: f32 = 0.72;
+const SLOW_CYCLE: f32 = 1.0;
 const STRAFE_CYCLE: f32 = 0.66;
 const BACK_CYCLE: f32 = 0.9;
 /// Clips with a walking rhythm: going from one to another keeps the step.
-const GAITS: [&str; 5] = ["sword_walk", "sword_run", "sword_back", "sword_strafe_l", "sword_strafe_r"];
+const GAITS: [&str; 6] = ["sword_walk", "sword_brisk", "sword_run", "sword_back", "sword_strafe_l", "sword_strafe_r"];
 const LOCOMOTION_FADE: f32 = 0.2;
 /// A blow leaves the body further from where walking has it, and it needs longer to get there.
 const OUT_OF_BLOW_FADE: f32 = 0.3;
@@ -114,13 +139,26 @@ const HEAVY: Moveset = Moveset {
     guards: &[("heavy_guard", "heavy_block")],
     clang_pitch: 0.78,
 };
+/// Chudan: both hands on the handle, the point at the eyes of whoever is in front.
+const KATANA: Moveset = Moveset {
+    idle: "katana_idle",
+    carry: Some("katana_carry"),
+    guards: &[("katana_guard", "katana_block")],
+    clang_pitch: 0.92,
+};
 /// Legs that stay put under a gun: a gun plays its own clips over the upper body.
 const GUN: Moveset =
     Moveset { idle: "gun_stand", carry: None, guards: &[("gun_stand", "gun_stand")], clang_pitch: 1.0 };
 
 impl Moveset {
     fn of(weapon: &Weapon) -> &'static Moveset {
-        if weapon.clip.starts_with("heavy") { &HEAVY } else { &LIGHT }
+        if weapon.clip.starts_with("heavy") {
+            &HEAVY
+        } else if weapon.clip.starts_with("katana") {
+            &KATANA
+        } else {
+            &LIGHT
+        }
     }
 }
 
@@ -248,6 +286,7 @@ struct Sandbox {
     heart_glow: f32,
     steps: Footsteps,
     hud: Hud,
+    prompts: prompts::Prompts,
     hit_sparks: Option<ParticleEffect>,
     block_sparks: Option<ParticleEffect>,
     ground_hit: Option<ParticleEffect>,
@@ -281,8 +320,10 @@ struct Sandbox {
     trails: Option<[Entity; 2]>,
     menu: Menu,
     bag: Bag,
+    debug: debug::Debug,
     spells: spells::Spells,
     guns: guns::Guns,
+    leap: leap::Leap,
     tale: tale::Tale,
 }
 
@@ -298,6 +339,7 @@ impl Sandbox {
             heart_glow: 1.0,
             steps: Footsteps::default(),
             hud: Hud::default(),
+            prompts: prompts::Prompts::default(),
             hit_sparks: None,
             block_sparks: None,
             ground_hit: None,
@@ -319,8 +361,10 @@ impl Sandbox {
             trails: None,
             menu: Menu::default(),
             bag: Bag::default(),
+            debug: debug::Debug::default(),
             spells: spells::Spells::default(),
             guns: guns::Guns::default(),
+            leap: leap::Leap::default(),
             tale: tale::Tale::default(),
         }
     }
@@ -337,6 +381,7 @@ impl Sandbox {
         println!("[sandbox] player spawned at {position}");
         let mut player = ThirdPersonController::new(position + Vec3::Y * 0.1, yaw);
         player.walk_speed = WALK_SPEED;
+        player.slow_speed = SLOW_SPEED;
         player.run_speed = RUN_SPEED;
         player.strafe_speed = STRAFE_SPEED;
         player.back_speed = BACK_SPEED;
@@ -442,19 +487,32 @@ impl Sandbox {
         }
     }
 
-    /// Shows the prompt of the object in reach and uses it when E is pressed.
+    /// Marks what can be used around the player and uses the chosen one when E is pressed.
     fn interact(&mut self, ctx: &mut Context, center: Vec3) {
-        let Some(target) = ctx.world.interaction_target(center, ctx.camera.forward(), &ctx.physics) else { return };
-        self.hud.draw_prompt(ctx, &target.prompt);
+        let Some(target) = self.prompts.update(ctx, center) else { return };
         if !ctx.input.action_just_pressed(actions::INTERACT) {
             return;
         }
-        if ctx.world.get::<Pickup>(target.entity).is_some() {
+        if ctx.world.toggle_door(target.entity).is_some() {
+            return;
+        }
+        if let Some(key) = ctx.world.get::<Pickup>(target.entity).map(|p| p.key.clone()) {
+            let player = self.player.as_ref().map_or(Vec3::ZERO, |p| p.body.position);
+            if ctx.world.villagers_see_theft(&key, player, &ctx.physics) {
+                self.hud.notify(ctx, "Viram você pegando o que não é seu.".to_string(), true);
+            }
             self.take_pickup(ctx, target.entity);
             return;
         }
         if let Some(key) = ctx.world.container_key(target.entity) {
+            let player = self.player.as_ref().map_or(Vec3::ZERO, |p| p.body.position);
+            if ctx.world.villagers_see_theft(&key, player, &ctx.physics) {
+                self.hud.notify(ctx, "Viram você mexendo no baú. A vila não gostou.".to_string(), true);
+            }
             self.open_chest(key);
+            return;
+        }
+        if self.talk_to_villager(ctx, target.entity) {
             return;
         }
         if let Some(name) = target.name.as_deref()
@@ -497,8 +555,20 @@ impl Sandbox {
                 }
                 FaunaEvent::Killed { species, at } => {
                     self.tale.story.killed(&species);
+                    if species != "bovino"
+                        && let Some(effect) = &self.hit_sparks
+                    {
+                        ctx.world.play_effect(effect, at);
+                    }
+                }
+                // A blow on a big animal lands like one on anybody: the thud, the sparks, a jolt.
+                FaunaEvent::Struck { at, killed, .. } => {
+                    ctx.audio.play_at(HIT_SOUND, 0.9, Emitter::at(at));
                     if let Some(effect) = &self.hit_sparks {
                         ctx.world.play_effect(effect, at);
+                    }
+                    if let Some(player) = &mut self.player {
+                        player.shake(if killed { 0.06 } else { 0.035 });
                     }
                 }
             }
@@ -645,6 +715,11 @@ impl Sandbox {
                 health.make_untouchable(safe);
                 if rolling {
                     player.turn_to(holding);
+                    let pitch = 0.96 + 0.08 * (ctx.time.elapsed().fract() as f32);
+                    ctx.audio.play_pitched(ROLL_SOUND, 0.8, pitch);
+                    if self.bag.worn_in(grimora::scene::ArmorSlot::Body).is_some() {
+                        ctx.audio.play_pitched(ROLL_ARMOR_SOUND, 0.8, pitch);
+                    }
                 } else if let Some(target) = player.lock_target {
                     player.turn_to(target - player.body.position);
                 }
@@ -679,6 +754,7 @@ impl Sandbox {
     /// Holds the sword up for as long as the player asks and nothing else is going on, facing
     /// where the camera looks. The legs stay free: it plays over the upper body.
     fn update_guard(&mut self, ctx: &mut Context, fighting: bool) {
+        ctx.world.player_holds_weapon(self.bag.armed() || self.bag.gun().is_some());
         // The book has its own poses, in `spells.rs`, and a gun in `guns.rs`.
         if self.bag.book().is_some() || self.bag.gun().is_some() || self.bag.gear.busy() {
             if let Some(guard) = ctx.world.get_mut::<Guard>(self.avatar) {
@@ -787,6 +863,10 @@ impl Sandbox {
                 }
             };
             println!("[sandbox] hit for {damage}: {attacker:?} -> {target:?}, killed: {killed}");
+            if attacker == self.avatar && ctx.world.get::<grimora::Villager>(target).is_some() {
+                let player = self.player.as_ref().map_or(position, |p| p.body.position);
+                ctx.world.villager_attacked(target, player, &mut ctx.physics);
+            }
             if killed
                 && attacker == self.avatar
                 && let Some(name) = ctx.world.get::<Name>(target)
@@ -824,6 +904,8 @@ impl Sandbox {
             for event in animator.events() {
                 match event {
                     "swing" => sounds.push((SWING_SOUND, 0.6, Emitter::at(at))),
+                    // The player's roll has its own recording, played when it starts.
+                    "fall" if entity == self.avatar && animator.current() == Some("sword_roll") => {}
                     "fall" => sounds.push((STEP_SOUND, 0.9, Emitter::at(at))),
                     "step" if entity != self.avatar => steps.push(at),
                     _ => {}
@@ -836,7 +918,26 @@ impl Sandbox {
         for (i, at) in steps.into_iter().enumerate() {
             let ground = ctx.world.ground_under(&ctx.physics, at);
             let take = self.steps.count + i * 7;
-            ctx.audio.play_at(Footsteps::of_npc(ground, take), 0.3, Emitter::quiet(at));
+            let depth = Footsteps::wading(ctx, at);
+            ctx.audio.play_at(Footsteps::of_npc(ground, take), 0.3 * Footsteps::under_water(depth), Emitter::quiet(at));
+            if let Some((splash, loud, tone)) = Footsteps::splash(depth, take) {
+                ctx.audio.play_pitched_at(splash, 0.3 * loud, tone, Emitter::quiet(at));
+            }
+        }
+        // Doors starting to open or to shut, whoever moved them.
+        for (at, opening) in ctx.world.take_door_sounds() {
+            let sound = if opening { DOOR_OPEN_SOUND } else { DOOR_CLOSE_SOUND };
+            ctx.audio.play_at(sound, 0.8, Emitter::at(at));
+        }
+        // Bodies hitting the ground, the trunk heavier than a limb.
+        for thud in ctx.world.take_thuds() {
+            let take = (thud.at.x.to_bits() ^ thud.at.z.to_bits().rotate_left(7)) as usize;
+            let (sound, volume) = if thud.heavy {
+                (BODY_FALL_SOUNDS[take % BODY_FALL_SOUNDS.len()], 1.0)
+            } else {
+                (LIMB_KNOCK_SOUNDS[take % LIMB_KNOCK_SOUNDS.len()], 0.6)
+            };
+            ctx.audio.play_at(sound, volume * thud.strength, Emitter::at(thud.at));
         }
     }
 
@@ -858,6 +959,9 @@ impl Sandbox {
         self.hud.draw_statuses(ctx, &statuses);
         if let Some(point) = self.locked_on.and_then(|target| ctx.world.lock_point(target)) {
             self.hud.draw_lock(ctx, point);
+        }
+        for (point, text) in ctx.world.villager_lines() {
+            self.hud.draw_saying(ctx, point, &text);
         }
         let Some((foe, left)) = &mut self.foe else { return };
         *left -= dt;
@@ -901,7 +1005,7 @@ impl Sandbox {
         let Some(player) = self.player.as_mut() else { return };
         let Some(stamina) = ctx.world.get_mut::<Stamina>(self.avatar) else { return };
         let speed = Vec2::new(player.velocity().x, player.velocity().z).length();
-        if speed > (player.walk_speed + player.run_speed) * 0.5 && !self.winded {
+        if speed > (player.walk_speed + player.run_speed) * 0.5 && player.body.grounded && !self.winded {
             stamina.spend(RUN_COST * dt);
         }
         if stamina.current <= 0.0 {
@@ -976,6 +1080,12 @@ impl Sandbox {
             (ctx.world.find("hostile"), ctx.world.item_mesh(FIRST_WEAPON), hold)
         {
             ctx.world.attach(hostile, "weapon.R", sword, hold);
+        }
+        // The sheet each blade sweeps while it cuts.
+        let fighters: Vec<_> = [Some(self.avatar), ctx.world.find("hostile")].into_iter().flatten().collect();
+        for (seed, fighter) in fighters.into_iter().enumerate() {
+            let trail = grimora::core::BladeTrail::new(Default::default(), seed as u32 + 1);
+            let _ = ctx.world.ecs.insert_one(fighter, trail);
         }
         self.trails = load_effect(BLADE_TRAIL).map_err(|err| eprintln!("[sandbox] {err:#}")).ok().map(|effect| {
             [0, 1].map(|seed| {
@@ -1070,6 +1180,18 @@ impl Game for Sandbox {
         self.ground_hit = load_effect(GROUND_HIT).map_err(|err| eprintln!("[sandbox] {err:#}")).ok();
         self.bubbles = load_effect(BUBBLES).map_err(|err| eprintln!("[sandbox] {err:#}")).ok();
 
+        // A generated world's weather turns by itself, unless a capture or the command line
+        // asked for one.
+        let config = ctx.config();
+        if ctx.world.auto_weather.is_none()
+            && config.world.is_some()
+            && config.screenshot.is_none()
+            && config.weather.is_none()
+            && config.time_of_day.is_none()
+        {
+            ctx.world.auto_weather = Some(grimora::AutoWeather::warm(0x5EED_C11A));
+        }
+
         // Hot reloads keep the player where they are; only the first load spawns.
         if self.player.is_none() {
             self.spawn_player(ctx);
@@ -1110,6 +1232,7 @@ impl Game for Sandbox {
             return;
         }
         // With the inventory open the world goes on, but the character takes no orders.
+        self.debug_frame(ctx);
         let panel_open = self.run_panel(ctx);
         let bag_open = panel_open || self.run_bag(ctx);
         let wheel_open = self.run_wheel(ctx, bag_open);
@@ -1146,6 +1269,7 @@ impl Sandbox {
             self.hud.draw(ctx, self.mode == Mode::Fly);
             self.draw_health(ctx);
         }
+        self.aura_keys(ctx);
         if ctx.input.just_pressed(KeyCode::F4) {
             let at = SLOW_MOTION.iter().position(|&s| s == ctx.time.scale()).unwrap_or(0);
             let scale = SLOW_MOTION[(at + 1) % SLOW_MOTION.len()];
@@ -1174,16 +1298,19 @@ impl Sandbox {
         }
 
         self.update_lock(ctx, dt);
-        let dodging = self.update_dodge(ctx, dt);
-        let casting = self.update_spells(ctx, dodging, bag_open, dt);
-        self.update_guns(ctx, dodging, bag_open, dt);
-        self.update_gear(ctx, dodging);
-        let fighting = self.fight(ctx, dodging) || casting;
+        let leaping = self.update_leap(ctx, dt);
+        let dodging = !leaping && self.update_dodge(ctx, dt);
+        let casting = self.update_spells(ctx, dodging || leaping, bag_open, dt);
+        self.update_guns(ctx, dodging || leaping, bag_open, dt);
+        self.update_gear(ctx, dodging || leaping);
+        let fighting = (!leaping && self.fight(ctx, dodging)) || casting;
         self.update_guard(ctx, fighting);
         self.update_breath(ctx, dt);
         let root_motion = ctx.world.get::<Animator>(self.avatar).map_or(Vec3::ZERO, |animator| animator.root_delta());
         let Some(player) = self.player.as_mut() else { return };
-        player.locked = fighting;
+        player.locked = fighting || self.leap.holds();
+        // The leap moves the body itself: a roll out of it would push twice.
+        let root_motion = if leaping { Vec3::ZERO } else { root_motion };
         player.root_motion = Quat::from_rotation_y(player.facing) * root_motion;
         player.water = ctx.world.water_around(player.body.position);
         let was_swimming = player.swimming();
@@ -1215,7 +1342,7 @@ impl Sandbox {
         let moveset = self.moveset(ctx);
         let mut step = None;
         if let Some(animator) = ctx.world.get_mut::<Animator>(self.avatar) {
-            if !fighting {
+            if !fighting && !leaping {
                 // While the camera flies, the keys move the camera and not the character.
                 let still = Input::default();
                 animate(animator, moveset, player, if self.mode == Mode::Play { &ctx.input } else { &still });
@@ -1225,10 +1352,16 @@ impl Sandbox {
             }
         }
         if let Some(volume) = step {
-            let ground = ctx.world.ground_under(&ctx.physics, player.body.position);
+            let foot = player.body.position;
+            let ground = ctx.world.ground_under(&ctx.physics, foot);
             let shod = self.bag.worn_in(grimora::scene::ArmorSlot::Feet).is_some();
             let (sound, pitch) = self.steps.take(shod, ground);
-            ctx.audio.play_pitched(sound, volume, pitch);
+            let depth = Footsteps::wading(ctx, foot);
+            // In the water the bed is felt more than heard, under the splash.
+            ctx.audio.play_pitched(sound, volume * Footsteps::under_water(depth), pitch);
+            if let Some((splash, loud, tone)) = Footsteps::splash(depth, self.steps.count) {
+                ctx.audio.play_pitched(splash, volume * loud, tone);
+            }
         }
 
         let center = player.body.center();
@@ -1273,7 +1406,7 @@ fn animate(animator: &mut Animator, moveset: &Moveset, player: &ThirdPersonContr
     let (landing, landing_rate) = if speed < 0.4 {
         ("jump_land", 1.0)
     } else if speed < (player.walk_speed + player.run_speed) * 0.5 {
-        ("jump_land_walk", (speed / WALK_SPEED).max(0.2))
+        ("jump_land_walk", (speed / SLOW_SPEED).max(0.2))
     } else {
         ("jump_land_run", speed / RUN_SPEED)
     };
@@ -1288,7 +1421,7 @@ fn animate(animator: &mut Animator, moveset: &Moveset, player: &ThirdPersonContr
         && (animator.current() == Some(landing) || animator.time() < 0.10)
     {
         animator.speed = match animator.current() {
-            Some("jump_land_walk") => (speed / WALK_SPEED).max(0.2),
+            Some("jump_land_walk") => (speed / SLOW_SPEED).max(0.2),
             Some("jump_land_run") => (speed / RUN_SPEED).max(0.2),
             _ => 1.0,
         };
@@ -1298,7 +1431,13 @@ fn animate(animator: &mut Animator, moveset: &Moveset, player: &ThirdPersonContr
     // frames, long enough to flash through idle and the walk on the way out of a blow. Slowing
     // down, it follows the speed, so that the feet keep up with the body.
     let wish = player.move_direction(input);
-    let top = if input.action(actions::RUN) && !player.exhausted { player.run_speed } else { player.walk_speed };
+    let top = if input.action(actions::RUN) && !player.exhausted {
+        player.run_speed
+    } else if player.slow_walking {
+        player.slow_speed
+    } else {
+        player.walk_speed
+    };
     let wanted = speed.max(wish.length() * top);
     // Which way it moves, as the character sees it.
     let local = Quat::from_rotation_y(-player.facing) * if wish == Vec3::ZERO { velocity } else { wish };
@@ -1312,8 +1451,10 @@ fn animate(animator: &mut Animator, moveset: &Moveset, player: &ThirdPersonContr
         animator.speed = 1.0;
     } else if player.strafing(input) {
         // Facing one way, it walks in any direction: forwards or backwards, mixed with sideways.
-        let (along, along_speed, along_cycle) = if local.z <= 0.0 {
-            ("sword_walk", WALK_SPEED, WALK_CYCLE)
+        let (along, along_speed, along_cycle) = if local.z <= 0.0 && player.slow_walking {
+            ("sword_walk", SLOW_SPEED, SLOW_CYCLE)
+        } else if local.z <= 0.0 {
+            ("sword_brisk", WALK_SPEED, WALK_CYCLE)
         } else {
             ("sword_back", BACK_SPEED, BACK_CYCLE)
         };
@@ -1326,8 +1467,14 @@ fn animate(animator: &mut Animator, moveset: &Moveset, player: &ThirdPersonContr
     } else if wanted < (player.walk_speed + player.run_speed) * 0.5 {
         // Clips are authored at the controller's walk and run speeds; scale the
         // playback so the feet don't slide while speeding up or slowing down.
-        animator.play_in_step("sword_walk", fade);
-        animator.speed = (speed / WALK_SPEED).clamp(0.5, 1.5);
+        // The slow walk below halfway to the ordinary one, so letting go of Alt speeds the step up.
+        if wanted < (player.slow_speed + player.walk_speed) * 0.5 {
+            animator.play_in_step("sword_walk", fade);
+            animator.speed = (speed / SLOW_SPEED).clamp(0.5, 1.5);
+        } else {
+            animator.play_in_step("sword_brisk", fade);
+            animator.speed = (speed / WALK_SPEED).clamp(0.5, 1.5);
+        }
     } else {
         animator.play_in_step("sword_run", fade);
         animator.speed = (speed / RUN_SPEED).clamp(0.5, 1.5);
@@ -1376,6 +1523,34 @@ impl Footsteps {
         let feet = if shod { "bota" } else { "descalco" };
         let path = format!("{}/{feet}/{}/passo_{:02}.wav", Self::FOLDER, ground.folder(), take + 1);
         (path, [1.0, 0.97, 1.03][self.count % 3])
+    }
+
+    /// Recordings of a foot going into water.
+    const SPLASHES: [&str; 2] = [
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/sounds/splash_1.wav"),
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/sounds/splash_2.wav"),
+    ];
+    /// Water shallower than this at the foot is only wet ground.
+    const WADE_FROM: f32 = 0.03;
+
+    /// How deep the calm water is over a foot at `foot`, if any is.
+    fn wading(ctx: &Context, foot: Vec3) -> f32 {
+        ctx.world.water_around(foot).map_or(0.0, |water| (water.level - foot.y).max(0.0))
+    }
+
+    /// How much of a step on the bed comes through the water over it.
+    fn under_water(depth: f32) -> f32 {
+        if depth < Self::WADE_FROM { 1.0 } else { (1.0 - depth * 1.6).max(0.3) }
+    }
+
+    /// The splash of a foot `depth` meters into water: louder and lower the deeper it goes.
+    fn splash(depth: f32, take: usize) -> Option<(&'static str, f32, f32)> {
+        if depth < Self::WADE_FROM {
+            return None;
+        }
+        let loud = (0.35 + depth * 1.4).min(1.1);
+        let tone = (1.25 - depth * 0.6).max(0.8) * [1.0, 0.94, 1.06][take % 3];
+        Some((Self::SPLASHES[take % 2], loud, tone))
     }
 
     /// Where a step by someone else on this ground is. They all wear boots for now.
@@ -1458,7 +1633,7 @@ mod locomotion_tests {
     fn movesets_name_clips_the_model_has() {
         let mesh = grimora::scene::load_model(WANDERER.as_ref(), grimora::scene::DEFAULT_MAX_TEXTURE_SIZE).unwrap();
         let skeleton = mesh.skeleton.unwrap();
-        for moveset in [&LIGHT, &HEAVY, &GUN] {
+        for moveset in [&LIGHT, &HEAVY, &KATANA, &GUN] {
             let guards = moveset.guards.iter().flat_map(|(stance, block)| [*stance, *block]);
             for clip in guards.chain([moveset.idle]).chain(moveset.carry) {
                 assert!(skeleton.clip(clip).is_some(), "no clip {clip}");
@@ -1467,6 +1642,7 @@ mod locomotion_tests {
         let weapon = |clip: &str| Weapon { clip: clip.into(), ..Default::default() };
         assert_eq!(Moveset::of(&weapon("heavy_1")).idle, "heavy_idle");
         assert_eq!(Moveset::of(&weapon("sword_1")).idle, "sword_idle");
+        assert_eq!(Moveset::of(&weapon("katana_1")).idle, "katana_idle");
     }
 
     #[test]
@@ -1475,7 +1651,7 @@ mod locomotion_tests {
         let skeleton = mesh.skeleton.unwrap();
         for (speed, landing, recovered) in [
             (0.0, "jump_land", "sword_idle"),
-            (WALK_SPEED, "jump_land_walk", "sword_walk"),
+            (WALK_SPEED, "jump_land_walk", "sword_brisk"),
             (RUN_SPEED, "jump_land_run", "sword_run"),
         ] {
             let mut player = ThirdPersonController::new(Vec3::ZERO, 0.0);

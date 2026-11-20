@@ -6,6 +6,7 @@
 //! and pushes dynamic bodies out of its way.
 
 mod nav;
+mod ragdoll;
 
 use grimora_core::{Quat, Transform, Vec3};
 use grimora_scene::{BodyDesc, ColliderShape, Scene};
@@ -19,6 +20,7 @@ use rapier3d::prelude::{
 };
 
 pub use nav::{NavPath, NavShape};
+pub use ragdoll::{JointHandle, LimbDesc, LimbShape, SocketDesc};
 pub use rapier3d;
 pub use rapier3d::prelude::ColliderHandle;
 
@@ -65,9 +67,18 @@ fn rotation(q: Quat) -> Rotation {
 /// The collision group of agents' capsules.
 const AGENTS: Group = Group::GROUP_32;
 
-/// What path searches and sight lines look at: everything but agents.
+/// The collision group of doors ([`Physics::add_door`]): solid to the player, but path
+/// searches and characters with [`CharacterBody::through_doors`] pass, and the door opens.
+const DOORS: Group = Group::GROUP_31;
+
+/// What path searches and sight lines look at: everything but agents, doors and the limbs
+/// of ragdolls.
 fn scenery() -> QueryFilter<'static> {
-    let groups = InteractionGroups::new(Group::ALL, Group::ALL.difference(AGENTS), InteractionTestMode::And);
+    let groups = InteractionGroups::new(
+        Group::ALL,
+        Group::ALL.difference(AGENTS).difference(DOORS).difference(ragdoll::RAGDOLLS),
+        InteractionTestMode::And,
+    );
     QueryFilter::default().groups(groups)
 }
 
@@ -78,6 +89,8 @@ pub struct RayHit {
     pub distance: f32,
     pub point: Vec3,
     pub normal: Vec3,
+    /// Which part of the collider was hit: the triangle of a triangle mesh, else 0.
+    pub triangle: u32,
 }
 
 /// A body moved by the simulation, from [`Physics::add_body`].
@@ -147,6 +160,16 @@ impl Physics {
         Some(self.world.insert_collider(builder.position(pose), None))
     }
 
+    /// Like [`Physics::add_static`], for a door: path searches and characters that go
+    /// [`CharacterBody::through_doors`] ignore it.
+    pub fn add_door(&mut self, shape: &ColliderShape, transform: &Transform) -> Option<ColliderHandle> {
+        let (builder, center) = collider(shape, transform)?;
+        let position = transform.position + transform.rotation * center;
+        let pose = Pose::from_parts(to_rapier(position), rotation(transform.rotation));
+        let groups = InteractionGroups::new(DOORS, Group::ALL, InteractionTestMode::And);
+        Some(self.world.insert_collider(builder.position(pose).collision_groups(groups), None))
+    }
+
     /// Adds an object's collider moving as `body` says. Static bodies become fixed
     /// geometry (like [`Physics::add_static`]) and return `None`; dynamic ones return
     /// a handle for reading their pose back. Triangle meshes can't be dynamic, so
@@ -197,6 +220,13 @@ impl Physics {
     pub fn move_agent(&mut self, agent: ColliderHandle, center: Vec3) {
         if let Some(collider) = self.world.colliders.get_mut(agent) {
             collider.set_translation(to_rapier(center));
+        }
+    }
+
+    /// Moves a static collider: a door turning on its hinge. `position` is the shape's middle.
+    pub fn set_collider_pose(&mut self, collider: ColliderHandle, position: Vec3, turn: Quat) {
+        if let Some(collider) = self.world.colliders.get_mut(collider) {
+            collider.set_position(Pose::from_parts(to_rapier(position), rotation(turn)));
         }
     }
 
@@ -347,6 +377,7 @@ impl Physics {
             distance: hit.time_of_impact,
             point: origin + direction * hit.time_of_impact,
             normal: from_rapier(hit.normal),
+            triangle: hit.subshape,
         })
     }
 
@@ -388,6 +419,9 @@ pub struct CharacterBody {
     pub mass: f32,
     /// A collider it passes through: its own capsule, if it has one.
     pub ignore: Option<ColliderHandle>,
+    /// Walks through doors ([`Physics::add_door`]), which open for it, and other agents:
+    /// villagers.
+    pub through_doors: bool,
     pub controller: KinematicCharacterController,
 }
 
@@ -405,7 +439,7 @@ impl CharacterBody {
             snap_to_ground: Some(CharacterLength::Absolute(0.3)),
             ..Default::default()
         };
-        Self { position, radius, height, grounded: false, mass: 80.0, ignore: None, controller }
+        Self { position, radius, height, grounded: false, mass: 80.0, ignore: None, through_doors: false, controller }
     }
 
     /// World position of the capsule's center.
@@ -418,10 +452,18 @@ impl CharacterBody {
     pub fn move_and_slide(&mut self, physics: &mut Physics, translation: Vec3, dt: f32) -> Vec3 {
         let shape = Capsule::new_y((self.height * 0.5 - self.radius).max(0.01), self.radius);
         let mut pushes = Vec::new();
-        let filter = match self.ignore {
+        let mut filter = match self.ignore {
             Some(collider) => QueryFilter::default().exclude_collider(collider),
             None => QueryFilter::default(),
         };
+        // Bodies on the ground don't trip anyone up or get climbed.
+        let mut solid = Group::ALL.difference(ragdoll::RAGDOLLS);
+        if self.through_doors {
+            // Villagers also pass through each other (they steer apart on their own):
+            // bumping capsules jammed them in doorways.
+            solid = solid.difference(DOORS).difference(AGENTS);
+        }
+        filter = filter.groups(InteractionGroups::new(Group::ALL, solid, InteractionTestMode::And));
         let movement = self.controller.move_shape(
             dt,
             &physics.world.query_pipeline_with_filter(filter),

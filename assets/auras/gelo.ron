@@ -1,0 +1,21 @@
+// Frost spirit: the body turns to translucent ice-light with currents inside, and strands
+// of cold stream off it with the wind, breaking into glittering motes.
+(
+    name: "Gelo",
+    follow: 0.75,
+    ramp: [(0.25, 0.5, 0.8, 1.2), (0.55, 0.82, 1.0, 3.0), (0.85, 0.96, 1.0, 6.0), (1.0, 1.0, 1.0, 10.0)],
+    bands: 0.0,
+    skin: [
+        (pattern: Ghost, scale: 4.0, speed: 0.4, warp: 0.7, outline: 1.4, edge: 1.6, cover: 0.8, body: 1.1, glow: 1.4),
+    ],
+    wisps: [
+        // strands streaming back
+        (rate: 120.0, size: 0.05, tall: 0.0, life: (0.6, 1.2), push: 0.4, rise: 0.2, curl: 1.4, curl_scale: 0.5, trail: 0.6, shape: Soft, opacity: 0.8, additive: 1.0, grain: 0.3, warp: 0.2, windy: 1.2),
+        // a cold breath
+        (rate: 24.0, size: 0.2, tall: 0.0, life: (0.8, 1.4), push: 0.15, rise: -0.3, curl: 1.0, curl_scale: 0.5, shape: Soft, opacity: 0.2, additive: 0.6, grain: 0.7, warp: 0.5, windy: 1.0),
+    ],
+    sparks: (rate: 30.0, size: 0.018, speed: (0.2, 0.8), rise: 0.1, curl: 1.5, life: (0.6, 1.4), shape: Star, twinkle: 0.8, tints: [(0.8, 0.95, 1.0, 1.0), (0.5, 0.8, 1.0, 1.0)], glow: 6.0),
+    hands: (rate: 8.0, size: 0.07, sparks: 6.0),
+    light: (color: (0.6, 0.85, 1.0), intensity: 2.2, radius: 5.0, linger: 0.3),
+    burst: (wave: 5.0, streaks: 30, flash: 9.0),
+)

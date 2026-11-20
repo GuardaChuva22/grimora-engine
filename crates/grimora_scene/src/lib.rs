@@ -4,12 +4,14 @@
 //! object instances, lights and a camera that the engine can render.
 //! See `assets/scenes/sandbox.ron` for a commented example.
 
+mod aura;
 mod collider;
 mod combat;
 mod effect;
 mod fauna;
 pub mod grip;
 mod ground;
+mod house;
 mod item;
 mod keys;
 mod model;
@@ -33,6 +35,7 @@ use anyhow::{Context as _, Result};
 use grimora_core::{Camera, DayCycleDesc, Environment, MeshData, PointLight, SkyTextures, Transform, Vec2, Vec3};
 use serde::{Deserialize, Serialize};
 
+pub use aura::{AuraDesc, load_aura};
 pub use collider::{BodyDesc, ColliderDesc, ColliderShape};
 pub use combat::{Blade, CombatDesc, GunDesc, GunGrip, ReloadDesc, Weapon};
 pub use effect::{EffectDesc, SceneEffect, load_effect, parse_effect};
@@ -43,11 +46,15 @@ pub use fauna::{
 };
 use grimora_core::{Sea, WaterBody, WaterShape, Waters};
 pub use ground::{Ground, MUD_FROM, TerrainGrounds};
+pub use house::{
+    House, HouseDesc, HouseDoor, HouseProp, RoomDesc, RoomRole, Trade, Use, UsePoint, build_house, use_points,
+};
 pub use item::{
     ArmorSlot, ContainerDesc, ItemCatalog, ItemDesc, ItemKind, ObjectItems, PickupDesc, SpellDesc, StowBook,
     StowFamily, StowLie, StowPass, StowPlace,
 };
 pub use keys::{JointKey, KeyClip, KeyFile, bake_keys, parse_keys};
+pub use model::load_model_split;
 pub use model::{DEFAULT_MAX_TEXTURE_SIZE, load_model, load_pose_clips, pose_clips_dir};
 pub use npc::{Behavior, Notice, NpcDesc, Reaction};
 pub use rng::{Rng, fbm, value_noise};
@@ -59,7 +66,9 @@ pub use terrain::{Pond, Terrain, TerrainDesc, TerrainTextures};
 use texture::{Picture, apply_texture, texture_or_log};
 pub use texture::{TextureDesc, WaterDesc, load_texture, water_mesh, wrap_in_texture};
 pub use trigger::{Interactable, SceneTrigger, Trigger, TriggerDesc, TriggerShape};
-pub use water::{FloatCell, FloatDesc, FloatHull, RiverDesc, RiverFall, fall_profile, river_falls, river_mesh, water_material};
+pub use water::{
+    FloatCell, FloatDesc, FloatHull, RiverDesc, RiverFall, fall_profile, river_falls, river_mesh, water_material,
+};
 
 /// The on-disk scene format.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -332,7 +341,12 @@ pub struct Scene {
 }
 
 /// How wide a river's half is at the scale its fall's effect file is written for, in meters.
-pub const FALL_EFFECT_WIDTH: f32 = 6.0;
+pub const FALL_EFFECT_WIDTH: f32 = 2.5;
+
+/// The scale of a fall's effect for a fall this wide: never so small the mist is a wisp.
+pub fn fall_effect_scale(half_width: f32) -> f32 {
+    (half_width / FALL_EFFECT_WIDTH).clamp(0.7, 2.6)
+}
 
 /// Terrain render chunks are this many grid cells on a side.
 const TERRAIN_CHUNK: usize = 32;
@@ -679,11 +693,8 @@ impl<'a> Builder<'a> {
     /// What is seen and heard where a river lands: mist as wide as the fall, and its roar.
     fn add_fall(&mut self, river: &RiverDesc, fall: &water::RiverFall) {
         if let Some(path) = &river.fall_effect {
-            let desc = EffectDesc {
-                path: path.clone(),
-                position: Vec3::ZERO,
-                scale: (fall.half_width / FALL_EFFECT_WIDTH).max(0.3),
-            };
+            let desc =
+                EffectDesc { path: path.clone(), position: Vec3::ZERO, scale: fall_effect_scale(fall.half_width) };
             if let Some(effect) = self.effect(&desc) {
                 self.effects.push((Transform::from_position(fall.foot), effect));
             }
@@ -789,7 +800,10 @@ impl<'a> Builder<'a> {
                 combat: obj.combat.clone(),
                 items,
                 float,
-                ground: obj.ground.or_else(|| obj.texture.as_ref().and_then(|t| Ground::from_picture(&t.path))),
+                ground: obj
+                    .ground
+                    .or_else(|| obj.texture.as_ref().and_then(|t| Ground::from_picture(&t.path)))
+                    .or_else(|| Ground::of_mesh(&self.meshes[mesh])),
             });
             if let Some(sound) = &obj.sound {
                 self.sounds.push(sound.attached(&dir, &transform));
@@ -898,7 +912,7 @@ impl<'a> Builder<'a> {
                     combat: None,
                     items: None,
                     float: None,
-                    ground: None,
+                    ground: Ground::of_mesh(&self.meshes[mesh]),
                 };
                 if self.terrain.is_some_and(|t| t.in_pond(x, z) || t.on_path(x, z, scatter.path_margin)) {
                     continue;
